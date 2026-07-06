@@ -1,26 +1,22 @@
 """
-Superfermion Experiment — Experiment tracking and model registry.
+Superfermion Experiment — protocol-based experiment tracking.
 
-Track metrics, parameters, circuits, and results across hundreds of runs.
+Usage::
 
-Usage:
-    >>> from superfermion.experiment import Tracker, ExperimentRun
-    >>> tracker = Tracker("my_experiment")
-    >>> with tracker.run("run_001") as run:
-    ...     run.log_param("lr", 0.01)
-    ...     run.log_metric("loss", 0.5)
+    import superfermion as sf
+    from superfermion.experiment import LocalTracker
+
+    with sf.experiment("my-experiment"):
+        result = sf.run(circuit, device="cpu")
 """
 
-from __future__ import annotations
-
-from superfermion.experiment.tracker import (
-    Tracker, ExperimentRun, RunStatus,
-)
-from superfermion.experiment.registry import (
-    ModelRegistry, RegisteredModel,
-)
+from superfermion.experiment.protocols import TrackerProtocol
+from superfermion.experiment.context import experiment, _get_active_tracker
+from superfermion.experiment.local_tracker import LocalTracker
 
 __all__ = [
-    "Tracker", "ExperimentRun", "RunStatus",
-    "ModelRegistry", "RegisteredModel",
+    "TrackerProtocol",
+    "experiment",
+    "LocalTracker",
+    "_get_active_tracker",
 ]

@@ -141,6 +141,5 @@ class SingularityBackend(Backend):
 
 
 def register_singularity():
-    from superfermion.backends.registry import BackendRegistry
-    backend = SingularityBackend()
-    BackendRegistry.register("singularity", backend)
+    from superfermion.backends.factory import register_backend
+    register_backend("singularity", SingularityBackend)

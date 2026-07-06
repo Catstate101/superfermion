@@ -491,6 +491,35 @@ class Circuit:
         return self._add_gate("RESET", [qubit])
 
     # ───────────────────────────────────────────────────────
+    # Convenience execution
+    # ───────────────────────────────────────────────────────
+
+    def run(self, device: str = "cpu", shots: int = 1000, **kwargs) -> Any:
+        """Execute this circuit via ``sf.run()`` and return the result.
+
+        A convenience method equivalent to
+        ``sf.run(circuit, device=device, shots=shots, **kwargs)``.
+        """
+        from superfermion.runner import run as sf_run
+        return sf_run(self, device=device, shots=shots, **kwargs)
+
+    def build(self) -> Circuit:
+        """Validate and finalize the circuit for execution.
+
+        Raises ``RuntimeError`` if the circuit has unbound symbolic parameters.
+
+        Returns:
+            ``self``, for chaining.
+        """
+        if self.n_parameters > 0:
+            unbound = self.parameters
+            raise RuntimeError(
+                f"Circuit has {len(unbound)} unbound parameter(s): {unbound}\n"
+                f"  Fix: Call circuit.bind({{{unbound[0]!r}: 0.5, ...}}) before .build()"
+            )
+        return self
+
+    # ───────────────────────────────────────────────────────
     # Parameter binding
     # ───────────────────────────────────────────────────────
 

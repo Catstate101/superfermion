@@ -21,7 +21,7 @@ from superfermion.compiler.advanced import (
     PauliTwirlingPass,
 )
 from superfermion.compiler.advanced_passes import CommutationPass
-from superfermion.runtime.specs import HardwareSpec
+from superfermion.compiler.specs import HardwareSpec
 
 
 class PassManager:

@@ -8,45 +8,15 @@ from __future__ import annotations
 
 __all__ = [
     "QuantumLayer",
-    "Linear",
-    "Conv", "Conv1D", "Conv2D", "Conv3D",
-    "LayerNorm", "BatchNorm", "GroupNorm",
-    "relu", "gelu", "silu", "sigmoid", "softmax", "QAct",
-    "Dropout", "Embedding",
-    "LSTM", "GRU", "S4",
-    "MultiHeadAttention", "FlashAttention",
-    "TransformerBlock",
     "TorchQuantumLayer", "torch_quantum_layer",
     "TFQuantumLayer", "tf_quantum_layer",
 ]
 
 _LAZY_MAP = {
-    "QuantumLayer":         "superfermion.nn.quantum_layer",
-    "Linear":               "superfermion.nn.linear",
-    "Conv":                 "superfermion.nn.conv",
-    "Conv1D":               "superfermion.nn.conv",
-    "Conv2D":               "superfermion.nn.conv",
-    "Conv3D":               "superfermion.nn.conv",
-    "LayerNorm":            "superfermion.nn.norm",
-    "BatchNorm":            "superfermion.nn.norm",
-    "GroupNorm":            "superfermion.nn.norm",
-    "relu":                 "superfermion.nn.activation",
-    "gelu":                 "superfermion.nn.activation",
-    "silu":                 "superfermion.nn.activation",
-    "sigmoid":              "superfermion.nn.activation",
-    "softmax":              "superfermion.nn.activation",
-    "QAct":                 "superfermion.nn.activation",
-    "Dropout":              "superfermion.nn.dropout",
-    "Embedding":            "superfermion.nn.embedding",
-    "LSTM":                 "superfermion.nn.recurrent",
-    "GRU":                  "superfermion.nn.recurrent",
-    "S4":                   "superfermion.nn.recurrent",
-    "MultiHeadAttention":   "superfermion.nn.attention",
-    "FlashAttention":       "superfermion.nn.attention",
-    "TransformerBlock":     "superfermion.nn.transformer",
+    "QuantumLayer": "superfermion.nn.quantum_layer",
 }
 
-# --- Optional framework layers ---
+
 def _try_load_torch():
     """Lazy-load TorchQuantumLayer (requires torch)."""
     try:

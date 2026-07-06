@@ -74,7 +74,7 @@ class VQE:
         self.shots = shots
         self._param_names: List[str] = list(ansatz.parameters)
 
-        from superfermion.backends.registry import get_backend
+        from superfermion.backends.factory import get_backend
         self._sim = get_backend(backend)
 
     def _energy(self, param_values: np.ndarray) -> float:
@@ -223,7 +223,7 @@ class QAOA:
         # Build the cost Hamiltonian: H_C = Σ w_{ij}/2 * (I - Z_iZ_j)
         self.cost_hamiltonian = self._build_cost_hamiltonian()
 
-        from superfermion.backends.registry import get_backend
+        from superfermion.backends.factory import get_backend
         self._sim = get_backend(backend)
 
     def _build_cost_hamiltonian(self) -> SparsePauliOp:

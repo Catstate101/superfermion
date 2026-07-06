@@ -56,7 +56,7 @@ def execute_circuit(circuit: Circuit, *params: float, backend: str = "statevecto
         actual_params = params
 
     if backend in ("jax", "singularity", "jax_mps"):
-        from superfermion.backends.registry import get_backend
+        from superfermion.backends.factory import get_backend
         sim = get_backend(backend)
         p_names = circuit.parameters
         p_dict = {name: val for name, val in zip(p_names, actual_params)}
@@ -280,7 +280,7 @@ def make_dm_expectation(circuit: Circuit, observable, backend_name: str = "densi
 
     def _eval_concrete(params_np):
         """Evaluate expectation with concrete numpy params (runs on host)."""
-        from superfermion.backends.registry import get_backend
+        from superfermion.backends.factory import get_backend
         backend = get_backend(backend_name)
         p_dict = {n: float(p) for n, p in zip(param_names, params_np)}
         bound = circuit.bind(p_dict)
@@ -288,7 +288,7 @@ def make_dm_expectation(circuit: Circuit, observable, backend_name: str = "densi
 
     def _grad_concrete(params_np):
         """Parameter-shift gradient with concrete numpy params."""
-        from superfermion.backends.registry import get_backend
+        from superfermion.backends.factory import get_backend
         backend = get_backend(backend_name)
         shift = float(np.pi / 2.0)
         grads = np.zeros(n_params, dtype=np.float32)

@@ -398,8 +398,8 @@ def to_braket(circuit: sf.Circuit) -> Any:
 
     Requires: pip install amazon-braket-sdk
     """
-    from superfermion.runtime.providers.aws import to_braket as _tb
-    return _tb(circuit)
+    from superfermion.devices.braket import _to_braket
+    return _to_braket(circuit)
 
 
 def to_qasm(circuit: sf.Circuit) -> str:
@@ -724,7 +724,7 @@ def to_pennylane(circuit: sf.Circuit) -> Any:
 
 __all__ = [
     "from_qiskit",
-    "to_qiskit", 
+    "to_qiskit",
     "from_pennylane",
     "to_pennylane",
     "from_cirq",
@@ -732,4 +732,5 @@ __all__ = [
     "to_ionq",
     "to_braket",
     "to_qasm",
+    "from_qasm",
 ]

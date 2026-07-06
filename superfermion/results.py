@@ -69,6 +69,36 @@ class RunResult:
             print("Matplotlib not installed. Summary:")
             print(self.counts or self.probabilities)
 
+    def to_dict(self) -> dict:
+        """Serialize the result to a plain dictionary."""
+        d: dict = {
+            "counts": dict(self.counts) if self.counts else {},
+            "probabilities": dict(self.probabilities) if self.probabilities else {},
+            "shots": self.shots,
+            "metadata": dict(self.metadata) if self.metadata else {},
+        }
+        if self.statevector is not None:
+            sv = np.asarray(self.statevector, dtype=np.complex128)
+            d["statevector_real"] = sv.real.tolist()
+            d["statevector_imag"] = sv.imag.tolist()
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RunResult":
+        """Reconstruct a ``RunResult`` from a dictionary."""
+        sv = None
+        if "statevector_real" in d:
+            real = np.array(d["statevector_real"], dtype=np.float64)
+            imag = np.array(d.get("statevector_imag", np.zeros_like(real)), dtype=np.float64)
+            sv = real + 1j * imag
+        return cls(
+            counts=d.get("counts", {}),
+            probabilities=d.get("probabilities", {}),
+            statevector=sv,
+            shots=d.get("shots", 0),
+            metadata=d.get("metadata", {}),
+        )
+
     def __repr__(self) -> str:
         return (
             f"RunResult(shots={self.shots}, "

@@ -87,9 +87,6 @@ all = [
     "superfermion[qml,dev,docs,gpu,qpu,viz,chemistry,benchmarks,ml]",
 ]
 
-[project.scripts]
-sf = "superfermion.cli:main"
-
 [project.urls]
 Homepage = "https://superfermion.io"
 Documentation = "https://docs.superfermion.io"
@@ -119,21 +116,14 @@ warn_unused_configs = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 filterwarnings = [
-    # Internal: test_complex_scientific tests return report strings for their
-    # script-style `check()` wrapper. Harmless under pytest.
     "ignore::pytest.PytestReturnNotNoneWarning",
     # Upstream Qiskit 2.1 → 3.0 migration: class-form feature maps / n-local
-    # circuits are being replaced by functions. Not our code.
+    # circuits are being replaced by functions.
     "ignore:The class ``qiskit\\.circuit\\.library.*:DeprecationWarning",
     # Upstream flax: SelfAttention → MultiHeadDotProductAttention migration.
     "ignore:SelfAttention will be deprecated soon.*:DeprecationWarning",
-    # Upstream python_multipart (FastAPI transitive dep).
-    "ignore::PendingDeprecationWarning:python_multipart.*",
     # Upstream PennyLane: shots-on-device → set_shots transform migration.
     "ignore:Setting shots on device is deprecated.*",
-    # Upstream scipy 1.18: L-BFGS-B `disp`/`iprint` deprecation (triggered by
-    # qiskit_algorithms' L_BFGS_B wrapper). Message literally starts with
-    # "scipy.optimize: The `disp`..." — match the second half to avoid the
-    # colon collision with pytest's filterwarnings field separator.
+    # Upstream scipy 1.18: L-BFGS-B `disp`/`iprint` deprecation.
     "ignore:.*`disp` and `iprint` options.*:DeprecationWarning",
 ]

@@ -130,7 +130,7 @@ class SFEstimator:
         self.shots = shots
         self.seed = seed
 
-        from superfermion.backends.registry import get_backend
+        from superfermion.backends.factory import get_backend
         self._sim = get_backend(backend)
 
     def run(
@@ -219,7 +219,7 @@ class SFSampler:
         self.default_shots = default_shots
         self.seed = seed
 
-        from superfermion.backends.registry import get_backend
+        from superfermion.backends.factory import get_backend
         self._sim = get_backend(backend)
 
     def run(

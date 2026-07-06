@@ -1,15 +1,20 @@
 """
 Superfermion — One framework. Every qubit. Every gradient. Every model.
 
-A hardware-agnostic quantum-classical framework that makes quantum circuits
-differentiable, compilable to any hardware, and trainable end-to-end with JAX.
+A hardware-agnostic quantum computation framework that makes quantum circuits
+differentiable, compilable to any hardware, and trainable end-to-end.
 
-Quick Start:
-    >>> import superfermion as sf
-    >>> circuit = sf.Circuit(2).h(0).cnot(0, 1)
-    >>> result = sf.run(circuit, backend="simulator", shots=1000)
-    >>> print(result.counts)
-    {'00': 503, '11': 497}
+Quick Start::
+
+    import superfermion as sf
+
+    circuit = sf.Circuit(2).h(0).cnot(0, 1)
+    result = sf.run(circuit, device="cpu", shots=1000)
+    print(result.counts)   # {'00': 503, '11': 497}
+
+    # With experiment tracking:
+    with sf.experiment("bell-test"):
+        result = sf.run(circuit, device="cpu")
 
 Heavy dependencies (jax, flax, optax, scipy, torch, tensorflow) are loaded
 lazily on first access via PEP 562 __getattr__.  The core package imports
@@ -26,32 +31,39 @@ from superfermion.circuit import Circuit
 from superfermion.runner import run
 from superfermion.compiler.manager import compile
 from superfermion.parameters import param
-from superfermion.backends import list_backends, get_backend, BackendName
-from superfermion.utils.analytics import estimate_cost, benchmark
+from superfermion.results import RunResult
+from superfermion.backends.factory import get_backend, list_backends
 
-from superfermion import utils, runtime, security, serialization, telemetry, config, data, experiment, pulse
+from superfermion.devices import DeviceExecutor, DeviceCapabilities
+from superfermion.experiment.protocols import TrackerProtocol
+from superfermion.experiment.context import experiment
+from superfermion.experiment.local_tracker import LocalTracker
 
 from superfermion.observables.core import PauliString, SparsePauliOp, Hamiltonian, expval
 from superfermion.primitives import SFEstimator, SFSampler
 
+from superfermion import utils, serialization, experiment as _experiment_mod, pulse
+
 # ── Lazy-loading config (delegated to LazyModule) ──────────────────────
 _LAZY_SUBMODULES = {
-    "qml": "superfermion.qml", "nn": "superfermion.nn",
-    "qec": "superfermion.qec", "mitigation": "superfermion.mitigation",
-    "chemistry": "superfermion.chemistry", "classical": "superfermion.classical",
+    "qml": "superfermion.qml",
+    "nn": "superfermion.nn",
+    "qec": "superfermion.qec",
+    "mitigation": "superfermion.mitigation",
+    "chemistry": "superfermion.chemistry",
     "algorithms": "superfermion.algorithms",
 }
 
 _LAZY_ATTRS = {
-    "train": "superfermion.train", "Pipeline": "superfermion.pipeline",
-    "VQE": "superfermion.algorithms.variational", "QAOA": "superfermion.algorithms.variational",
+    "VQE": "superfermion.algorithms.variational",
+    "QAOA": "superfermion.algorithms.variational",
     "adjoint_grad_vector": "superfermion.qml.gradient.adjoint",
     "param_shift_grad": "superfermion.qml.gradient.parameter_shift",
     "param_shift_grad_vector": "superfermion.qml.gradient.parameter_shift",
     "finite_diff_grad": "superfermion.qml.gradient.parameter_shift",
-    "SPSAGradient": "superfermion.qml.gradient.spsa",
-    "QNGradient": "superfermion.qml.gradient.qng",
-    "RiemannianGradient": "superfermion.qml.gradient.riemannian",
+    "spsa_grad": "superfermion.qml.gradient.spsa",
+    "qng_step": "superfermion.qml.gradient.qng",
+    "riemannian_gradient": "superfermion.qml.gradient.riemannian",
     "execute_circuit": "superfermion.qml.gradient.core",
     "circuit_to_jax": "superfermion.qml.gradient.core",
     "AngleEmbedding": "superfermion.qml.templates",
@@ -71,34 +83,26 @@ _LAZY_ATTRS = {
     "NeuralDecoder": "superfermion.qec.decoders",
     "QECManager": "superfermion.qec.manager",
     "FermionicOperator": "superfermion.chemistry.hamiltonians",
-    "JordanWigner": "superfermion.chemistry.hamiltonians",
-    "BravyiKitaev": "superfermion.chemistry.hamiltonians",
-    "UCCSD": "superfermion.chemistry.ansatz",
+    "uccsd_ansatz": "superfermion.chemistry.ansatz",
     "PySCFBridge": "superfermion.chemistry.pyscf_bridge",
-    "ClassicalNN": "superfermion.classical.nn",
-    "JAX_SVM": "superfermion.classical.ml",
-    "JAX_Regression": "superfermion.classical.ml",
-    "ClassicalTransformer": "superfermion.classical.nlp",
-    "ClassicalLLM": "superfermion.classical.nlp",
 }
 
 __all__ = [
-    "Circuit", "run", "compile", "param", "list_backends", "get_backend", "BackendName",
-    "estimate_cost", "benchmark",
-    "qml", "nn", "qec", "mitigation", "utils", "runtime", "chemistry", "classical",
-    "security", "serialization", "telemetry", "config", "data", "experiment", "pulse",
-    "train", "Pipeline", "VQE", "QAOA",
-    "adjoint_grad_vector", "param_shift_grad", "param_shift_grad_vector", "finite_diff_grad",
-    "SPSAGradient", "QNGradient", "RiemannianGradient",
-    "execute_circuit", "circuit_to_jax",
-    "AngleEmbedding", "ZZFeatureMap", "BasicEntanglerLayers", "StronglyEntanglingLayers",
-    "HardwareEfficientAnsatz", "TwoLocal", "DataReuploadingCircuit",
-    "QuantumLayer", "TorchQuantumLayer", "TFQuantumLayer",
-    "SurfaceCode2D", "MWPMDecoder", "UnionFindDecoder", "BPOSD_Decoder", "NeuralDecoder", "QECManager",
-    "FermionicOperator", "JordanWigner", "BravyiKitaev", "UCCSD", "PySCFBridge",
-    "ClassicalNN", "JAX_SVM", "JAX_Regression", "ClassicalTransformer", "ClassicalLLM",
+    # Core
+    "Circuit", "run", "compile", "param", "RunResult",
+    "list_backends", "get_backend",
+    # Device protocol
+    "DeviceExecutor", "DeviceCapabilities",
+    # Experiment tracking
+    "TrackerProtocol", "experiment", "LocalTracker",
+    # Observables & primitives
     "PauliString", "SparsePauliOp", "Hamiltonian", "expval",
     "SFEstimator", "SFSampler",
+    # Submodules (eager)
+    "utils", "serialization", "pulse",
+    # Submodules (lazy)
+    "qml", "nn", "qec", "mitigation", "chemistry", "algorithms",
+    # Version
     "__version__",
 ]
 

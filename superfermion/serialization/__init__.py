@@ -15,9 +15,6 @@ from __future__ import annotations
 from superfermion.serialization.circuit_format import (
     save_circuit, load_circuit, circuit_to_bytes, circuit_from_bytes,
 )
-from superfermion.serialization.model_format import (
-    save_model, load_model, ModelCheckpoint,
-)
 from superfermion.serialization.manifest import (
     ReproducibilityManifest, create_manifest,
 )
@@ -27,7 +24,6 @@ from superfermion.serialization.qasm_roundtrip import (
 
 __all__ = [
     "save_circuit", "load_circuit", "circuit_to_bytes", "circuit_from_bytes",
-    "save_model", "load_model", "ModelCheckpoint",
     "ReproducibilityManifest", "create_manifest",
     "to_qasm3", "from_qasm3", "verify_qasm3_roundtrip",
 ]

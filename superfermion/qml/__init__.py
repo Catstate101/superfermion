@@ -19,7 +19,6 @@ __all__ = [
     "ansatz",
     "encoding",
     "measurements",
-    "quantum_ai",
     "fidelity",
     "expval",
     "expectation_value",
@@ -31,11 +30,6 @@ __all__ = [
     "participation_ratio",
     "compute_all_metrics",
     "partial_trace",
-    "QuantumCircuitLayer",
-    "QuantumGNNLayer",
-    "QuantumGAN",
-    "QuantumVAE",
-    "QuantumNLP",
     "mitigation",
 ]
 
@@ -55,7 +49,6 @@ _LAZY_MAP = {
     "ansatz":       ("superfermion.qml.ansatz", None),
     "encoding":     ("superfermion.qml.encoding", None),
     "measurements": ("superfermion.qml.measurements", None),
-    "quantum_ai":   ("superfermion.qml.quantum_ai", None),
     "fidelity":     ("superfermion.qml.fidelity", None),
     "expval":                   "superfermion.qml.measurements",
     "expectation_value":        "superfermion.qml.measurements",
@@ -67,11 +60,6 @@ _LAZY_MAP = {
     "participation_ratio":      "superfermion.qml.measurements",
     "compute_all_metrics":      "superfermion.qml.measurements",
     "partial_trace":            "superfermion.qml.measurements",
-    "QuantumCircuitLayer":  "superfermion.qml.quantum_ai",
-    "QuantumGNNLayer":      "superfermion.qml.quantum_ai",
-    "QuantumGAN":           "superfermion.qml.quantum_ai",
-    "QuantumVAE":           "superfermion.qml.quantum_ai",
-    "QuantumNLP":           "superfermion.qml.quantum_ai",
     "mitigation": ("superfermion.mitigation", None),
 }
 

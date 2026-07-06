@@ -112,15 +112,20 @@ class ProviderNotConnectedError(SuperfermionError):
         msg = f"Not connected to {provider.upper()} provider."
         if not instructions:
             if provider.lower() == "ibm":
-                instructions = "sf.runtime.connect('ibm', token='YOUR_IBM_TOKEN')"
+                instructions = (
+                    "from superfermion.devices.ibm import IBMDevice\n"
+                    "  device = IBMDevice(token='YOUR_IBM_TOKEN')"
+                )
             elif provider.lower() == "ionq":
-                instructions = "sf.runtime.connect('ionq', api_key='YOUR_IONQ_KEY')"
+                instructions = (
+                    "from superfermion.devices.ionq import IonQDevice\n"
+                    "  device = IonQDevice(api_key='YOUR_IONQ_KEY')"
+                )
             elif provider.lower() == "openquantum":
                 instructions = (
-                    "sf.runtime.connect('openquantum', "
-                    "client_id='...', client_secret='...')"
+                    "from superfermion.devices.openquantum import OpenQuantumDevice\n"
+                    "  device = OpenQuantumDevice(client_id='...', client_secret='...')"
                 )
         if instructions:
-            msg += f"\n  To connect: {instructions}"
-        msg += ("\n  See docs/cloud_guide.md for provider setup.")
+            msg += f"\n  To connect:\n  {instructions}"
         super().__init__(msg)

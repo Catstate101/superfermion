@@ -55,7 +55,7 @@ def parameter_shift_grad(
         >>> grad = parameter_shift_grad(circ, H, {'theta': 0.5})
         >>> grad['theta']   # ∂⟨ZZ⟩/∂theta
     """
-    from superfermion.backends.registry import get_backend as _get_backend
+    from superfermion.backends.factory import get_backend as _get_backend
 
     sim = _get_backend(backend)
 
@@ -139,7 +139,7 @@ def finite_diff_grad(
     Uses central differences: (f(θ+ε) − f(θ−ε)) / (2ε).
     Less accurate than parameter-shift but works for any gate type.
     """
-    from superfermion.backends.registry import get_backend as _get_backend
+    from superfermion.backends.factory import get_backend as _get_backend
 
     sim = _get_backend(backend)
 
