@@ -17,8 +17,7 @@ class RunResult:
     """Result of executing a quantum circuit.
 
     Attributes:
-        counts: Measurement outcome counts (bitstring → count).
-        probabilities: Probability distribution (bitstring → float).
+        counts: Measurement outcome counts (bitstring -> count).
         statevector: Final statevector (if available from simulator).
         shots: Number of shots executed.
         circuit: The circuit that was executed.
@@ -26,19 +25,42 @@ class RunResult:
     """
     counts: Dict[str, int] = field(default_factory=dict)
     probabilities: Dict[str, float] = field(default_factory=dict)
-    statevector: Optional[Any] = None # Support JAX or NumPy
+    statevector: Optional[Any] = None
     shots: int = 0
     circuit: Optional[Circuit] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def get_probabilities(self) -> Dict[str, float]:
+        """Probability distribution from explicit value, statevector, or counts.
+
+        Returns the explicitly set probabilities if non-empty, otherwise
+        computes from the statevector (exact) or counts (empirical).
+        """
+        if self.probabilities:
+            return self.probabilities
+        if self.statevector is not None:
+            sv = np.asarray(self.statevector, dtype=np.complex128)
+            n_qubits = int(np.log2(len(sv)))
+            probs = np.abs(sv) ** 2
+            return {
+                format(i, f"0{n_qubits}b"): float(p)
+                for i, p in enumerate(probs) if p > 1e-15
+            }
+        if self.counts:
+            total = sum(self.counts.values())
+            if total > 0:
+                return {k: v / total for k, v in self.counts.items()}
+        return {}
+
     @property
     def probabilities_array(self) -> NDArray[np.float64]:
-        """Returns probabilities as a flat numpy array in lexicographical order."""
-        if not self.circuit:
-            raise ValueError("Circuit metadata missing in result.")
-        n = self.circuit.n_qubits
-        arr = np.zeros(2**n, dtype=np.float64)
-        for b, p in self.probabilities.items():
+        """Probabilities as a flat numpy array in lexicographical order."""
+        probs = self.get_probabilities()
+        if not probs:
+            return np.array([])
+        n_qubits = len(next(iter(probs)))
+        arr = np.zeros(2**n_qubits, dtype=np.float64)
+        for b, p in probs.items():
             arr[int(b, 2)] = p
         return arr
 
@@ -46,7 +68,7 @@ class RunResult:
         """Plot the measurement counts/probabilities as a bar chart."""
         try:
             import matplotlib.pyplot as plt
-            data = self.counts or self.probabilities
+            data = self.counts or self.get_probabilities()
             if not data:
                 print("No data to plot.")
                 return
@@ -60,14 +82,14 @@ class RunResult:
             plt.ylabel("Counts" if self.counts else "Probability")
             plt.title("Quantum Execution Results")
             plt.xticks(rotation=45)
-            
+
             if save_path:
                 plt.savefig(save_path)
             else:
                 plt.show()
         except ImportError:
             print("Matplotlib not installed. Summary:")
-            print(self.counts or self.probabilities)
+            print(self.counts or self.get_probabilities())
 
     def to_dict(self) -> dict:
         """Serialize the result to a plain dictionary."""
@@ -102,5 +124,5 @@ class RunResult:
     def __repr__(self) -> str:
         return (
             f"RunResult(shots={self.shots}, "
-            f"outcomes={len(self.counts or self.probabilities)})"
+            f"outcomes={len(self.counts or self.get_probabilities())})"
         )
