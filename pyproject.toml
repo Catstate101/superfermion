@@ -1,0 +1,139 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superfermion"
+version = "0.1.0"
+description = "The Holy Grail of Quantum Machine Learning"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Superfermion Team"},
+]
+keywords = [
+    "quantum", "machine-learning", "jax", "quantum-computing",
+    "variational", "VQE", "QAOA", "differentiable", "quantum-ml",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+jax = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+]
+qml = [
+    "superfermion[jax]",
+    "flax>=0.8.0",
+    "optax>=0.2.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-timeout>=2.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+gpu = [
+    "superfermion[jax]",
+    "jax[cuda12]>=0.4.0",
+]
+qpu = [
+    "qiskit-ibm-runtime>=0.20",
+    "amazon-braket-sdk>=1.60",
+]
+benchmarks = [
+    "pennylane>=0.45.0",
+    "qiskit-aer>=0.14",
+    "qiskit>=1.0",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "psutil>=5.0",
+]
+ml = [
+    "torch>=2.0",
+    "tensorflow>=2.15; python_version < '3.13'",
+    "cirq>=1.3",
+]
+viz = [
+    "matplotlib>=3.7",
+]
+chemistry = [
+    "scipy>=1.10.0",
+    "pyscf>=2.3",
+]
+docs = [
+    "sphinx>=7.0",
+    "myst-parser>=2.0",
+    "sphinx-book-theme>=1.0",
+]
+all = [
+    "superfermion[qml,dev,docs,gpu,qpu,viz,chemistry,benchmarks,ml]",
+]
+
+[project.scripts]
+sf = "superfermion.cli:main"
+
+[project.urls]
+Homepage = "https://superfermion.io"
+Documentation = "https://docs.superfermion.io"
+Repository = "https://github.com/superfermion/superfermion"
+Issues = "https://github.com/superfermion/superfermion/issues"
+
+[tool.setuptools.packages.find]
+include = ["superfermion*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = [
+    # Internal: test_complex_scientific tests return report strings for their
+    # script-style `check()` wrapper. Harmless under pytest.
+    "ignore::pytest.PytestReturnNotNoneWarning",
+    # Upstream Qiskit 2.1 → 3.0 migration: class-form feature maps / n-local
+    # circuits are being replaced by functions. Not our code.
+    "ignore:The class ``qiskit\\.circuit\\.library.*:DeprecationWarning",
+    # Upstream flax: SelfAttention → MultiHeadDotProductAttention migration.
+    "ignore:SelfAttention will be deprecated soon.*:DeprecationWarning",
+    # Upstream python_multipart (FastAPI transitive dep).
+    "ignore::PendingDeprecationWarning:python_multipart.*",
+    # Upstream PennyLane: shots-on-device → set_shots transform migration.
+    "ignore:Setting shots on device is deprecated.*",
+    # Upstream scipy 1.18: L-BFGS-B `disp`/`iprint` deprecation (triggered by
+    # qiskit_algorithms' L_BFGS_B wrapper). Message literally starts with
+    # "scipy.optimize: The `disp`..." — match the second half to avoid the
+    # colon collision with pytest's filterwarnings field separator.
+    "ignore:.*`disp` and `iprint` options.*:DeprecationWarning",
+]

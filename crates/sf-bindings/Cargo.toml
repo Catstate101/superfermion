@@ -1,0 +1,21 @@
+[package]
+name = "sf-bindings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Superfermion PyO3 bindings — Python interface to Rust IR, Compiler, Router, Pulse, QEC"
+
+[lib]
+name = "_sf_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+sf-ir = { path = "../sf-ir" }
+sf-compiler = { path = "../sf-compiler" }
+sf-router = { path = "../sf-router" }
+sf-pulse = { path = "../sf-pulse" }
+sf-qec = { path = "../sf-qec" }
+pyo3 = { workspace = true }
+numpy = { workspace = true }
+num-complex = { workspace = true }
+nalgebra = { workspace = true }

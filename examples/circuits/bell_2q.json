@@ -1,0 +1,25 @@
+{
+  "n_qubits": 2,
+  "n_cbits": 2,
+  "gates": [
+    {
+      "name": "H",
+      "qubits": [
+        0
+      ],
+      "params": []
+    },
+    {
+      "name": "CNOT",
+      "qubits": [
+        0,
+        1
+      ],
+      "params": []
+    }
+  ],
+  "metadata": {
+    "depth": 2,
+    "gate_count": 2
+  }
+}

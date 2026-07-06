@@ -1,0 +1,14 @@
+[package]
+name = "sf-pulse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Superfermion pulse-level control — waveforms, schedules, calibration"
+
+[dependencies]
+sf-ir = { path = "../sf-ir" }
+num-complex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,114 @@
+{
+  "n_qubits": 4,
+  "n_cbits": 4,
+  "gates": [
+    {
+      "name": "H",
+      "qubits": [
+        0
+      ],
+      "params": []
+    },
+    {
+      "name": "CP",
+      "qubits": [
+        0,
+        1
+      ],
+      "params": [
+        1.5707963267948966
+      ]
+    },
+    {
+      "name": "CP",
+      "qubits": [
+        0,
+        2
+      ],
+      "params": [
+        0.7853981633974483
+      ]
+    },
+    {
+      "name": "CP",
+      "qubits": [
+        0,
+        3
+      ],
+      "params": [
+        0.39269908169872414
+      ]
+    },
+    {
+      "name": "H",
+      "qubits": [
+        1
+      ],
+      "params": []
+    },
+    {
+      "name": "CP",
+      "qubits": [
+        1,
+        2
+      ],
+      "params": [
+        1.5707963267948966
+      ]
+    },
+    {
+      "name": "CP",
+      "qubits": [
+        1,
+        3
+      ],
+      "params": [
+        0.7853981633974483
+      ]
+    },
+    {
+      "name": "H",
+      "qubits": [
+        2
+      ],
+      "params": []
+    },
+    {
+      "name": "CP",
+      "qubits": [
+        2,
+        3
+      ],
+      "params": [
+        1.5707963267948966
+      ]
+    },
+    {
+      "name": "H",
+      "qubits": [
+        3
+      ],
+      "params": []
+    },
+    {
+      "name": "SWAP",
+      "qubits": [
+        0,
+        3
+      ],
+      "params": []
+    },
+    {
+      "name": "SWAP",
+      "qubits": [
+        1,
+        2
+      ],
+      "params": []
+    }
+  ],
+  "metadata": {
+    "depth": 8,
+    "gate_count": 12
+  }
+}

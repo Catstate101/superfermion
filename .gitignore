@@ -1,0 +1,110 @@
+# =============================================================================
+# Superfermion .gitignore
+# =============================================================================
+
+# --- Build artifacts ---
+web/node_modules/
+web/.next/
+target/
+target_t2/
+target_test/
+dist/
+build/
+*.so
+*.egg-info/
+superfermion_wheel/
+.benchmarks/
+
+# --- Virtual environments ---
+.venv/
+.custom_venv/
+new_env/
+venv/
+env/
+
+# --- IDE & editor tools ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- AI assistant tooling ---
+.claude/
+.qoder/
+
+# --- Linting & type checking caches ---
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# --- Generated outputs ---
+logs/
+scratch/
+cern_data_cache/
+reports/
+research/nobel_output/
+*.log
+
+# --- Python bytecode ---
+__pycache__/
+*.py[cod]
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Serialized artifacts ---
+*.pkl
+
+# --- Data files (generated) ---
+*.csv
+*.png
+*.jpg
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+
+# --- Environment secrets ---
+.env
+
+# =============================================================================
+# Explicitly allow essential tracked files
+# =============================================================================
+!.github/workflows/*.yml
+!.dockerignore
+# Generated artifacts and logs
+logs/
+reports/txt/
+reports/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+*.so
+
+# Rust
+target/
+target_t2/
+target_test/
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.custom_venv/
+new_env/
+.cursor/

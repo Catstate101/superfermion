@@ -1,0 +1,83 @@
+name: Superfermion CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Rust checks ──────────────────────────────────────────
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --all-targets --manifest-path crates/sf-ir/Cargo.toml
+      - run: cargo test -p sf-ir --lib
+      - run: cargo test -p sf-compiler --lib
+      - run: cargo test -p sf-router --lib
+      - run: cargo test -p sf-qec --lib
+      - run: cargo test -p sf-pulse --lib
+
+  # ── Python checks ────────────────────────────────────────
+  python:
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Lint (ruff)
+        run: ruff check superfermion/ --select=E,F,W --ignore=E501
+      - name: Run core tests
+        run: python -m pytest tests/ -q --timeout=120 -k "not (aer or qiskit or pennylane)" --ignore=tests/test_rust_kernel_correctness.py
+
+  # ── Benchmark smoke test ─────────────────────────────────
+  benchmarks:
+    name: Benchmark smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Quick benchmark
+        run: python -c "import superfermion as sf; c=sf.Circuit(8).h(0).cx(0,1).cx(1,2).cx(2,3); r=sf.run(c,backend='statevector',shots=0); print(f'OK: {len(r.statevector)} dims')"
+
+  # ── Docker build check ───────────────────────────────────
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t superfermion .

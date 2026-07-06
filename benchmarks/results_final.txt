@@ -1,0 +1,26 @@
+﻿============================================================
+SUPERFERMION: AUTOMATED NOISE FETCH & ERROR MITIGATION
+============================================================
+
+[1] Fetching Noise Characteristics for ibm_fez...
+    Qubit 0 Readout Error: 0.0182
+    Qubit 1 Readout Error: 0.0256
+
+[2] Constructed Readiness Calibration Matrix (M) via SF-Mitigation.
+
+[3] Raw Noisy Data (Simulated QPU baseline):
+    {'00': 450, '11': 420, '01': 80, '10': 74}
+
+[4] Applying Superfermion Readout Correction...
+
+[5] Mitigation Results Comparison:
+    Raw Fidelity (00+11): 0.8496
+    Mitigated Fidelity (00+11): 0.8818
+    Corrected Counts: {'00': 467, '01': 63, '10': 57, '11': 436}
+
+[6] Superfermion QEC Analysis (Repetition Code):
+    Applying Syndrome Decoding on 50-qubit data...
+    [SUCCESS] QEC Decoder 'SF-MWPM' applied to noisy job d6l1oj69td6c... 
+    [RESULT] Effective Logical Error Rate reduced by ~12x.
+
+============================================================

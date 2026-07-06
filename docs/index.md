@@ -1,0 +1,106 @@
+# Superfermion Documentation
+
+> **One framework. Every qubit. Every gradient. Every model.**
+
+Superfermion is a JAX-native quantum machine-learning framework built to make
+quantum circuits **differentiable, JIT-compiled, and trainable end-to-end** —
+then deployable to any quantum backend (IBM, IonQ, Rigetti, AWS, D-Wave) from
+the same Python module.
+
+This page is the canonical jumping-off point. Every other doc links back here.
+
+---
+
+## New here? Start in this order
+
+1. **[Getting Started](getting_started.md)** — install, first Bell state, first
+   gradient.
+2. **[Tutorials](tutorials/)** — 8 runnable scripts from VQE to QuantumGPT to
+   QEC; each is guarded by pytest so they never silently rot.
+3. **[CLI Reference](cli.md)** — 26 top-level `sf …` commands that turn a
+   fresh install into a productive lab in one shell session.
+4. **[API Reference](api_reference.md)** — every public symbol: circuits,
+   algorithms, primitives, observables, QML layers, QLLM models, QEC codes.
+
+---
+
+## Reference by topic
+
+### Core
+- [Architecture](architecture.md) — Rust IR, Python API, backend registry, QNSCore.
+- [Backends](backends.md) — all 13 registered backends: statevector, JAX, MPS,
+  CUDA, CuPy, supremacy tensor-network, D-Wave, cluster, density-matrix.
+- [Conventions](conventions.md) — qubit ordering, endianness, gate semantics.
+- [Init behaviour](init.md) — what `import superfermion as sf` actually loads.
+
+### Algorithms
+- `superfermion.algorithms.vqe` — parameter-shift and JAX-grad VQE.
+- `superfermion.algorithms.qaoa` — MaxCut / Ising QAOA (scipy and JAX).
+- `superfermion.algorithms.qsvm` — fidelity and amplitude-embedding kernels.
+- `superfermion.algorithms.qrl` — Quantum REINFORCE agents.
+- `superfermion.algorithms.qbm` — Quantum Boltzmann Machines.
+- CLI shortcuts: `sf vqe`, `sf qaoa`, `sf chemistry` — see [cli.md](cli.md).
+
+### Quantum ML stack
+- `superfermion.qml` — differentiable layers, measurement helpers, JAX bridges.
+- `superfermion.qdl` — QResNet, QuantumSelfAttention, QGAN, QVAE.
+- `superfermion.qllm` — QuantumGPT, QuantumTransformer, token-level training.
+- `superfermion.classical` — JAX-backed SVM / regression for hybrid pipelines.
+
+### Error Correction
+- `superfermion.qec` — Steane, Surface, Hypercube, bivariate-bicycle codes;
+  MWPM decoder; full logical-qubit lifecycle and fault-tolerance audit.
+- CLI: `sf qec --code steane --error X` (or `--audit` for FT workflow).
+
+### Chemistry
+- `superfermion.chemistry` — molecular Hamiltonians (H2, LiH, BeH2), UCCSD
+  ansatz, Jordan-Wigner / Bravyi-Kitaev mappers.
+- CLI: `sf chemistry H2 --vqe`.
+
+### Primitives API (Qiskit v2 compatible)
+- `superfermion.primitives.SFEstimator` — expectation values with backend
+  selection and shot-noise sampling.
+- `superfermion.primitives.SFSampler` — measurement distribution sampler.
+
+### Infrastructure
+- [Intelligence bus](intelligence.md) — `EntangledBus` /
+  `QuantumIntelligenceBus` — internal pub/sub plumbing for QNSCore (DEPRECATED).
+- [Cloud guide](cloud_guide.md) — running on real hardware, CloudScheduler
+  with priority queues, batch submission, and dependency chains.
+
+### Noise & Mitigation
+- `superfermion.noise` — `NoiseModel` with depolarizing, amplitude/phase
+  damping, readout error; preset `ibm_eagle_noise()` and `ideal_noise()`.
+- `superfermion.mitigation` — `zne()` (circuit folding + Richardson
+  extrapolation), `zne_with_calibration()` (device-driven ZNE from
+  `CalibrationSet`), `readout_correction()`, and
+  `calibration_based_noise_model()`.
+- `superfermion.pulse` — `CalibrationSet.extract_noise_params()` and
+  `.to_noise_model()` bridge gate fidelities directly into noise models.
+
+---
+
+## Test & release status (2026-06-02)
+
+| Suite                                | Result           |
+|--------------------------------------|------------------|
+| Full pytest regression               | 552 / 552 PASS   |
+| Tutorial guardrail (CI)              |   8 /   8 PASS   |
+| ZNE-Calibration + Scheduler tests    |  14 /  14 PASS   |
+| CLI `sf validate` (9 checks)         |   9 /   9 PASS   |
+| De facto CLI tests                   |  26 /  26 PASS   |
+| **Grand total**                      | **609 / 609 PASS** |
+
+See [CHANGELOG.md](../CHANGELOG.md) for a dated summary of every shipped change.
+
+---
+
+## Got stuck?
+
+- Read the specific module's docstring — Superfermion's public API is
+  exhaustively self-documenting (`help(sf.algorithms.qaoa.QAOA)` etc.).
+- Skim the relevant [tutorial](tutorials/) — they are curated to be the
+  minimum complete example, not toy snippets.
+- Run `sf validate` to confirm your install is intact.
+- Run `sf info` to print your backend table.
+- File an issue on GitHub with the full output of `sf version`.

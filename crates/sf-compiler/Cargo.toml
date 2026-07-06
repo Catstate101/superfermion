@@ -1,0 +1,16 @@
+[package]
+name = "sf-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Superfermion circuit compiler — gate decomposition and optimization passes"
+
+[dependencies]
+sf-ir = { path = "../sf-ir" }
+sf-router = { path = "../sf-router" }
+petgraph = { workspace = true }
+smallvec = { workspace = true }
+indexmap = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+rand = { workspace = true }

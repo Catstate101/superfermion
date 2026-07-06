@@ -1,0 +1,5 @@
+# Build the Rust core with native CPU features enabled (AVX-2 + FMA on
+# any x86_64 chip from 2013 onwards). LLVM auto-vectorizes the
+# statevector kernel inner loop into SIMD when AVX-2 + FMA is available.
+[build]
+rustflags = ["-C", "target-cpu=native"]

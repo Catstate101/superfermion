@@ -1,0 +1,535 @@
+# Real CERN Data: FAQ & Quick Reference
+
+**Frequently asked questions and quick reference for working with real LHC collision data**
+
+---
+
+## ❓ Frequently Asked Questions
+
+### Q: How do I get started?
+
+**A:** Run the interactive demo:
+```bash
+python real_cern_demo.py
+```
+
+This walks you through the entire workflow step-by-step.
+
+---
+
+### Q: Which dataset should I use for testing?
+
+**A:** Start with `cms_z_mumu_mini`:
+```bash
+python cern_real_data_pipeline.py --dataset cms_z_mumu_mini --n-events 100
+```
+
+- **Size**: ~100 MB
+- **Speed**: <5 minutes for 100 events
+- **Signal rate**: 70% (good for testing)
+- **Best for**: Quick verification, learning
+
+---
+
+### Q: How long does analysis take?
+
+**A:** Rough timing for 100 events:
+
+| Qubits | Total Time | Per Event |
+|--------|------------|----------|
+| 8 | ~3 min | 1.8 sec |
+| 10 | ~4 min | 2.4 sec |
+| 12 | ~8 min | 4.8 sec |
+| 14 | ~15 min | 9.2 sec |
+
+**To speed up:**
+- Reduce qubits: `--n-qubits 8`
+- Reduce events: `--n-events 50`
+- Use GPU: `--device lightning.gpu`
+
+---
+
+### Q: Can I use only synthetic data?
+
+**A:** Yes, use the original pipeline:
+```bash
+python cern_quantum_pipeline.py --dataset higgs --n-events 500
+```
+
+This generates realistic synthetic data without downloading anything.
+
+---
+
+### Q: What if CERN servers are down?
+
+**A:** The pipeline automatically falls back to synthetic data:
+```bash
+python cern_real_data_pipeline.py --dataset cms_z_mumu_mini
+# Falls back automatically if download fails
+```
+
+To debug:
+```bash
+ping opendata.cern.ch  # Check connectivity
+```
+
+---
+
+### Q: How do I interpret anomaly scores?
+
+**A:** Anomaly scores range 0-1:
+
+| Score | Interpretation |
+|-------|-----------------|
+| 0.0-0.3 | Normal, typical background |
+| 0.3-0.6 | Intermediate, possibly signal |
+| 0.6-0.9 | High, likely signal or unusual |
+| 0.9-1.0 | Very high, rare events or instrumental effects |
+
+For **Z→μμ**: Signal typically 0.4-0.7, background 0.2-0.4
+
+---
+
+### Q: What's the difference between SuperFermion and PennyLane results?
+
+**A:** 
+- **SuperFermion**: Specialized quantum circuits optimized for particle physics
+- **PennyLane**: General-purpose quantum simulator with cross-device validation
+- **Fidelity**: Should be >0.9 for good reproducibility
+
+If they disagree strongly (F<0.8), check:
+1. Circuit depth and gate count
+2. Feature normalization ranges
+3. Random seed consistency
+
+---
+
+### Q: Can I add my own physics model?
+
+**A:** Yes! Example:
+
+```python
+class MyPhysicsAnalyzer(SuperFermionCollisionAnalyzer):
+    def build_feature_map_circuit(self, features):
+        # Custom circuit
+        circuit = sf.Circuit(self.n_qubits)
+        
+        # Add your physics-informed gates
+        # Example: Z-boson production quark flavor encoding
+        
+        return circuit
+
+# Use it
+from cern_real_data_downloader import RealDataPipeline
+pipeline = RealDataPipeline()
+events = pipeline.download_and_parse("cms_z_mumu_mini", max_events=100)
+
+my_analyzer = MyPhysicsAnalyzer(n_qubits=12)
+results = my_analyzer.process_batch(events)
+```
+
+---
+
+### Q: How do I save results for later?
+
+**A:** All results are automatically saved in `reports/`:
+
+```bash
+ls -la reports/
+# Generates:
+# - analysis_report.md     (human readable)
+# - analysis_results.json  (machine readable)
+# - analysis_report.html   (web viewable)
+```
+
+Specify custom location:
+```bash
+python cern_real_data_pipeline.py --output-dir ./my_results
+```
+
+---
+
+### Q: Can I use real quantum hardware?
+
+**A:** Not yet with SuperFermion directly, but you can:
+
+1. Export to Qiskit:
+```python
+from superfermion.bridge import to_qiskit
+qiskit_circuit = to_qiskit(my_circuit)
+```
+
+2. Send to IBM quantum computers via Qiskit
+
+3. Compare classical-vs-quantum results
+
+---
+
+### Q: What is "confidence" in the reports?
+
+**A:** Multi-device confidence = coherence across simulators:
+
+$$\text{Confidence} = \exp(-\max(\text{device disagreements}))$$
+
+- **0.9-1.0**: Excellent agreement, high confidence
+- **0.8-0.9**: Good agreement, moderate confidence
+- **<0.8**: Poor agreement, investigate further
+
+---
+
+### Q: How do I debug if something fails?
+
+**A:** Use the health check:
+
+```bash
+python health_check.py  # See TROUBLESHOOTING_CERN_REAL_DATA.md
+```
+
+Or step through manually:
+```bash
+python -c "from cern_real_data_downloader import RealDataPipeline; print('OK')"
+python -c "from superfermion_quantum_circuits import BatchQuantumAnalyzer; print('OK')"
+python -c "from pennylane_validator import MultiDeviceValidator; print('OK')"
+```
+
+---
+
+### Q: What dataset is best for Higgs discovery?
+
+**A:** `cms_higgs_gg`:
+- 5% signal (realistic background challenge)
+- 125.1 GeV peak (well-defined)
+- 500K+ events available
+
+```bash
+python cern_real_data_pipeline.py --dataset cms_higgs_gg --n-events 2000
+```
+
+---
+
+### Q: Can I combine multiple datasets?
+
+**A:** Yes:
+
+```python
+from cern_real_data_downloader import RealDataPipeline
+
+pipeline = RealDataPipeline()
+
+all_events = []
+for dataset in ["cms_z_mumu_mini", "cms_higgs_gg"]:
+    events = pipeline.download_and_parse(dataset, max_events=500)
+    all_events.extend(events)
+
+print(f"Total events: {len(all_events)}")
+```
+
+---
+
+## 🚀 Quick Reference: Common Tasks
+
+### Task 1: Quick Test (< 5 minutes)
+
+```bash
+python cern_real_data_pipeline.py --n-events 50 --n-qubits 8
+```
+
+---
+
+### Task 2: Thorough Analysis (30 minutes)
+
+```bash
+python cern_real_data_pipeline.py \
+    --dataset cms_z_mumu_mini \
+    --n-events 1000 \
+    --n-qubits 12 \
+    --verbose
+```
+
+---
+
+### Task 3: Higgs Hunt (1-2 hours)
+
+```bash
+python cern_real_data_pipeline.py \
+    --dataset cms_higgs_gg \
+    --n-events 2000 \
+    --n-qubits 12
+```
+
+---
+
+### Task 4: Compare Datasets
+
+```python
+from cern_real_data_downloader import RealDataPipeline
+
+pipeline = RealDataPipeline()
+
+for dataset in ["cms_z_mumu_mini", "cms_higgs_gg", "atlas_z_ee"]:
+    events = pipeline.download_and_parse(dataset, max_events=100)
+    print(f"{dataset}: {len(events)} events")
+```
+
+---
+
+### Task 5: Export for Paper
+
+```bash
+python cern_real_data_pipeline.py \
+    --dataset cms_z_mumu_mini \
+    --n-events 500 \
+    --output-dir ./paper_results
+
+# Find results in paper_results/
+# analysis_report.md     (for text)
+# analysis_results.json  (for data)
+# analysis_report.html   (for visualization)
+```
+
+---
+
+### Task 6: Check Download Status
+
+```bash
+python cern_real_data_downloader.py  # Attempts download + reports success
+```
+
+---
+
+### Task 7: Inspect Single Event
+
+```python
+from cern_real_data_downloader import RealDataPipeline
+
+pipeline = RealDataPipeline()
+events = pipeline.download_and_parse("cms_z_mumu_mini", max_events=1)
+
+event = events[0]
+print(f"Event ID: {event.event_id}")
+print(f"Mass: {event.invariant_mass:.1f} GeV")
+print(f"Particles: {len(event.particles)}")
+for p in event.particles:
+    print(f"  pT={p['pt']:.1f}, η={p['eta']:.2f}, φ={p['phi']:.2f}")
+```
+
+---
+
+### Task 8: Reproduce My Results
+
+```python
+import numpy as np
+np.random.seed(42)  # Set seed
+
+# Now run your analysis - results will be reproducible
+pipeline = RealDataPipeline()
+events = pipeline.download_and_parse("cms_z_mumu_mini", max_events=100)
+# ... rest of analysis
+```
+
+---
+
+## 📊 Dataset Quick Reference
+
+### Z→μμ (Muon Channel)
+
+| Name | Size | Events | Signal | Command |
+|------|------|--------|--------|---------|
+| **cms_z_mumu_mini** | 100 MB | 10K | 70% | `--dataset cms_z_mumu_mini` |
+| **cms_2011_muon** | 500 MB | 100K | ~70% | `--dataset cms_2011_muon` |
+
+**Best for**: Quick testing, Z mass peak
+**Expected mass**: 91.2 GeV
+
+---
+
+### Higgs→γγ (Photon Channel)
+
+| Name | Size | Events | Signal | Command |
+|------|------|--------|--------|---------|
+| **cms_higgs_gg** | 2.5 GB | 500K+ | 5% | `--dataset cms_higgs_gg` |
+
+**Best for**: Discovery challenges, background rejection
+**Expected mass**: 125.1 GeV
+
+---
+
+### Z→ee (Electron Channel)
+
+| Name | Size | Events | Signal | Command |
+|------|------|--------|--------|---------|
+| **atlas_z_ee** | 1.0 GB | 300K+ | ~70% | `--dataset atlas_z_ee` |
+
+**Best for**: 2-lepton physics, electron reconstruction
+**Expected mass**: 91.2 GeV
+
+---
+
+## ⚡ Performance Optimization
+
+### Reduce Qubit Count (if slow)
+
+```bash
+# Default: 12 qubits, ~4.8 sec/event
+python cern_real_data_pipeline.py --n-qubits 12
+
+# Faster: 10 qubits, ~2.4 sec/event
+python cern_real_data_pipeline.py --n-qubits 10
+
+# Fast: 8 qubits, ~1.8 sec/event
+python cern_real_data_pipeline.py --n-qubits 8
+```
+
+### Reduce Event Count (for testing)
+
+```bash
+# Quick test: 10 events, ~50 sec
+python cern_real_data_pipeline.py --n-events 10
+
+# Medium: 100 events, ~8 min
+python cern_real_data_pipeline.py --n-events 100
+
+# Full analysis: 1000 events, ~1-2 hours
+python cern_real_data_pipeline.py --n-events 1000
+```
+
+### Use GPU (if available)
+
+```bash
+pip install pennylane-lightning[gpu]
+python cern_real_data_pipeline.py --device lightning.gpu
+```
+
+Speedup: 5-20x depending on GPU
+
+---
+
+## 💾 Storage Reference
+
+### Downloaded Data Cache
+```
+~/.cern_data_cache/  (or ./cern_data_cache/)
+├── cms_z_mumu_mini.csv     ~100 MB
+├── cms_higgs_gg.csv         ~2.5 GB
+├── atlas_z_ee.csv           ~1.0 GB
+└── cms_2011_muon.csv        ~500 MB
+```
+
+**To clear cache:**
+```bash
+rm -rf ./cern_data_cache/
+# Or
+rm -rf ~/.cern_data_cache/
+```
+
+### Report Output
+```
+reports/
+├── analysis_report.md       ~100 KB
+├── analysis_results.json    ~50 KB
+└── analysis_report.html     ~200 KB
+```
+
+---
+
+## 🔍 Understanding Output Files
+
+### Markdown Report (`analysis_report.md`)
+- Human-readable summary
+- Tables of statistics
+- Good for papers and presentations
+
+### JSON Report (`analysis_results.json`)
+- Machine-readable format
+- Event-by-event results
+- Import to analysis tools
+
+### HTML Report (`analysis_report.html`)
+- Visual in web browser
+- Interactive plots (if jinja enabled)
+- Good for sharing with collaborators
+
+---
+
+## 🎓 Learning Path
+
+### Beginner (Goal: Understand the system)
+1. Read: [README.md](../README.md) - 10 minutes
+2. Read: [architecture.md](architecture.md) - 15 minutes
+3. Run: `python real_cern_demo.py` - 5 minutes
+
+**Total: 30 minutes**
+
+---
+
+### Intermediate (Goal: Run your own analysis)
+1. Read: [REAL_CERN_DATA_GUIDE.md](REAL_CERN_DATA_GUIDE.md) - 20 minutes
+2. Run: `python cern_real_data_pipeline.py --n-events 100` - 10 minutes
+3. Read: [API_REFERENCE_REAL_DATA.md](API_REFERENCE_REAL_DATA.md) - 30 minutes
+4. Try recipes from [REAL_DATA_CODE_EXAMPLES.md](REAL_DATA_CODE_EXAMPLES.md) - 30 minutes
+
+**Total: 1.5 hours**
+
+---
+
+### Advanced (Goal: Customize for your physics)
+1. Read: [architecture.md](architecture.md) - detailed - 30 minutes
+2. Study: `superfermion_quantum_circuits.py` - 1 hour
+3. Study: `pennylane_validator.py` - 1 hour
+4. Create: Custom circuit class - 1-2 hours
+
+**Total: 3-4 hours**
+
+---
+
+### Expert (Goal: Publish results)
+1. Design: Custom quantum circuits - 4-8 hours
+2. Validate: Against ground truth - 2-4 hours
+3. Analyze: Statistical significance - 2 hours
+4. Publish: Generate reports - 2 hours
+
+**Total: 10-16 hours**
+
+---
+
+## 🆘 Troubleshooting Quick Links
+
+| Problem | Solution |
+|---------|----------|
+| Slow analysis | See "Performance Optimization" ↑ |
+| Out of memory | Reduce `--n-qubits` or `--n-events` |
+| Download fails | Check internet, see TROUBLESHOOTING_CERN_REAL_DATA.md |
+| Results don't match | Set `np.random.seed(42)` for reproducibility |
+| ImportError | Run `health_check.py` |
+| Fidelity < 0.8 | Check circuit depth and feature normalization |
+
+---
+
+## 📚 Key Resources
+
+**All in this repository:**
+- `README.md` - Main overview
+- `ARCHITECTURE.md` - System design
+- `REAL_CERN_DATA_GUIDE.md` - Usage guide
+- `API_REFERENCE_REAL_DATA.md` - API documentation
+- `REAL_DATA_CODE_EXAMPLES.md` - Code recipes
+- `TROUBLESHOOTING_CERN_REAL_DATA.md` - Problem solving
+- `CONTRIBUTING.md` - How to contribute
+
+---
+
+## 🚀 Next Steps
+
+**Choose your path:**
+
+1. **I want to learn**: Start with [README.md](../README.md)
+2. **I want to run it**: Start with `python real_cern_demo.py`
+3. **I want to analyze data**: Read [REAL_CERN_DATA_GUIDE.md](REAL_CERN_DATA_GUIDE.md)
+4. **I want to modify code**: Read [architecture.md](architecture.md)
+5. **I'm stuck**: Check [TROUBLESHOOTING_CERN_REAL_DATA.md](TROUBLESHOOTING_CERN_REAL_DATA.md)
+
+---
+
+**Questions?** Look for answers in this FAQ first, then check the full documentation.
+
+**Ready to discover physics!** 🎉

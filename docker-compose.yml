@@ -1,0 +1,47 @@
+services:
+  # ---- Superfermion FastAPI Backend ----
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: superfermion_api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - SF_ENV=production
+      - DB_HOST=db
+      - DB_USER=sf_admin
+      - DB_PASSWORD=sf_secure_password
+      - DB_NAME=superfermion_db
+      - DB_PORT=5432
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---- PostgreSQL Database ----
+  db:
+    image: postgres:15-alpine
+    container_name: superfermion_db
+    restart: always
+    environment:
+      - POSTGRES_USER=sf_admin
+      - POSTGRES_PASSWORD=sf_secure_password
+      - POSTGRES_DB=superfermion_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sf_admin -d superfermion_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
