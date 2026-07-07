@@ -2,6 +2,7 @@ pub mod decompose;
 pub mod passes;
 pub mod rotation_merge;
 pub mod twirl;
+pub mod fusion;
 
 use sf_ir::{QuantumDAG};
 use thiserror::Error;

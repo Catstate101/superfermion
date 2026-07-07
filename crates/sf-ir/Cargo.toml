@@ -23,5 +23,13 @@ rand = { workspace = true }
 # Heisenberg/QFT/RandomUniversal gap vs Aer-MPS by ~5x.
 faer = { version = "0.20", default-features = false, features = ["std", "rayon", "qr", "svd", "linalg"] }
 
+[features]
+default = []
+gpu = ["sf-gpu"]
+
+[dependencies.sf-gpu]
+path = "../sf-gpu"
+optional = true
+
 [dev-dependencies]
 approx = "0.5"

@@ -2,9 +2,12 @@
 Device abstraction layer — protocol-driven device executors.
 
 Provides the ``DeviceExecutor`` protocol for pluggable quantum execution
-targets, ``DeviceCapabilities`` for introspection, and ``_resolve_builtin``
-for resolving shorthand strings like ``"cpu"`` and ``"gpu"`` to concrete
-backend-backed devices.
+targets and ``DeviceCapabilities`` for introspection.
+
+Resolution rules (used by ``sf.run()``):
+    - ``"cpu"`` → RustDevice (CPU, Rayon+AVX statevector simulation)
+    - ``"gpu"`` → RustDevice (CUDA GPU statevector simulation)
+    - Any ``DeviceExecutor`` object → used directly (IBMDevice, IonQDevice, etc.)
 """
 
 from __future__ import annotations
@@ -49,32 +52,29 @@ class DeviceExecutor(Protocol):
 def _resolve_builtin(name: str) -> "DeviceExecutor":
     """Resolve a shorthand device string to a concrete ``DeviceExecutor``.
 
-    Supported shorthands:
-        - ``"cpu"`` → SingularityBackend (auto-routing local simulator)
-        - ``"gpu"`` → JAX or CuPy backend (falls back to singularity)
-        - Any other registered backend name → wrapped in ``LocalDevice``
+    Only two strings are supported:
+        - ``"cpu"`` → RustDevice with hardware=cpu
+        - ``"gpu"`` → RustDevice with hardware=gpu
 
     Raises:
-        ValueError: If the name cannot be resolved.
+        ValueError: If the name is not recognized.
     """
-    from superfermion.devices.local import LocalDevice
+    from superfermion.devices.rust_device import RustDevice
 
-    CPU_ALIASES = {"cpu", "singularity", "auto"}
-    GPU_ALIASES = {"gpu", "cuda", "cupy"}
+    lower = name.lower().strip()
 
-    lower = name.lower()
-    if lower in CPU_ALIASES:
-        return LocalDevice("singularity")
-    if lower in GPU_ALIASES:
-        try:
-            return LocalDevice("jax")
-        except Exception:
-            try:
-                return LocalDevice("cupy")
-            except Exception:
-                return LocalDevice("singularity")
-
-    return LocalDevice(lower)
+    if lower == "cpu":
+        return RustDevice(hardware="cpu")
+    elif lower == "gpu":
+        return RustDevice(hardware="gpu")
+    else:
+        raise ValueError(
+            f"Unknown device '{name}'. Use 'cpu', 'gpu', or pass a DeviceExecutor object.\n"
+            f"  Examples:\n"
+            f"    sf.run(circuit, device='cpu')           # local CPU simulation\n"
+            f"    sf.run(circuit, device='gpu')           # local GPU simulation\n"
+            f"    sf.run(circuit, device=ibm('ibm_fez')) # QPU via provider object"
+        )
 
 
 __all__ = [

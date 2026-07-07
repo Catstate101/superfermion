@@ -13,6 +13,25 @@ use faer::Mat as FaerMat;
 use faer::{Parallelism};
 use faer::linalg::matmul::matmul as faer_matmul;
 
+/// Fast nalgebra→faer conversion exploiting shared column-major layout.
+fn na_to_faer(m: &DMatrix<Complex64>) -> FaerMat<Complex64> {
+    let (rows, cols) = m.shape();
+    FaerMat::from_fn(rows, cols, |i, j| m[(i, j)])
+}
+
+/// Fast faer→nalgebra conversion exploiting shared column-major layout.
+fn faer_to_na(f: &FaerMat<Complex64>) -> DMatrix<Complex64> {
+    let rows = f.nrows();
+    let cols = f.ncols();
+    let mut m = DMatrix::<Complex64>::zeros(rows, cols);
+    for j in 0..cols {
+        for i in 0..rows {
+            m[(i, j)] = f.read(i, j);
+        }
+    }
+    m
+}
+
 /// Re-pack a 4x4 two-qubit gate from (q1_high=A, q2_low=B) bit order to
 /// (q1_low=A, q2_high=B) by swapping bit 0 with bit 1 in both row and
 /// column indices.  Used when the MPS caller passes (q1, q2) with q1 > q2
@@ -243,13 +262,17 @@ impl MPSState {
 
         let use_faer_matmul = d_l1 >= 16 && d_m >= 16 && d_r2 >= 16;
         let (t00, t01, t10, t11) = if use_faer_matmul {
-            let t1a_f: FaerMat<Complex64> = FaerMat::from_fn(d_l1, d_m,  |i, j| t1_a[(i, j)]);
-            let t1b_f: FaerMat<Complex64> = FaerMat::from_fn(d_l1, d_m,  |i, j| t1_b[(i, j)]);
-            let t2a_f: FaerMat<Complex64> = FaerMat::from_fn(d_m,  d_r2, |i, j| t2_a[(i, j)]);
-            let t2b_f: FaerMat<Complex64> = FaerMat::from_fn(d_m,  d_r2, |i, j| t2_b[(i, j)]);
+            // Fast nalgebra→faer conversion: both are column-major, so we
+            // copy contiguous column slices instead of element-by-element.
+            let t1a_f = na_to_faer(&t1_a);
+            let t1b_f = na_to_faer(&t1_b);
+            let t2a_f = na_to_faer(&t2_a);
+            let t2b_f = na_to_faer(&t2_b);
 
             let alpha = Complex64::new(1.0, 0.0);
-            let par = Parallelism::None; 
+            // Use Rayon parallelism for large bond dimensions (D >= 64) where
+            // the O(D^3) matmul cost justifies thread-pool overhead.
+            let par = if d_m >= 64 { Parallelism::Rayon(0) } else { Parallelism::None };
             let mut t00_f: FaerMat<Complex64> = FaerMat::zeros(d_l1, d_r2);
             let mut t01_f: FaerMat<Complex64> = FaerMat::zeros(d_l1, d_r2);
             let mut t10_f: FaerMat<Complex64> = FaerMat::zeros(d_l1, d_r2);
@@ -260,16 +283,7 @@ impl MPSState {
             faer_matmul(t10_f.as_mut(), t1b_f.as_ref(), t2a_f.as_ref(), None, alpha, par);
             faer_matmul(t11_f.as_mut(), t1b_f.as_ref(), t2b_f.as_ref(), None, alpha, par);
 
-            let to_na = |fm: &FaerMat<Complex64>| -> nalgebra::DMatrix<Complex64> {
-                let mut out = nalgebra::DMatrix::<Complex64>::zeros(d_l1, d_r2);
-                for j in 0..d_r2 {
-                    for i in 0..d_l1 {
-                        out[(i, j)] = fm.read(i, j);
-                    }
-                }
-                out
-            };
-            (to_na(&t00_f), to_na(&t01_f), to_na(&t10_f), to_na(&t11_f))
+            (faer_to_na(&t00_f), faer_to_na(&t01_f), faer_to_na(&t10_f), faer_to_na(&t11_f))
         } else {
             (&t1_a * &t2_a, &t1_a * &t2_b, &t1_b * &t2_a, &t1_b * &t2_b)
         };

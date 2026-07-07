@@ -70,11 +70,11 @@ class RustBackend(Backend):
         n_qubits = circuit.n_qubits
         seed = kwargs.get("seed", 42)
 
-        # ═══ Clifford fast path (shots > 0, n_qubits > 10 only) ═══
-        # For small circuits (n ≤ 10), the full statevector simulation is
-        # trivially fast and the user almost always wants the statevector.
-        # For large circuits, dispatch to stabilizer for sampling speed.
-        if shots > 0 and n_qubits > 10:
+        # ═══ Clifford fast path (shots > 0, n_qubits > 20 only) ═══
+        # Only dispatch to stabilizer for very large Clifford circuits where
+        # materializing 2^n amplitudes is impractical. For n ≤ 20, the Rust
+        # statevector simulation is fast enough and callers expect .statevector.
+        if shots > 0 and n_qubits > 20:
             from superfermion.backends.stabilizer import maybe_clifford_dispatch
             stab_res = maybe_clifford_dispatch(
                 circuit, shots, seed=seed, require_statevector=False,
@@ -94,14 +94,6 @@ class RustBackend(Backend):
                 final_state = RustBackend._result_cache[fp]
             else:
                 # ═══ STEP 3: Gate decomposition + fusion + Rust simulation ═══
-                # First rewrite Rust-unsupported gates (currently only CP) into
-                # supported primitives, then run the 1Q-fusion pass.
-                from superfermion.backends.turbo import (
-                    fuse_single_qubit_gates, decompose_for_rust
-                )
-                # Mirror the gate set handled by ``decompose_for_rust``.
-                # If we miss a gate here we feed it raw to the Rust parser
-                # and crash with "Unknown gate".
                 _RUST_DECOMP_GATES = (
                     "CP", "CR1", "CPHASE",   # → RZ + CX
                     "CRY",                    # → RY + CX
@@ -112,30 +104,27 @@ class RustBackend(Backend):
                     g.name.upper() in _RUST_DECOMP_GATES
                     for g in circuit._gates
                 )
-                from superfermion.backends.turbo import fuse_all_gates, decompose_for_rust
+
                 if _needs_decomp:
+                    from superfermion.backends.turbo import fuse_all_gates, decompose_for_rust
                     decomposed = Circuit(circuit.n_qubits)
                     decomposed._gates = decompose_for_rust(circuit._gates)
                     fused = fuse_all_gates(decomposed)
+                    dag = fused.to_ir()
                 else:
-                    fused = fuse_all_gates(circuit)
-
-                dag = fused.to_ir()
+                    # Fast path: skip Python fusion, go straight to Rust IR.
+                    # Rust-side GateFusionPass handles 1Q fusion natively.
+                    dag = circuit.to_ir()
 
                 if n_qubits > 26:
                     bond_dim = kwargs.get("bond_dim", self.options.get("max_bond_dim", 64))
                     sv = dag.simulate_mps(bond_dim)
+                    final_state = np.asarray(sv, dtype=np.complex128)
                 else:
-                    final_state = np.asarray(dag.simulate(), dtype=np.complex128)
-                    # Rust core uses q0=LSB convention; SF is q0=MSB. Reverse the n axes
-                    # of the statevector to match SF convention.
-                    final_state = final_state.reshape([2]*n_qubits).transpose(list(range(n_qubits))[::-1]).flatten()
-                    sv = final_state
+                    # Use simulate_msb() to get MSB-ordered statevector
+                    # directly from Rust — avoids Python reshape+transpose.
+                    final_state = np.asarray(dag.simulate_msb(), dtype=np.complex128)
 
-                # Statevector is now in SF MSB order natively.
-                final_state = np.asarray(sv, dtype=np.complex128)
-
-                # Cache both ways
                 RustBackend._result_cache[fp] = final_state
 
             circuit._rust_baked_result = final_state

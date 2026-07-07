@@ -6,6 +6,7 @@ members = [
     "crates/sf-bindings",
     "crates/sf-pulse",
     "crates/sf-qec",
+    "crates/sf-gpu",
 ]
 resolver = "2"
 

@@ -6,10 +6,19 @@ Usage::
     import superfermion as sf
 
     circuit = sf.Circuit(2).h(0).cnot(0, 1)
-    result = sf.run(circuit, device="cpu", shots=1000)
+
+    # Local CPU simulation (default)
+    result = sf.run(circuit, shots=1000)
     print(result.counts)  # {'00': 503, '11': 497}
 
-    # With a real QPU device:
+    # GPU simulation
+    result = sf.run(circuit, device="gpu")
+
+    # Simulation method control
+    result = sf.run(circuit, method="mps", bond_dim=128)  # tensor network
+    result = sf.run(circuit, method="stabilizer")          # Clifford only
+
+    # QPU via provider objects
     from superfermion.devices.ibm import IBMDevice
     ibm = IBMDevice(token="...")
     result = sf.run(circuit, device=ibm("ibm_fez"))
@@ -28,38 +37,39 @@ def run(
     circuit: Circuit,
     device: Union[str, DeviceExecutor, None] = None,
     shots: int = 1000,
+    method: Optional[str] = None,
     target: Optional[str] = None,
     tracker: Optional[Any] = None,
     **kwargs: Any,
 ) -> RunResult:
     """Execute a quantum circuit and return measurement results.
 
-    This is the primary entry point for all circuit execution. It handles:
-
-    1. Parameter validation (unbound parameters raise ``RuntimeError``)
-    2. Hardware-aware compilation (if ``target=`` is set)
-    3. Gate fusion (unless the device signals ``skip_fusion``)
-    4. Execution via ``DeviceExecutor`` protocol
-    5. Tracker lifecycle (``on_run_start`` / ``on_run_complete`` / ``on_run_error``)
-
     Args:
         circuit: The quantum circuit to execute.
-        device: A device string (``"cpu"``, ``"gpu"``, ``"statevector"``,
-            ``"rust"``, etc.) or a ``DeviceExecutor`` object.
-            Defaults to ``"cpu"`` (SingularityBackend auto-router).
+        device: Where to run. Either ``"cpu"`` (default), ``"gpu"``, or
+            a ``DeviceExecutor`` object (e.g. ``IBMDevice``, ``IonQDevice``).
         shots: Number of measurement repetitions.
+        method: Simulation algorithm for local devices. One of:
+            ``"statevector"`` (default) — exact simulation, 2^n memory.
+            ``"mps"`` — tensor network, for large weakly-entangled circuits.
+            ``"stabilizer"`` — Clifford-only, exponentially fast.
+            Ignored when ``device`` is a QPU (DeviceExecutor object).
         target: Optional hardware target name (e.g. ``"ionq_aria"``).
             If provided, the circuit is compiled to the target's basis gates
             and topology before execution.
         tracker: An explicit ``TrackerProtocol`` object. If omitted, the
             runner checks for an active ``sf.experiment()`` context.
-        **kwargs: Passed through to the device executor.
+        **kwargs: Passed through to the device executor (e.g. ``bond_dim``
+            for MPS, ``seed`` for sampling).
 
     Returns:
         ``RunResult`` with counts, statevector, probabilities, and metadata.
 
     Raises:
         RuntimeError: If the circuit has unbound symbolic parameters.
+        RuntimeError: If GPU is requested but unavailable.
+        RuntimeError: If stabilizer method is used on non-Clifford circuit.
+        ValueError: If device or method string is unrecognized.
     """
     # 1. Parameter validation
     if circuit.n_parameters > 0:
@@ -70,7 +80,7 @@ def run(
         )
 
     # 2. Resolve device
-    executor = _resolve_device(device)
+    executor = _resolve_device(device, method)
 
     # 3. Hardware-aware compilation
     exec_circuit = circuit
@@ -110,20 +120,27 @@ def run(
     return result
 
 
-def _resolve_device(device: Union[str, DeviceExecutor, None]) -> DeviceExecutor:
-    """Convert a device argument into a ``DeviceExecutor``."""
+def _resolve_device(
+    device: Union[str, DeviceExecutor, None],
+    method: Optional[str] = None,
+) -> DeviceExecutor:
+    """Convert device + method arguments into a ``DeviceExecutor``."""
     if device is None:
         device = "cpu"
 
-    if isinstance(device, str):
-        from superfermion.devices import _resolve_builtin
-        return _resolve_builtin(device)
-
+    # If it's already a DeviceExecutor object (IBMDevice, IonQDevice, etc.)
     if isinstance(device, DeviceExecutor):
         return device
 
+    if isinstance(device, str):
+        # For string devices ("cpu", "gpu"), apply method= parameter
+        from superfermion.devices.rust_device import RustDevice
+        hardware = device.lower().strip()
+        sim_method = method or "statevector"
+        return RustDevice(hardware=hardware, method=sim_method)
+
     raise TypeError(
-        f"device= must be a string or DeviceExecutor, got {type(device).__name__}"
+        f"device= must be 'cpu', 'gpu', or a DeviceExecutor object, got {type(device).__name__}"
     )
 
 

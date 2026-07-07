@@ -299,6 +299,137 @@ impl PyQuantumDAG {
         })
     }
 
+    /// Adjoint differentiation: compute d<O>/d(theta) for all parameters
+    /// in a single forward + backward pass. O(M * 2^n) regardless of N.
+    ///
+    /// Args:
+    ///   observable: list of (pauli_per_qubit: list[int], coef_real: float, coef_imag: float)
+    ///   param_values: dict mapping parameter name -> float value
+    ///
+    /// Returns: dict mapping parameter name -> gradient value.
+    fn adjoint_grad(
+        &self,
+        observable: Vec<(Vec<u8>, f64, f64)>,
+        param_values: std::collections::HashMap<String, f64>,
+    ) -> PyResult<std::collections::HashMap<String, f64>> {
+        let terms: Vec<sf_ir::PauliTerm> = observable.iter().map(|(paulis, re, im)| {
+            sf_ir::PauliTerm {
+                paulis: paulis.clone(),
+                coef: num_complex::Complex64::new(*re, *im),
+            }
+        }).collect();
+
+        let result = sf_ir::adjoint_grad(&self.inner, &terms, &param_values);
+        let mut out = std::collections::HashMap::new();
+        for (name, grad) in result.param_names.iter().zip(result.gradients.iter()) {
+            out.insert(name.clone(), *grad);
+        }
+        Ok(out)
+    }
+
+    /// Simulate and sample bitstrings directly in Rust (no statevector return to Python).
+    /// Returns a dict of bitstring -> count.
+    fn simulate_and_sample(
+        &self,
+        shots: usize,
+        seed: u64,
+    ) -> PyResult<std::collections::HashMap<String, usize>> {
+        let sv = self.inner.simulate();
+        let n = self.inner.n_qubits;
+        let dim = sv.len();
+
+        let probs: Vec<f64> = sv.iter().map(|c| c.re * c.re + c.im * c.im).collect();
+
+        use rand::SeedableRng;
+        use rand::Rng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        // Build cumulative distribution
+        let mut cumulative = vec![0.0f64; dim + 1];
+        for i in 0..dim {
+            cumulative[i + 1] = cumulative[i] + probs[i];
+        }
+        let total = cumulative[dim];
+
+        for _ in 0..shots {
+            let r: f64 = rng.gen::<f64>() * total;
+            let idx = match cumulative.binary_search_by(|v| v.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less)) {
+                Ok(i) => i.min(dim - 1),
+                Err(i) => (i - 1).min(dim - 1),
+            };
+            let bitstring: String = (0..n).rev().map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' }).collect();
+            *counts.entry(bitstring).or_insert(0) += 1;
+        }
+
+        Ok(counts)
+    }
+
+    /// Simulate and apply MSB/LSB endianness transpose in Rust before returning.
+    /// Returns statevector in MSB (q0=leftmost) convention directly.
+    fn simulate_msb<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        let sv = self.inner.simulate();
+        let n = self.inner.n_qubits;
+        let dim = sv.len();
+
+        let mut msb_sv = vec![num_complex::Complex64::new(0.0, 0.0); dim];
+        for i in 0..dim {
+            let reversed = reverse_bits(i, n);
+            msb_sv[reversed] = sv[i];
+        }
+        Ok(numpy::PyArray1::from_vec(py, msb_sv))
+    }
+
+    /// Simulate on a specified device: "cpu" or "gpu".
+    /// Returns statevector in LSB convention (same as simulate()).
+    /// Raises RuntimeError if GPU is unavailable or circuit is too large for VRAM.
+    fn simulate_on<'py>(&self, py: Python<'py>, device: &str) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        let sv = self.inner.simulate_on(device)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        Ok(numpy::PyArray1::from_vec(py, sv))
+    }
+
+    /// Check if GPU simulation is available at runtime.
+    #[staticmethod]
+    fn gpu_available() -> bool {
+        QuantumDAG::gpu_available()
+    }
+
+    /// Apply Kraus operators to the density matrix for noisy simulation.
+    /// noise_ops: list of (qubit, kraus_flat) where kraus_flat is a flat list of
+    /// f64 values encoding Kraus matrices. Each 2x2 Kraus matrix = 8 floats
+    /// (re00, im00, re01, im01, re10, im10, re11, im11).
+    fn simulate_dm_noisy<'py>(
+        &self,
+        py: Python<'py>,
+        noise_ops: Vec<(usize, Vec<f64>)>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        use sf_ir::dm::DensityMatrixState;
+        let mut state = DensityMatrixState::new(self.inner.n_qubits);
+        let instructions = self.inner.to_instructions();
+
+        for inst in &instructions {
+            let u = inst.op_type.to_matrix();
+            state.apply_unitary(&u, &inst.qubits);
+
+            for (noise_qubit, kraus_flat) in &noise_ops {
+                if inst.qubits.contains(noise_qubit) {
+                    let kraus_matrices: Vec<nalgebra::DMatrix<num_complex::Complex64>> =
+                        kraus_flat.chunks(8).map(|flat| {
+                            let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(2, 2);
+                            m[(0, 0)] = num_complex::Complex64::new(flat[0], flat[1]);
+                            m[(0, 1)] = num_complex::Complex64::new(flat[2], flat[3]);
+                            m[(1, 0)] = num_complex::Complex64::new(flat[4], flat[5]);
+                            m[(1, 1)] = num_complex::Complex64::new(flat[6], flat[7]);
+                            m
+                        }).collect();
+                    state.apply_kraus(&kraus_matrices, *noise_qubit);
+                }
+            }
+        }
+        Ok(numpy::PyArray1::from_vec(py, state.data))
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "QuantumDAG(n_qubits={}, n_cbits={}, depth={}, gates={}, params={})",
@@ -1070,6 +1201,18 @@ impl PyGateSequence {
     }
 }
 
+/// Reverse the bit order of an integer with n_bits bits.
+/// Used for MSB↔LSB endianness conversion.
+fn reverse_bits(val: usize, n_bits: usize) -> usize {
+    let mut result = 0usize;
+    let mut v = val;
+    for _ in 0..n_bits {
+        result = (result << 1) | (v & 1);
+        v >>= 1;
+    }
+    result
+}
+
 // ═══════════════════════════════════════════════════════════
 // Module Registration
 // ═══════════════════════════════════════════════════════════
@@ -1102,6 +1245,29 @@ fn _sf_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMWPMDecoder>()?;
     m.add_class::<PyUnionFindDecoder>()?;
 
+    // GPU availability check and diagnostics
+    m.add_function(wrap_pyfunction!(gpu_available, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_diagnose, m)?)?;
+
     m.add("__version__", "0.1.0")?;
     Ok(())
+}
+
+/// Module-level GPU availability check.
+#[pyfunction]
+fn gpu_available() -> bool {
+    QuantumDAG::gpu_available()
+}
+
+/// Diagnostic: returns why GPU init failed (or "ok").
+#[pyfunction]
+fn gpu_diagnose() -> String {
+    #[cfg(feature = "gpu")]
+    {
+        sf_ir::gpu_diagnose()
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        "GPU feature not compiled".to_string()
+    }
 }

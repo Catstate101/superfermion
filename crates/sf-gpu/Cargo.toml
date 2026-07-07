@@ -1,0 +1,16 @@
+[package]
+name = "sf-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPU-accelerated quantum simulation via CUDA (cudarc)"
+
+[dependencies]
+num-complex = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+cudarc = { version = "0.19", default-features = false, features = ["dynamic-loading", "cuda-version-from-build-system", "fallback-latest", "nvrtc", "driver"] }
+
+[dev-dependencies]
+approx = "0.5"

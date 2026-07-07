@@ -14,3 +14,5 @@ indexmap = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 rand = { workspace = true }
+num-complex = { workspace = true }
+nalgebra = { workspace = true }

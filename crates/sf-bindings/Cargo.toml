@@ -19,3 +19,8 @@ pyo3 = { workspace = true }
 numpy = { workspace = true }
 num-complex = { workspace = true }
 nalgebra = { workspace = true }
+rand = { workspace = true }
+
+[features]
+default = []
+gpu = ["sf-ir/gpu"]

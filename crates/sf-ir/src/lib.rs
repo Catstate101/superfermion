@@ -29,6 +29,7 @@ pub mod dm;
 pub mod qasm;
 pub mod stabilizer;
 pub mod gate_list;
+pub mod adjoint;
 
 // Re-export core types at crate root for convenience
 pub use dag::{QuantumDAG, QuantumOp, WireType, CircuitMetadata, NodeId, QubitId};
@@ -37,3 +38,16 @@ pub use qubits::{LogicalQubit, PhysicalQubit, QubitMapping, QubitAllocator};
 pub use classical::{ClassicalRegister, ClassicalRegFile};
 pub use serialize::SerializedCircuit;
 pub use mps::MPSState;
+pub use adjoint::{adjoint_grad, AdjointGradResult, PauliTerm};
+
+/// Diagnostic: returns a human-readable reason why GPU init failed (or "ok").
+#[cfg(feature = "gpu")]
+pub fn gpu_diagnose() -> String {
+    sf_gpu::diagnose()
+}
+
+/// Diagnostic: GPU not compiled.
+#[cfg(not(feature = "gpu"))]
+pub fn gpu_diagnose() -> String {
+    "GPU feature not compiled".to_string()
+}
