@@ -114,7 +114,7 @@ class TestRunResultSerialization:
 
     def test_execution_result_roundtrip_via_run(self, bell_circuit):
         """End-to-end: run a circuit, serialize the result, restore it."""
-        executed = sf.run(bell_circuit, device="statevector", shots=500)
+        executed = sf.run(bell_circuit, device="cpu", shots=500)
         assert executed.statevector is not None
 
         d = executed.to_dict()

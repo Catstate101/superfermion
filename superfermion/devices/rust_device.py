@@ -27,6 +27,8 @@ def _lsb_to_msb(sv: np.ndarray, n_qubits: int) -> np.ndarray:
     return tensor.reshape(-1)
 
 
+_CACHE_MAX_ENTRIES = 32
+
 class RustDevice:
     """High-performance local simulator backed entirely by Rust.
 
@@ -39,6 +41,7 @@ class RustDevice:
     """
 
     _result_cache: Dict[str, np.ndarray] = {}
+    _cache_order: List[str] = []
 
     def __init__(
         self,
@@ -83,26 +86,46 @@ class RustDevice:
         """Statevector simulation on CPU or GPU."""
         n_qubits = circuit.n_qubits
         seed = kwargs.get("seed", 42)
+        return_statevector = kwargs.get("return_statevector", True)
 
-        # Check cache
-        final_state = getattr(circuit, "_rust_baked_result", None)
+        # Fast path: shots>0, CPU, no statevector needed — sample entirely in Rust
+        # (avoids copying the full 2^n statevector from Rust to Python)
+        if shots > 0 and self._hardware == "cpu" and not return_statevector:
+            dag = self._prepare_dag(circuit)
+            counts = dag.simulate_and_sample(shots, seed)
+            return RunResult(
+                counts=counts,
+                statevector=None,
+                shots=shots,
+                circuit=circuit,
+                metadata={
+                    "backend": "rust-cpu",
+                    "n_qubits": n_qubits,
+                    "method": "statevector",
+                    "sample_path": "rust-native",
+                },
+            )
+
+        # Full statevector path (needed when shots=0 or statevector requested)
+        fp = self._circuit_fingerprint(circuit)
+        final_state = RustDevice._result_cache.get(fp)
         if final_state is None:
-            fp = self._circuit_fingerprint(circuit)
-            if fp in RustDevice._result_cache:
-                final_state = RustDevice._result_cache[fp]
+            dag = self._prepare_dag(circuit)
+
+            if self._hardware == "gpu":
+                sv_lsb = np.asarray(dag.simulate_on("gpu"), dtype=np.complex128)
+                final_state = _lsb_to_msb(sv_lsb, n_qubits)
             else:
-                dag = self._prepare_dag(circuit)
+                final_state = np.asarray(dag.simulate_msb(), dtype=np.complex128)
 
-                if self._hardware == "gpu":
-                    sv_lsb = np.asarray(dag.simulate_on("gpu"), dtype=np.complex128)
-                    final_state = _lsb_to_msb(sv_lsb, n_qubits)
-                else:
-                    final_state = np.asarray(dag.simulate_msb(), dtype=np.complex128)
-                RustDevice._result_cache[fp] = final_state
+            # Bounded LRU-style cache: evict oldest when full
+            if len(RustDevice._result_cache) >= _CACHE_MAX_ENTRIES:
+                if RustDevice._cache_order:
+                    evict_key = RustDevice._cache_order.pop(0)
+                    RustDevice._result_cache.pop(evict_key, None)
+            RustDevice._result_cache[fp] = final_state
+            RustDevice._cache_order.append(fp)
 
-            circuit._rust_baked_result = final_state
-
-        # Sampling
         if shots > 0:
             from superfermion.backends.turbo import sample_from_statevector
             counts = sample_from_statevector(final_state, n_qubits, shots, seed)

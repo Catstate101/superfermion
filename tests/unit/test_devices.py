@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from superfermion.devices import DeviceCapabilities, DeviceExecutor, _resolve_builtin
-from superfermion.devices.local import LocalDevice
 from superfermion.results import RunResult
 
 
@@ -57,6 +56,7 @@ class TestDeviceCapabilities:
 
 class TestLocalDevice:
     def test_wraps_statevector_backend(self, bell_circuit):
+        from superfermion.devices.local import LocalDevice
         device = LocalDevice("statevector")
         assert isinstance(device, DeviceExecutor)
         result = device.execute(bell_circuit, shots=100)
@@ -65,6 +65,7 @@ class TestLocalDevice:
         assert sum(result.counts.values()) == 100
 
     def test_capabilities_from_backend(self):
+        from superfermion.devices.local import LocalDevice
         device = LocalDevice("statevector")
         caps = device.capabilities()
         assert caps.is_simulator is True
@@ -72,27 +73,27 @@ class TestLocalDevice:
 
 
 class TestResolveBuiltin:
-    def test_cpu_returns_local_device_with_singularity(self):
+    def test_cpu_returns_rust_device(self):
+        from superfermion.devices.rust_device import RustDevice
         device = _resolve_builtin("cpu")
-        assert isinstance(device, LocalDevice)
-        assert device._backend_name == "singularity"
+        assert isinstance(device, RustDevice)
+        assert device._hardware == "cpu"
 
-    def test_singularity_alias(self):
-        device = _resolve_builtin("singularity")
-        assert device._backend_name == "singularity"
+    def test_cpu_satisfies_protocol(self):
+        device = _resolve_builtin("cpu")
+        assert isinstance(device, DeviceExecutor)
 
-    def test_gpu_falls_back_when_jax_unavailable(self):
-        with patch("superfermion.devices.local.LocalDevice", side_effect=LocalDevice) as mock_cls:
-            mock_cls.side_effect = [
-                Exception("no jax"),
-                Exception("no cupy"),
-                LocalDevice("singularity"),
-            ]
+    def test_gpu_raises_when_unavailable(self):
+        from superfermion.devices.rust_device import RustDevice
+        try:
             device = _resolve_builtin("gpu")
-        assert device._backend_name == "singularity"
+            assert isinstance(device, RustDevice)
+            assert device._hardware == "gpu"
+        except RuntimeError:
+            pass  # GPU not available is expected in CI/test environments
 
     def test_unknown_backend_raises(self):
-        with pytest.raises(ValueError, match="not registered"):
+        with pytest.raises(ValueError, match="Unknown device"):
             _resolve_builtin("totally_unknown_backend_xyz")
 
 

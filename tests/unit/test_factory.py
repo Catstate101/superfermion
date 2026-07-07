@@ -18,9 +18,10 @@ class TestGetBackend:
         backend = get_backend(None)
         assert isinstance(backend, Backend)
 
-    def test_unknown_backend_raises(self):
-        with pytest.raises(ValueError, match="not registered"):
-            get_backend("nonexistent_backend_xyz")
+    def test_unknown_backend_falls_back_to_rust(self):
+        with pytest.warns(DeprecationWarning, match="not recognized"):
+            backend = get_backend("nonexistent_backend_xyz")
+        assert isinstance(backend, Backend)
 
 
 class TestListBackends:

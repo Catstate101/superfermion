@@ -108,32 +108,118 @@ impl MPSState {
     ///
     /// After applying 2-qubit gates via `apply_2q_gate_static` (which does
     /// right-canonical QR), the MPS is in mixed canonical form.  This sweep
-    /// converts it to left-canonical form, which is required for correct
-    /// bit-by-bit sampling in [`sample`].
+    /// converts it to left-canonical form.
     ///
     /// Cost: O(n * D^3) — one QR per site.
     pub fn canonicalize_left(&mut self) {
         for i in 0..self.n_qubits.saturating_sub(1) {
             let t = &self.tensors[i];
-            let (rows, _cols) = t.shape(); // rows = D_L * 2, cols = D_R
+            let (rows, cols) = t.shape(); // rows = D_L * 2, cols = D_R
 
-            // QR decompose theta = Q * R  (nalgebra: Q is (rows,rows), R is (rows,cols))
             let qr = t.clone_owned().qr();
             let q = qr.q();
             let r = qr.r();
 
-            // New bond dimension: min(bond_dim, rows)
-            let k = std::cmp::min(self.bond_dim, rows);
+            let rank = std::cmp::min(rows, cols);
+            let k = std::cmp::min(self.bond_dim, rank);
 
-            // New tensor = first k columns of Q, keeping shape (rows, k)
             let new_t = q.columns(0, k).into_owned();
             self.tensors[i] = new_t;
 
-            // Absorb first k rows of R into next tensor: next = R[0..k, :] * next
-            let r_top = r.rows(0, k);
+            let r_top = r.rows(0, k).into_owned();
             let next = &self.tensors[i + 1];
-            let next_new = r_top * next;
+            let d_l_next = next.shape().0 / 2;
+            let d_r_next = next.shape().1;
+
+            let next_0 = next.rows(0, d_l_next).into_owned();
+            let next_1 = next.rows(d_l_next, d_l_next).into_owned();
+
+            let new_0 = &r_top * &next_0;
+            let new_1 = &r_top * &next_1;
+
+            let mut next_new = DMatrix::zeros(k * 2, d_r_next);
+            next_new.rows_mut(0, k).copy_from(&new_0);
+            next_new.rows_mut(k, k).copy_from(&new_1);
             self.tensors[i + 1] = next_new;
+        }
+    }
+
+    /// Right-canonicalize the MPS via right-to-left LQ sweep.
+    ///
+    /// Produces right-canonical form (Σ_s B^s B^s† = I at each site),
+    /// which is required for correct left-to-right sampling in [`sample`].
+    ///
+    /// Cost: O(n * D^3) — one LQ per site.
+    pub fn canonicalize_right(&mut self) {
+        for i in (1..self.n_qubits).rev() {
+            let t = &self.tensors[i]; // shape (D_L * 2, D_R)
+            let d_l = t.shape().0 / 2;
+            let d_r = t.shape().1;
+
+            // Reshape from packed (D_L*2, D_R) to (D_L, 2*D_R) where the
+            // two physical blocks sit side-by-side in columns.
+            let mut m = DMatrix::<Complex64>::zeros(d_l, 2 * d_r);
+            for s in 0..2usize {
+                for l in 0..d_l {
+                    for r in 0..d_r {
+                        m[(l, s * d_r + r)] = t[(l + s * d_l, r)];
+                    }
+                }
+            }
+
+            // LQ decomposition via QR of the adjoint (conjugate transpose):
+            //   M^H = Q_t R_t  ⟹  M = R_t^H Q_t^H  ≡  L Q_lq
+            let mt = m.adjoint(); // (2*D_R, D_L)
+            let qr = mt.qr();
+            let q_t = qr.q(); // (2*D_R, min(2*D_R, D_L))
+            let r_t = qr.r(); // (min(2*D_R, D_L), D_L)
+
+            let k = std::cmp::min(self.bond_dim,
+                        std::cmp::min(2 * d_r, d_l));
+
+            // Q_lq = first-k-cols(Q_t)^T → shape (k, 2*D_R)
+            // Reshape back to packed (2*k, D_R).
+            let mut new_t = DMatrix::<Complex64>::zeros(2 * k, d_r);
+            for s in 0..2usize {
+                for j in 0..k {
+                    for r in 0..d_r {
+                        // Q_lq[j, s*d_r + r] = Q_t[(s*d_r + r), j]^*
+                        // (conjugate-transpose)
+                        new_t[(s * k + j, r)] = q_t[(s * d_r + r, j)].conj();
+                    }
+                }
+            }
+            self.tensors[i] = new_t;
+
+            // L = first-k-rows(R_t)^T → shape (D_L, k)
+            //   = conjugate-transpose of R_t's first k rows
+            // But R_t has shape (min(2*D_R, D_L), D_L), first k rows = (k, D_L)
+            // L = R_t[0:k, :]^T  but we need conjugate transpose for LQ.
+            // Actually: M = L Q, where L = R_t^†[:, 0:k] = R_t[0:k, :]^T.conj()
+            // But R is upper triangular from real QR, and our data is complex.
+            // Correct: L = (R_t[0:k, :])^H  shape (D_L, k)
+            let mut l_matrix = DMatrix::<Complex64>::zeros(d_l, k);
+            for ii in 0..d_l {
+                for jj in 0..k {
+                    l_matrix[(ii, jj)] = r_t[(jj, ii)].conj();
+                }
+            }
+
+            // Absorb L into tensor[i-1]'s right bond.
+            // tensor[i-1] has shape (D_{prev}*2, D_L), result: (D_{prev}*2, k)
+            let prev = &self.tensors[i - 1];
+            let d_l_prev = prev.shape().0 / 2;
+
+            let prev_0 = prev.rows(0, d_l_prev).into_owned();       // (D_prev, D_L)
+            let prev_1 = prev.rows(d_l_prev, d_l_prev).into_owned(); // (D_prev, D_L)
+
+            let new_0 = &prev_0 * &l_matrix; // (D_prev, k)
+            let new_1 = &prev_1 * &l_matrix; // (D_prev, k)
+
+            let mut new_prev = DMatrix::<Complex64>::zeros(d_l_prev * 2, k);
+            new_prev.rows_mut(0, d_l_prev).copy_from(&new_0);
+            new_prev.rows_mut(d_l_prev, d_l_prev).copy_from(&new_1);
+            self.tensors[i - 1] = new_prev;
         }
     }
 
@@ -469,19 +555,30 @@ impl MPSState {
                 let d_l = t.shape().0 / 2;
                 let d_r = t.shape().1;
                 
-                // Compute P(0) for this qubit
-                // We contract 'left_vec' with the top (0) part of tensor 't'
-                let mut prob0_amp = 0.0;
+                // Compute unnormalized P(0) and P(1) for this qubit
+                let mut prob0 = 0.0_f64;
                 for r in 0..d_r {
                     let mut sum = Complex64::new(0.0, 0.0);
                     for l in 0..d_l {
                         sum += left_vec[l] * t[(l, r)];
                     }
-                    prob0_amp += sum.norm_sqr();
+                    prob0 += sum.norm_sqr();
                 }
-                
+                let mut prob1 = 0.0_f64;
+                for r in 0..d_r {
+                    let mut sum = Complex64::new(0.0, 0.0);
+                    for l in 0..d_l {
+                        sum += left_vec[l] * t[(l + d_l, r)];
+                    }
+                    prob1 += sum.norm_sqr();
+                }
+
+                // Normalize: P(0) = p0 / (p0 + p1)
+                let total = prob0 + prob1;
+                let p0_normalized = if total > 1e-30 { prob0 / total } else { 0.5 };
+
                 let random_val: f64 = rng.gen();
-                let b = if random_val < prob0_amp { '0' } else { '1' };
+                let b = if random_val < p0_normalized { '0' } else { '1' };
                 bitstring.push(b);
                 
                 // Update left_vec (projection)
