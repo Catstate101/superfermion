@@ -16,7 +16,7 @@ Usage:
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -95,6 +95,9 @@ def _mcx(circuit: sf.Circuit, controls: List[int], target: int, ancilla_base: in
     if len(controls) == 1:
         circuit.cx(controls[0], target)
         return
+    if len(controls) == 2:
+        circuit.toffoli(controls[0], controls[1], target)
+        return
     # ancilla_base must be provided by caller (data qubit count)
     if ancilla_base == 0:
         ancilla_base = circuit.n_qubits  # fallback: total qubits (caller should always pass explicitly)
@@ -140,7 +143,8 @@ def grover_search(
     oracle: GroverOracle,
     n_qubits: Optional[int] = None,
     iterations: Optional[int] = None,
-    backend: str = "statevector",
+    device: Any = "cpu",
+    method: str = "statevector",
     shots: int = 0,
 ) -> Dict[str, Any]:
     """Run Grover's search algorithm.
@@ -150,7 +154,8 @@ def grover_search(
         n_qubits: Qubit count (inferred from oracle if not given).
         iterations: Number of Grover iterations. Auto-calculated if None:
                     ⌊π/4 · √(N/M)⌋ ≈ ⌊π/4 · √(2^n)⌋ for single marked state.
-        backend: Simulation backend.
+        device: Execution target — ``"cpu"``, ``"gpu"``, or ``DeviceExecutor``.
+        method: Simulation method — ``"statevector"``, ``"mps"``, etc.
         shots: If > 0, sample results; if 0, return full statevector.
 
     Returns:
@@ -181,18 +186,19 @@ def grover_search(
         oracle(circuit)      # Oracle: phase-flip marked states
         _diffusion(circuit, n)  # Diffusion: amplify
 
-    # Run
-    sim = sf.get_backend(backend)
-    result = sim.run(circuit, shots=shots)
+    result = sf.run(circuit, device=device, method=method, shots=shots)
 
     # Extract top bitstring from statevector (only data-register qubits)
     if shots == 0 and result.statevector is not None:
         sv = np.asarray(result.statevector).flatten()
         probs = np.abs(sv) ** 2
-        # Trace out ancillas: sum over ancilla subspace
+        # Trace out ancillas: sum over ancilla subspace.
+        # After reshape to [2]*total, axis k = qubit (total-1-k) in C-order.
+        # To trace out qubits n..total-1, sum over the corresponding axes.
         if ancilla_qubits > 0:
             probs = probs.reshape([2] * total_qubits)
-            probs = probs.sum(axis=tuple(range(n, total_qubits))).flatten()
+            ancilla_axes = tuple(total_qubits - 1 - q for q in range(n, total_qubits))
+            probs = probs.sum(axis=ancilla_axes).flatten()
 
         top_idx = int(np.argmax(probs))
         top_bitstring = format(top_idx, f"0{n}b")

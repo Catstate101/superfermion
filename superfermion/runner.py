@@ -121,6 +121,30 @@ def run(
     return result
 
 
+def simulate(circuit: Circuit, **kwargs: Any):
+    """Convenience shortcut: run a circuit and return the State directly.
+
+    Equivalent to ``sf.run(circuit, **kwargs).state``.
+
+    Args:
+        circuit: The quantum circuit to simulate.
+        **kwargs: Passed through to ``sf.run()`` (device, method, shots, etc.).
+
+    Returns:
+        ``sf.State`` — the Rust-native quantum state handle.
+
+    Raises:
+        RuntimeError: If the execution doesn't produce a state (e.g. QPU).
+    """
+    result = run(circuit, **kwargs)
+    if result.state is None:
+        raise RuntimeError(
+            "simulate() requires a simulation device that produces a state. "
+            "Got no state — use sf.run() for QPU results."
+        )
+    return result.state
+
+
 def _resolve_device(
     device: Union[str, DeviceExecutor, None],
     method: Optional[str] = None,

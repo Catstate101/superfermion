@@ -40,11 +40,8 @@ Security-relevant areas of the Superfermion framework include:
 
 | Component | Risk Profile |
 |-----------|-------------|
-| `superfermion/security/` | Credential storage, token management, mTLS |
-| `superfermion/qpu/` | API token handling, QPU provider authentication |
-| `superfermion/config/` | Configuration file parsing, environment variable handling |
-| `superfermion/serialization/` | Circuit/model deserialization (pickle, JSON, QASM) |
-| `superfermion/cli.py` | Command-line argument parsing |
+| `superfermion/devices/` | QPU API token handling, provider authentication |
+| `superfermion/serialization/` | Circuit/model deserialization (JSON, QASM) |
 | `crates/sf-bindings/` | Rust-Python FFI boundary |
 | `_sf_core` native extension | Native code execution |
 
@@ -52,8 +49,6 @@ Security-relevant areas of the Superfermion framework include:
 
 - All direct dependencies are pinned with minimum versions in `pyproject.toml`
 - Rust dependencies (`Cargo.toml` / `Cargo.lock`) are audited on each release
-- CI runs `cargo audit` on Rust dependencies
-- CI runs `pip-audit` on Python dependencies (planned)
 - Transitive dependency updates are reviewed before each release
 
 ## Responsible Disclosure
@@ -64,15 +59,6 @@ process. We request that you:
 - Give us reasonable time to investigate and fix the issue before public disclosure
 - Do not access or modify user data without permission
 - Do not exploit the vulnerability beyond what is necessary to demonstrate it
-
-## Security Features
-
-Superfermion includes the following security capabilities:
-
-- **Credential encryption** — QPU API tokens encrypted at rest via `security/credential_store.py`
-- **Input sanitization** — Configurable input validation via `security/input_sanitizer.py`
-- **Audit logging** — Structured security event logging via `telemetry/audit.py`
-- **mTLS support** — Certificate generation for service-to-service communication
 
 ## Acknowledgments
 

@@ -6,100 +6,84 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 import math
-import jax.numpy as jnp
+import numpy as np
 
 
-def bloch_angles(statevector: jnp.ndarray, qubit: int = 0) -> Dict[str, float]:
+def bloch_angles(statevector: np.ndarray, qubit: int = 0) -> Dict[str, float]:
     """Extract Bloch sphere angles (theta, phi) for a single qubit.
-    
+
     For multi-qubit states, traces out all other qubits first.
-    
+
     Args:
-        statevector: The quantum state as a JAX array.
+        statevector: The quantum state as a numpy array.
         qubit: Which qubit to extract (0-indexed).
-        
+
     Returns:
         Dict with keys 'theta', 'phi', 'x', 'y', 'z' (Bloch coordinates).
     """
+    statevector = np.asarray(statevector)
     n_qubits = int(math.log2(len(statevector)))
-    
+
     if n_qubits == 1:
         alpha, beta = complex(statevector[0]), complex(statevector[1])
     else:
-        # Partial trace: get the reduced density matrix for this qubit
-        dim = 2**n_qubits
-        rho = jnp.outer(statevector, jnp.conj(statevector))
-        
-        # Trace out all qubits except the target
+        rho = np.outer(statevector, np.conj(statevector))
         rho_reduced = _partial_trace(rho, qubit, n_qubits)
-        
-        # Extract Bloch vector from density matrix
-        # rho = (I + r.sigma) / 2
-        x = float(jnp.real(rho_reduced[0, 1] + rho_reduced[1, 0]))
-        y = float(jnp.real(1j * (rho_reduced[0, 1] - rho_reduced[1, 0])))
-        z = float(jnp.real(rho_reduced[0, 0] - rho_reduced[1, 1]))
-        
+
+        x = float(np.real(rho_reduced[0, 1] + rho_reduced[1, 0]))
+        y = float(np.real(1j * (rho_reduced[0, 1] - rho_reduced[1, 0])))
+        z = float(np.real(rho_reduced[0, 0] - rho_reduced[1, 1]))
+
         theta = math.acos(max(-1, min(1, z)))
         phi = math.atan2(y, x)
-        
+
         return {"theta": theta, "phi": phi, "x": x, "y": y, "z": z}
-    
-    # Single qubit case
+
     r = abs(alpha)**2 + abs(beta)**2
     if r < 1e-10:
         return {"theta": 0, "phi": 0, "x": 0, "y": 0, "z": 1}
-    
+
     theta = 2 * math.acos(min(1.0, abs(alpha) / math.sqrt(r)))
     if abs(beta) > 1e-10:
-        phi = float(jnp.angle(beta) - jnp.angle(alpha))
+        phi = float(np.angle(beta) - np.angle(alpha))
     else:
         phi = 0.0
-    
+
     x = math.sin(theta) * math.cos(phi)
     y = math.sin(theta) * math.sin(phi)
     z = math.cos(theta)
-    
+
     return {"theta": theta, "phi": phi, "x": x, "y": y, "z": z}
 
 
-def _partial_trace(rho: jnp.ndarray, keep_qubit: int, n_qubits: int) -> jnp.ndarray:
+def _partial_trace(rho: np.ndarray, keep_qubit: int, n_qubits: int) -> np.ndarray:
     """Compute the partial trace, keeping only one qubit."""
-    dim = 2**n_qubits
-    rho_reshaped = rho.reshape([2]*n_qubits*2)
-    
-    # Build the axes to trace over
+    rho_reshaped = rho.reshape([2] * n_qubits * 2)
+
     trace_axes = []
     for i in range(n_qubits):
         if i != keep_qubit:
             trace_axes.append(i)
-    
-    # Trace out other qubits (pair each bra with its ket)
+
     result = rho_reshaped
     offset = 0
     for ax in sorted(trace_axes, reverse=True):
-        result = jnp.trace(result, axis1=ax - offset, axis2=ax + n_qubits - 2*offset - offset)
+        result = np.trace(result, axis1=ax - offset, axis2=ax + n_qubits - 2*offset - offset)
         offset += 1
-    
+
     return result.reshape(2, 2)
 
 
-def state_bar_chart(statevector: jnp.ndarray, n_qubits: int = None) -> str:
-    """Generate an ASCII bar chart of state probabilities.
-    
-    Args:
-        statevector: The quantum state.
-        n_qubits: Number of qubits (auto-detected if None).
-        
-    Returns:
-        ASCII string with probability bars.
-    """
-    probs = jnp.abs(statevector)**2
+def state_bar_chart(statevector: np.ndarray, n_qubits: int = None) -> str:
+    """Generate an ASCII bar chart of state probabilities."""
+    statevector = np.asarray(statevector)
+    probs = np.abs(statevector)**2
     if n_qubits is None:
         n_qubits = int(math.log2(len(probs)))
-    
+
     lines = []
     max_bar = 40
-    
+
     for i, p in enumerate(probs):
         p_val = float(p)
         if p_val < 1e-6:
@@ -108,34 +92,24 @@ def state_bar_chart(statevector: jnp.ndarray, n_qubits: int = None) -> str:
         bar_len = int(p_val * max_bar)
         bar = '#' * bar_len + '-' * (max_bar - bar_len)
         lines.append(f"  |{basis}> [{bar}] {p_val:.4f}")
-    
+
     if not lines:
         lines.append("  (all zero)")
-    
+
     return "\n".join(lines)
 
 
 def convergence_plot_ascii(history: List[float], width: int = 60, height: int = 15) -> str:
-    """Generate an ASCII convergence plot from a loss history.
-    
-    Args:
-        history: List of loss values over iterations.
-        width: Plot width in characters.
-        height: Plot height in lines.
-        
-    Returns:
-        ASCII string of the convergence curve.
-    """
+    """Generate an ASCII convergence plot from a loss history."""
     if not history:
         return "  (no data)"
-    
+
     mn, mx = min(history), max(history)
     rng = mx - mn if mx != mn else 1.0
-    
-    # Downsample if needed
+
     step = max(1, len(history) // width)
     sampled = history[::step][:width]
-    
+
     lines = []
     for row in range(height):
         threshold = mx - (row / (height - 1)) * rng
@@ -145,14 +119,13 @@ def convergence_plot_ascii(history: List[float], width: int = 60, height: int = 
                 line += "*"
             else:
                 line += " "
-        
+
         label = f"{threshold:>10.4f}"
         lines.append(f"  {label} |{line}")
-    
-    # X-axis
+
     lines.append(f"  {'':>10} +{''.join(['-'] * len(sampled))}")
     lines.append(f"  {'':>10}  0{'':>{len(sampled)-2}}iter={len(history)}")
-    
+
     return "\n".join(lines)
 
 
@@ -202,7 +175,6 @@ def draw_mpl(circuit, figsize=None, style: str = "qiskit"):
         ax.set_title("Circuit (empty)")
         return fig
 
-    # Compute gate positions from depth
     qubit_times = {q: 0 for q in range(n_qubits)}
     gate_positions = []
     for g in gates:
@@ -218,12 +190,10 @@ def draw_mpl(circuit, figsize=None, style: str = "qiskit"):
         figsize = (max(4, max_time * 0.8), max(2, n_qubits * 0.6))
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Draw wires
     for q in range(n_qubits):
         ax.plot([-0.3, max_time + 0.3], [q, q], "k-", lw=1, alpha=0.4)
         ax.text(-0.5, q, f"$q_{q}$", ha="right", va="center", fontsize=11)
 
-    # Draw gates
     gate_colors = {
         "H": "#FFB347", "X": "#FF6B6B", "Y": "#77DD77", "Z": "#AEC6CF",
         "RX": "#FFB6C1", "RY": "#FFDAB9", "RZ": "#B0E0E6",
@@ -270,7 +240,6 @@ def draw_mpl(circuit, figsize=None, style: str = "qiskit"):
         elif name == "BARRIER":
             ax.plot([t0, t0], [-0.3, n_qubits - 0.7], "k--", lw=0.8, alpha=0.5)
         else:
-            # Single-qubit gate box
             label = name
             if g.params and len(g.params) > 0:
                 p = g.params[0]
@@ -299,7 +268,7 @@ def plot_histogram(counts: dict, title: str = "Measurement Results",
     Requires: ``pip install matplotlib``
 
     Args:
-        counts:  Dictionary mapping bitstrings to counts (e.g., ``{'00': 512, '11': 512}``).
+        counts:  Dictionary mapping bitstrings to counts.
         title:   Plot title.
         figsize: Figure size (width, height) in inches.
         sort:    Sort order: 'desc' (most frequent first), 'asc', or 'none'.
@@ -356,8 +325,8 @@ def plot_bloch(statevector, qubit: int = 0, figsize=(5, 5),
     Requires: ``pip install matplotlib``
 
     Args:
-        statevector: The quantum state (JAX or numpy array).
-        qubit:       Which qubit to visualize (0-indexed). Partial trace for multi-qubit.
+        statevector: The quantum state (numpy array).
+        qubit:       Which qubit to visualize (0-indexed).
         figsize:     Figure size in inches.
         title:       Plot title.
 
@@ -366,13 +335,12 @@ def plot_bloch(statevector, qubit: int = 0, figsize=(5, 5),
 
     Example:
         >>> from superfermion.viz import plot_bloch
-        >>> import jax.numpy as jnp
-        >>> sv = jnp.array([1.0, 1.0]) / jnp.sqrt(2.0)  # |+> state
+        >>> import numpy as np
+        >>> sv = np.array([1.0, 1.0]) / np.sqrt(2.0)  # |+> state
         >>> fig = plot_bloch(sv)
     """
     try:
         import matplotlib.pyplot as plt
-        import numpy as np
     except ImportError:
         raise ImportError(
             "matplotlib is required for plot_bloch(). Install with: pip install matplotlib"
@@ -384,7 +352,6 @@ def plot_bloch(statevector, qubit: int = 0, figsize=(5, 5),
     fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot(111, projection="3d")
 
-    # Draw sphere wireframe
     u = np.linspace(0, 2 * np.pi, 30)
     v = np.linspace(0, np.pi, 30)
     sx = np.outer(np.cos(u), np.sin(v))
@@ -392,7 +359,6 @@ def plot_bloch(statevector, qubit: int = 0, figsize=(5, 5),
     sz = np.outer(np.ones(np.size(u)), np.cos(v))
     ax.plot_wireframe(sx, sy, sz, color="lightgray", alpha=0.3, lw=0.3)
 
-    # Draw axes
     for axis, color, label in [
         ([0, 0, 1.3], "red", "|0>"),
         ([0, 0, -1.3], "red", "|1>"),
@@ -404,10 +370,7 @@ def plot_bloch(statevector, qubit: int = 0, figsize=(5, 5),
         ax.quiver(0, 0, 0, *axis, color=color, alpha=0.3, lw=0.5,
                   arrow_length_ratio=0.05)
 
-    # State vector arrow
     ax.quiver(0, 0, 0, x, y, z, color="purple", lw=2.5, arrow_length_ratio=0.1)
-
-    # Blip at tip
     ax.scatter([x], [y], [z], color="purple", s=60)
 
     ax.set_xlim([-1.2, 1.2])
@@ -423,21 +386,10 @@ def plot_bloch(statevector, qubit: int = 0, figsize=(5, 5),
 def plot_state_city(density_matrix, figsize=(8, 6), title: str = "State City Plot"):
     """Plot a cityscape visualization of a density matrix.
 
-    Real parts shown as upward bars, imaginary as colored surface.
-
     Requires: ``pip install matplotlib``
-
-    Args:
-        density_matrix: 2-D complex array representing the density matrix.
-        figsize:        Figure size in inches.
-        title:          Plot title.
-
-    Returns:
-        ``matplotlib.figure.Figure``
     """
     try:
         import matplotlib.pyplot as plt
-        import numpy as np
     except ImportError:
         raise ImportError(
             "matplotlib is required for plot_state_city(). Install with: pip install matplotlib"
@@ -459,7 +411,6 @@ def plot_state_city(density_matrix, figsize=(8, 6), title: str = "State City Plo
     dx = dy = 0.6
     dz = real_part.flatten()
 
-    # Color bars by imaginary component
     colors = plt.cm.RdBu((imag_part.flatten() + 1) / 2)
 
     ax.bar3d(xpos, ypos, zpos, dx, dy, dz, color=colors, edgecolor="k", lw=0.2, alpha=0.85)
@@ -473,24 +424,10 @@ def plot_state_city(density_matrix, figsize=(8, 6), title: str = "State City Plo
 
 
 def draw_latex(circuit, document: bool = False) -> str:
-    """Export a circuit to LaTeX using the quantikz package.
-
-    Args:
-        circuit:  An ``sf.Circuit`` instance.
-        document: If True, wrap in a full LaTeX document. If False, return only the tikz code.
-
-    Returns:
-        LaTeX source string.
-
-    Example:
-        >>> from superfermion.viz import draw_latex
-        >>> c = sf.Circuit(2); c.h(0).cx(0, 1)
-        >>> print(draw_latex(c))
-    """
+    """Export a circuit to LaTeX using the quantikz package."""
     gates = list(circuit._gates) if hasattr(circuit, "_gates") else []
     n = circuit.n_qubits
 
-    # Map gate to quantikz command
     gate_map = {
         "H": "\\gate{{H}}",
         "X": "\\gate{{X}}",
@@ -504,17 +441,13 @@ def draw_latex(circuit, document: bool = False) -> str:
         "P": "\\gate{{P}}",
     }
 
-    # Assign gates to columns per qubit
     qubit_cols = {q: 0 for q in range(n)}
     columns = [[] for _ in range(n)]
 
     def _get_qubits(g):
-        """Extract actual qubit indices from a gate, handling param-qubit swap."""
         qbs = list(g.qubits)
         if qbs and all(isinstance(q, (int,)) for q in qbs):
             return qbs
-        # For parameterized single-qubit gates, qubits may contain the angle;
-        # actual qubit indices are in params.
         if g.params and all(isinstance(p, (int,)) for p in g.params):
             return list(g.params)
         return [q for q in qbs if isinstance(q, int)]
@@ -544,7 +477,6 @@ def draw_latex(circuit, document: bool = False) -> str:
 
     max_col = max(qubit_cols.values()) if qubit_cols else 0
 
-    # Build rows
     lines = []
     for q in range(n):
         row_parts = ["\\qw"] * (max_col + 1)

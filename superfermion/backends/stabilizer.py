@@ -25,7 +25,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from superfermion.backends.base import Backend
 from superfermion.circuit import Circuit, GateRecord
 from superfermion.results import RunResult
 
@@ -61,54 +60,49 @@ def maybe_clifford_dispatch(
     seed: Optional[int] = None,
     require_statevector: bool = False,
 ) -> Optional[RunResult]:
-    """If `circuit` is a Clifford circuit and the caller does not strictly need
-    a 2^n statevector back, run it through the tableau simulator and return
-    the result.  Otherwise return None and let the caller fall through to
-    its native simulation path.
-
-    `require_statevector=True` is set by callers that *must* return a dense
-    statevector (e.g. statevector backends with shots == 0). Stabilizer
-    states aren't materialised here — that's a separate, non-trivial pass.
+    """If `circuit` is Clifford and statevector is not required, run through
+    the stabilizer tableau simulator. Otherwise return None.
     """
     if require_statevector:
         return None
     if not is_clifford_circuit(circuit):
         return None
-    sb = StabilizerBackend()
-    return sb.run(circuit, shots=shots, seed=seed)
+    import superfermion as sf
+    return sf.run(circuit, method="stabilizer", shots=shots, seed=seed)
 
 def simplify_clifford(circuit: Circuit) -> "Circuit":
     """Simplify a Clifford circuit via tableau canonical form.
 
-    Converts the circuit to a stabilizer tableau, then synthesizes a
-    canonical circuit using the Aaronson-Gottesman decomposition.
-    The result implements the same Clifford operation but with
-    at most 7n^2/4 + O(n) gates (vs up to 10n^2 for the input).
-
-    Returns None if the circuit is NOT Clifford (caller should fall back
-    to the original circuit).
-
-    This is a pure optimization -- the returned circuit is logically
-    equivalent to the input.
-
-    Fast path: Rust-stored circuits (use_rust_storage=True).  The gate
-    list lives in a Rust GateSequence — invisible to Python's gate
-    iteration.  Clifford simplification for Rust-stored circuits is
-    handled natively by the Rust compiler; we return an identity
-    circuit to avoid Python heap allocations (numpy, Qiskit Clifford).
+    Returns None if the circuit is NOT Clifford.
     """
-    # Fast path: Rust-native gate storage → skip Python simplify entirely.
-    # Returns a plain identity Circuit to avoid numpy/Qiskit allocation.
     if getattr(circuit, '_use_rust', False) and getattr(circuit, '_gates_rust', None) is not None:
         return Circuit(circuit.n_qubits)
 
     if not is_clifford_circuit(circuit):
         return None
-    sb = StabilizerBackend()
-    # Use Rust evolution then convert to Python _Tableau for Qiskit synthesis
-    rust_tab = sb.evolve(circuit)
-    py_tab = sb._rust_to_python_tableau(rust_tab)
+
+    rust_tab = _evolve_rust(circuit)
+    py_tab = _rust_to_python_tableau(rust_tab)
     return py_tab.to_circuit()
+
+
+def _evolve_rust(circuit: Circuit):
+    """Evolve a Clifford circuit via Rust StabilizerTableau.from_gate_list."""
+    from superfermion._sf_core import StabilizerTableau as RustTableau
+    gate_list = [(g.name.upper(), list(g.qubits)) for g in circuit._gates
+                 if g.name.upper() not in ("MEASURE", "RESET", "BARRIER", "ID")]
+    return RustTableau.from_gate_list(circuit.n_qubits, gate_list)
+
+
+def _rust_to_python_tableau(rust_tab) -> _Tableau:
+    """Convert a Rust PyStabilizerTableau to a Python _Tableau."""
+    n = rust_tab.n
+    py_tab = _Tableau(n)
+    x_arr, z_arr, r_arr = rust_tab.to_numpy()
+    py_tab.x = np.asarray(x_arr, dtype=np.uint8).copy()
+    py_tab.z = np.asarray(z_arr, dtype=np.uint8).copy()
+    py_tab.r = np.asarray(r_arr, dtype=np.uint8).copy()
+    return py_tab
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -442,170 +436,3 @@ def _phase_of_product(x1: np.ndarray, z1: np.ndarray,
     return contributions.sum(axis=axis) % 4
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Backend wrapper
-# ─────────────────────────────────────────────────────────────────────────────
-class StabilizerBackend(Backend):
-    """SF backend implementing the Aaronson–Gottesman tableau simulator.
-
-    Evolve + sample use Rust `_sf_core.StabilizerTableau` for speed.
-    Pauli expval also dispatched to Rust.
-    """
-
-    def __init__(self, name: str = "stabilizer", options: Optional[Dict[str, Any]] = None):
-        super().__init__(name, options)
-
-    @property
-    def n_qubits(self) -> int:
-        return 1024  # tableau is O(n²) memory — comfortable up to ~1k qubits
-
-    @property
-    def supported_gates(self) -> List[str]:
-        return ["H", "X", "Y", "Z", "S", "Sdg", "SX", "SXDG", "Id", "CX", "CNOT", "CZ", "CY", "SWAP"]
-
-    # ─── Rust helper ────────────────────────────────────────────────────────
-    @staticmethod
-    def _get_rust_tableau():
-        """Lazy-import the Rust PyStabilizerTableau."""
-        from superfermion._sf_core import StabilizerTableau as RustTableau
-        return RustTableau
-
-    def _rust_to_python_tableau(self, rust_tab) -> _Tableau:
-        """Convert a Rust PyStabilizerTableau back to a Python _Tableau.
-
-        Used only for `to_circuit()` (Qiskit synthesis).
-        """
-        n = rust_tab.n
-        py_tab = _Tableau(n)
-        x_arr, z_arr, r_arr = rust_tab.to_numpy()
-        # to_numpy() returns (2n, n) uint8 arrays — copy into _Tableau
-        py_tab.x = np.asarray(x_arr, dtype=np.uint8).copy()
-        py_tab.z = np.asarray(z_arr, dtype=np.uint8).copy()
-        py_tab.r = np.asarray(r_arr, dtype=np.uint8).copy()
-        return py_tab
-
-    # ─── Core ───────────────────────────────────────────────────────────────
-    def evolve(self, circuit: Circuit):
-        """Evolve a Clifford circuit → Rust StabilizerTableau.
-
-        Returns a `_sf_core.StabilizerTableau` (Rust-backed).
-
-        Uses ``from_gate_list`` — a single Rust call that builds and
-        evolves the tableau in one pass, avoiding per-gate PyO3
-        roundtrips (40K+ gates → 1 call instead of 40K).
-        """
-        if not is_clifford_circuit(circuit):
-            offenders = [g.name for g in circuit._gates
-                         if g.name.upper() not in _CLIFFORD_1Q | _CLIFFORD_2Q
-                         and g.name.upper() not in ("MEASURE", "RESET")]
-            raise NotCliffordError(
-                f"StabilizerBackend supports only Clifford circuits. "
-                f"Non-Clifford gates: {sorted(set(offenders))}"
-            )
-        RustTableau = self._get_rust_tableau()
-        n = circuit.n_qubits
-        # ── Bulk gate list → single Rust call (avoids per-gate PyO3 overhead) ──
-        gate_list = [(g.name.upper(), list(g.qubits)) for g in circuit._gates
-                     if g.name.upper() not in ("MEASURE", "RESET", "BARRIER", "ID")]
-        return RustTableau.from_gate_list(n, gate_list)
-
-    def evolve_python(self, circuit: Circuit) -> _Tableau:
-        """Evolve using the pure-Python _Tableau (legacy path for
-        `to_circuit()` / debugging)."""
-        if not is_clifford_circuit(circuit):
-            offenders = [g.name for g in circuit._gates
-                         if g.name.upper() not in _CLIFFORD_1Q | _CLIFFORD_2Q
-                         and g.name.upper() not in ("MEASURE", "RESET")]
-            raise NotCliffordError(
-                f"StabilizerBackend supports only Clifford circuits. "
-                f"Non-Clifford gates: {sorted(set(offenders))}"
-            )
-        n = circuit.n_qubits
-        tab = _Tableau(n)
-        for g in circuit._gates:
-            nm = g.name.upper()
-            if nm in ("MEASURE", "RESET", "BARRIER", "ID"):
-                continue
-            qs = g.qubits
-            if   nm == "H":            tab.h(qs[0])
-            elif nm == "S":            tab.s(qs[0])
-            elif nm == "SDG":          tab.sdg(qs[0])
-            elif nm == "SX":           tab.h(qs[0]); tab.s(qs[0]); tab.h(qs[0])
-            elif nm == "SXDG":         tab.h(qs[0]); tab.sdg(qs[0]); tab.h(qs[0])
-            elif nm == "X":            tab.x_gate(qs[0])
-            elif nm == "Y":            tab.y_gate(qs[0])
-            elif nm == "Z":            tab.z_gate(qs[0])
-            elif nm in ("CX", "CNOT"): tab.cnot(qs[0], qs[1])
-            elif nm == "CZ":           tab.cz(qs[0], qs[1])
-            elif nm == "CY":           tab.s(qs[1]); tab.cnot(qs[0], qs[1]); tab.sdg(qs[1])
-            elif nm == "SWAP":         tab.swap(qs[0], qs[1])
-            else:
-                raise NotCliffordError(f"Unsupported gate {g.name}")
-        return tab
-
-    def run(self, circuit: Circuit, shots: int = 1000, **kwargs: Any) -> RunResult:
-        seed = kwargs.get("seed")
-        tab = self.evolve(circuit)  # Rust PyStabilizerTableau
-        counts = tab.sample(shots, seed=seed) if shots > 0 else {}
-        return RunResult(
-            counts=counts,
-            statevector=None,
-            shots=shots,
-            circuit=circuit,
-            metadata={
-                "backend": self.name,
-                "n_qubits": circuit.n_qubits,
-                "method": "stabilizer-tableau-rust",
-                "tableau": tab,
-            },
-        )
-
-    # ─── Pauli expectation values ───────────────────────────────────────────
-    def expval(self, circuit: Circuit, observable: Any) -> float:
-        """<O> for a Pauli observable on the post-circuit stabilizer state.
-
-        Accepts:
-          * str  — Pauli string in SF MSB convention (e.g. "ZZIIII")
-          * dict — {"ZZIIII": coeff, "XIIIII": coeff, ...} linear combo
-          * SparsePauliOp
-        """
-        tab = self.evolve(circuit)  # Rust PyStabilizerTableau
-        return self._expval_on(tab, observable)
-
-    def _expval_on(self, tab, observable: Any) -> float:
-        """Compute <O> on a Rust PyStabilizerTableau."""
-        n = tab.n
-        # Normalize input to a dict of {pauli_string: complex_coeff}
-        terms: Dict[str, complex] = {}
-        if isinstance(observable, str):
-            terms[observable] = 1.0
-        elif isinstance(observable, dict):
-            terms = {k: complex(v) for k, v in observable.items()}
-        else:
-            # Try SparsePauliOp interface
-            try:
-                from superfermion.observables.core import SparsePauliOp
-                if isinstance(observable, SparsePauliOp):
-                    for s, c in observable._terms.items():
-                        terms[s] = complex(c)
-                else:
-                    raise TypeError
-            except Exception:
-                raise TypeError(f"Unsupported observable type: {type(observable)}")
-
-        total = 0.0 + 0.0j
-        for pstr, coef in terms.items():
-            if len(pstr) != n:
-                raise ValueError(f"Pauli string '{pstr}' length != n={n}")
-            px = np.zeros(n, dtype=np.uint8)
-            pz = np.zeros(n, dtype=np.uint8)
-            for i, ch in enumerate(pstr.upper()):
-                # SF MSB: position i in string corresponds to qubit i.
-                if ch == "I": continue
-                if ch == "X": px[i] = 1
-                elif ch == "Y": px[i] = 1; pz[i] = 1
-                elif ch == "Z": pz[i] = 1
-                else: raise ValueError(f"Bad Pauli char '{ch}'")
-            total += coef * tab.pauli_expval(px.tolist(), pz.tolist())
-        # Hermitian observables → real expectation
-        return float(np.real(total))

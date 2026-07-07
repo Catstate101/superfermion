@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from superfermion.backends.factory import get_backend
+import superfermion as sf
 from superfermion.circuit import Circuit
 
 
@@ -33,17 +33,15 @@ class TestSingleQubitFusion:
     def test_fusion_preserves_semantics(self):
         circuit = Circuit(1).h(0).x(0)
         fused = fuse_single_qubit_gates(circuit)
-        backend = get_backend("statevector")
-        original = backend.run(circuit, shots=0, seed=SEED)
-        optimized = backend.run(fused, shots=0, seed=SEED)
+        original = sf.run(circuit, device="cpu", shots=0, seed=SEED)
+        optimized = sf.run(fused, device="cpu", shots=0, seed=SEED)
         assert np.allclose(original.statevector, optimized.statevector)
 
     def test_fusion_preserves_measurement_statistics(self):
         circuit = Circuit(2).h(0).x(0).cnot(0, 1)
         fused = fuse_single_qubit_gates(circuit)
-        backend = get_backend("statevector")
-        r_orig = backend.run(circuit, shots=1000, seed=SEED)
-        r_fused = backend.run(fused, shots=1000, seed=SEED)
+        r_orig = sf.run(circuit, device="cpu", shots=1000, seed=SEED)
+        r_fused = sf.run(fused, device="cpu", shots=1000, seed=SEED)
         assert r_orig.counts.keys() == r_fused.counts.keys()
         for key in r_orig.counts:
             assert abs(r_orig.counts[key] - r_fused.counts[key]) <= 50

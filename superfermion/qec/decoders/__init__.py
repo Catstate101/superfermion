@@ -1,11 +1,10 @@
 """
 Superfermion QEC Decoders - MWPM, Union-Find, BP+OSD, and Neural decoders.
 """
+import logging
 from typing import Dict, Any, List, Optional, Tuple, Callable, Union
 import superfermion as sf
 import numpy as np
-import jax
-import jax.numpy as jnp
 
 try:
     from superfermion._sf_core import MWPMDecoder as RustMWPM
@@ -13,6 +12,8 @@ try:
     _HAS_RUST_DECODERS = True
 except ImportError:
     _HAS_RUST_DECODERS = False
+
+logger = logging.getLogger(__name__)
 
 
 # ── Shared validation helpers ───────────────────────────────────────────────
@@ -180,11 +181,11 @@ class BPOSD_Decoder:
         syndrome_map = [[i, i + 1] for i in range(n - 1)]
         return BPOSD_Decoder(n_data=n, syndrome_qubit_map=syndrome_map)
 
-    def decode(self, syndrome: jnp.ndarray) -> List[Tuple[int, str]]:
+    def decode(self, syndrome: np.ndarray) -> List[Tuple[int, str]]:
         """Decode a syndrome to find the most likely error correction.
 
         Args:
-            syndrome: Binary syndrome vector (n_checks,) as JAX array.
+            syndrome: Binary syndrome vector (n_checks,).
 
         Returns:
             List of (qubit_index, pauli_type) correction pairs.
@@ -441,42 +442,40 @@ class NeuralDecoder:
 
     # ── Decode ─────────────────────────────────────────────
 
-    def decode(self, syndrome: jnp.ndarray) -> jnp.ndarray:
+    def decode(self, syndrome: np.ndarray) -> np.ndarray:
         """Decode a syndrome using the trained neural network.
 
         Args:
             syndrome: Binary syndrome vector.
 
         Returns:
-            Error probability per qubit as JAX array.
+            Error probability per qubit as numpy array.
         """
         if self._params is None:
-            # Untrained — use simple threshold-based fallback
             s = np.array(syndrome, dtype=np.float32).flatten()
             probs = np.zeros(self.n_qubits or len(s) + 1, dtype=np.float32)
             if len(s) > 0:
-                # Simple heuristic: each syndrome bit indicates error
-                # on adjacent qubits with 50% probability each
                 for a, val in enumerate(s):
                     if val > 0.5:
                         if a < len(probs):
                             probs[a] = max(probs[a], 0.6)
                         if a + 1 < len(probs):
                             probs[a + 1] = max(probs[a + 1], 0.6)
-            return jnp.array(probs)
+            return probs
 
-        # Trained model inference
+        import jax
+        import jax.numpy as jnp
         s = jnp.array(syndrome, dtype=jnp.float32).reshape(1, -1)
         logits = self._model.apply(self._params, s)
         probs = jax.nn.sigmoid(logits)
-        return probs.reshape(-1)
+        return np.asarray(probs.reshape(-1))
 
     # ── Training ───────────────────────────────────────────
 
     def train(
         self,
-        syndromes: Union[np.ndarray, jnp.ndarray],
-        errors: Union[np.ndarray, jnp.ndarray],
+        syndromes: np.ndarray,
+        errors: np.ndarray,
         epochs: int = 100,
         batch_size: int = 32,
         learning_rate: float = 0.001,
@@ -484,6 +483,8 @@ class NeuralDecoder:
         verbose: bool = True,
     ) -> Dict[str, List[float]]:
         """Train the neural decoder on syndrome-error pairs.
+
+        Requires JAX, Flax, and optax.
 
         Args:
             syndromes: Array of syndrome vectors (n_samples, n_checks).
@@ -497,6 +498,8 @@ class NeuralDecoder:
         Returns:
             Dict with 'train_loss' and 'val_loss' histories.
         """
+        import jax
+        import jax.numpy as jnp
         import optax
 
         syndromes = jnp.array(syndromes, dtype=jnp.float32)
@@ -578,7 +581,7 @@ class NeuralDecoder:
 
             if verbose and (epoch % max(1, epochs // 10) == 0 or epoch == epochs - 1):
                 v_str = f" val={history['val_loss'][-1]:.4f}" if history["val_loss"] else ""
-                print(f"  Epoch {epoch + 1}/{epochs}  loss={avg_loss:.4f}{v_str}")
+                logger.info("  Epoch %d/%d  loss=%.4f%s", epoch + 1, epochs, avg_loss, v_str)
 
         self._trained = True
         return history
@@ -607,9 +610,10 @@ class NeuralDecoder:
     @classmethod
     def _build_repetition_model(cls, n: int) -> "NeuralDecoder":
         """Build a pre-initialized model for repetition code of length n."""
+        import jax
+        import jax.numpy as jnp
         decoder = cls(n_qubits=n, n_checks=n - 1, hidden_dims=[32, 32])
         decoder._build_model()
-        # Initialize with near-zero weights (model detects errors from syndrome)
         key = jax.random.PRNGKey(0)
         dummy = jnp.zeros((1, n - 1), dtype=jnp.float32)
         decoder._params = decoder._model.init(key, dummy)
@@ -619,6 +623,8 @@ class NeuralDecoder:
     @classmethod
     def _build_surface_model(cls, d: int, n_data: int, n_checks: int) -> "NeuralDecoder":
         """Build a pre-initialized model for surface code of distance d."""
+        import jax
+        import jax.numpy as jnp
         decoder = cls(n_qubits=n_data, n_checks=n_checks, hidden_dims=[128, 128, 64])
         decoder._build_model()
         key = jax.random.PRNGKey(42)

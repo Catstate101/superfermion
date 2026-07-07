@@ -3,7 +3,6 @@
 import pytest
 
 import superfermion as sf
-from superfermion.backends.factory import get_backend
 from superfermion.circuit import Circuit
 from superfermion.compiler.specs import get_spec
 
@@ -36,15 +35,13 @@ class TestCompile:
 
     def test_compiled_circuit_runs_on_simulator(self, bell_circuit):
         compiled = _try_compile(bell_circuit)
-        backend = get_backend("statevector")
-        result = backend.run(compiled, shots=500, seed=SEED)
+        result = sf.run(compiled, device="cpu", shots=500, seed=SEED)
         assert sum(result.counts.values()) == 500
 
     def test_compiled_preserves_bell_distribution(self, bell_circuit):
         compiled = _try_compile(bell_circuit)
-        backend = get_backend("statevector")
-        original = backend.run(bell_circuit, shots=0, seed=SEED)
-        optimized = backend.run(compiled, shots=0, seed=SEED)
+        original = sf.run(bell_circuit, device="cpu", shots=0, seed=SEED)
+        optimized = sf.run(compiled, device="cpu", shots=0, seed=SEED)
 
         if original.probabilities and optimized.probabilities:
             assert abs(original.probabilities.get("00", 0) - 0.5) < 0.01

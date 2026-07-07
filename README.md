@@ -1,10 +1,9 @@
 # Superfermion
 
-A high-performance quantum-circuit simulator with **12+ backends**, native
-adjoint differentiation, MPS tensor networks scaling to **200+ qubits**,
-built-in quantum error correction (11 codes + 4 decoders), multi-framework
-ML integration (Flax / PyTorch / TensorFlow), and a Rust SIMD acceleration
-core with PyO3 bindings.
+A high-performance quantum computing framework with a Python API and a
+Rust simulation core. Statevector, MPS, stabilizer, and density matrix
+simulation methods with native adjoint differentiation, quantum error
+correction, and multi-framework interop.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://rust-lang.org)
@@ -15,38 +14,29 @@ core with PyO3 bindings.
 ## What is Superfermion?
 
 Superfermion is a quantum computing framework that combines a Python-native API
-with a Rust SIMD acceleration core. It provides:
+with a Rust acceleration core (Rayon multithreading + in-place statevector).
 
-- **12+ simulator backends** — statevector, Rust (AVX-2/FMA), MPS, stabilizer
-  (Aaronson-Gottesman tableau), density matrix, JAX, JAX-MPS, CUDA (cuQuantum),
-  CuPy, CuPy-MPS, D-Wave annealer, distributed JAX cluster
-- **Singularity auto-router** — automatically dispatches circuits to the
-  optimal backend based on qubit count, gate set, and memory constraints
+- **4 simulation methods** — statevector (CPU/GPU), MPS tensor network,
+  stabilizer (Aaronson-Gottesman tableau), density matrix (Kraus channels)
 - **Adjoint differentiation** — 1 forward + 1 backward pass regardless of
-  parameter count; 15-28x faster than PennyLane Lightning for VQE/QML gradients
-  at n=4-10 with 8-20 parameters
-- **MPS tensor networks** — Python wrapper around Rust MPS with faer-based QR
-  decomposition; lazy SWAP routing; scales to 200+ qubits for low-entanglement
-  circuits
-- **Stabilizer simulator** — word-packed Aaronson-Gottesman tableau; Clifford
-  auto-dispatch from every backend; poly-time simulation to ~1000 qubits
-- **Quantum Error Correction** — 11 codes (Repetition, Shor, Steane, Bacon-Shor,
-  Surface, Toric, Color, Honeycomb, LDPC, Bivariate Bicycle, GKP) + 4 decoders
-  (MWPM, Union-Find, BP+OSD, Neural)
-- **Multi-framework ML** — `QuantumLayer` (Flax), `TorchQuantumLayer` (PyTorch),
-  `TFQuantumLayer` (TensorFlow); 5 gradient methods (adjoint, parameter-shift,
-  SPSA, QNG, Riemannian)
-- **Quantum algorithms** — VQE, QAOA, QSVM, QRL, QBM, Grover, QPE, HHL,
-  Amplitude Estimation
-- **Chemistry module** — Jordan-Wigner + Bravyi-Kitaev transformations, UCCSD
-  ansatz, PySCF bridge, molecular Hamiltonian library
-- **Hardware compilation** — gate decomposition, rotation merging, SABRE qubit
-  routing, Pauli twirling, dynamical decoupling; targets IBM, Rigetti, IonQ, IQM
+  parameter count; up to 200x faster than parameter-shift for deep circuits
+- **MPS tensor networks** — Rust MPS with faer-based QR decomposition and
+  lazy SWAP routing; scales to 200+ qubits for low-entanglement circuits
+- **Stabilizer simulator** — word-packed tableau; Clifford circuits at
+  poly-time to ~1000 qubits
+- **Quantum Error Correction** — 10 codes (Repetition, Shor, Steane,
+  Bacon-Shor, Surface, Toric, Color, Honeycomb, Hypercube, CSS) +
+  4 decoders (MWPM, Union-Find, BP+OSD, Neural)
+- **Multi-framework ML** — `QuantumLayer` (Flax), `TorchQuantumLayer`
+  (PyTorch), `TFQuantumLayer` (TensorFlow)
+- **5 gradient methods** — adjoint, parameter-shift, SPSA, QNG, Riemannian
+- **Quantum algorithms** — VQE, QAOA, Grover, QPE, HHL, Amplitude Estimation
+- **Chemistry module** — Jordan-Wigner + Bravyi-Kitaev transformations,
+  UCCSD ansatz, PySCF bridge, molecular Hamiltonian library
+- **Hardware compilation** — gate decomposition, rotation merging, SABRE
+  qubit routing, Pauli twirling; targets IBM, Rigetti, IonQ, IQM
 - **QPU providers** — IBM Quantum, IonQ, AWS Braket, OpenQuantum
-- **Cross-framework bridges** — Qiskit, Cirq, PennyLane, Braket, IonQ, OpenQASM 2/3
-- **CLI** — 26+ commands (`sf vqe`, `sf qaoa`, `sf qec`, `sf validate`, `sf convert`, …)
-- **FastAPI backend** — code execution server, Docker Compose stack
-  with PostgreSQL
+- **Cross-framework bridges** — Qiskit, Cirq, PennyLane, OpenQASM 2/3
 
 ---
 
@@ -57,14 +47,17 @@ git clone https://github.com/superfermion/superfermion.git
 cd superfermion
 pip install -e .
 
-# Build the Rust extension (one-time)
+# Build the Rust extension (required for simulation)
+pip install maturin
 cd crates/sf-bindings && maturin develop --release && cd ../..
 
-# CRITICAL: maturin develop writes to .venv/Lib/site-packages/_sf_core/,
-# but Python imports from superfermion/_sf_core.pyd. Without this copy,
-# Rust changes silently don't take effect:
-cp .venv/Lib/site-packages/_sf_core/_sf_core.cp313-win_amd64.pyd \
-   superfermion/_sf_core.pyd
+# Copy the built extension into the package
+# Linux:
+cp target/release/lib_sf_core.so superfermion/_sf_core.so
+# macOS:
+# cp target/release/lib_sf_core.dylib superfermion/_sf_core.so
+# Windows:
+# cp target/release/_sf_core.dll superfermion/_sf_core.pyd
 ```
 
 Requirements: Python 3.10–3.13, Rust 1.75+, ~3 GB free disk for the Rust build.
@@ -75,7 +68,7 @@ pip install -e ".[dev]"        # pytest, ruff, mypy, black
 pip install -e ".[gpu]"        # JAX with CUDA 12
 pip install -e ".[qpu]"        # IBM + AWS Braket SDKs
 pip install -e ".[benchmarks]" # PennyLane, Qiskit Aer, pandas, matplotlib
-pip install -e ".[chemistry]"  # PySCF
+pip install -e ".[chemistry]"  # PySCF, SciPy
 pip install -e ".[viz]"        # matplotlib
 pip install -e ".[all]"        # everything
 ```
@@ -88,190 +81,118 @@ pip install -e ".[all]"        # everything
 import superfermion as sf
 
 # Bell state
-qc = sf.Circuit(2)
-qc.h(0)
-qc.cx(0, 1)
-result = sf.run(qc, backend="rust", shots=1024)
+qc = sf.Circuit(2).h(0).cx(0, 1)
+result = sf.run(qc, device="cpu", shots=1024)
 print(result.counts)  # {'00': ~512, '11': ~512}
 
-# Expectation value via the auto-routing backend
-sing = sf.get_backend("singularity")
-print(sing.expval(qc, "ZZ"))  # 1.0
+# Exact simulation with sf.simulate()
+state = sf.simulate(qc, device="cpu")
+print(state.numpy())       # [0.707+0j, 0, 0, 0.707+0j]
+print(state.entropy())     # 0.0 (pure state)
+print(state.purity())      # 1.0
 
-# VQE-style gradient via adjoint differentiation
-from superfermion.observables.core import SparsePauliOp
-from superfermion.qml.gradient.adjoint import adjoint_grad_vector
+# Expectation value (Rust-native)
+zz_obs = [([3, 3], 1.0, 0.0)]  # ZZ observable
+print(state.expectation(zz_obs))  # 1.0
 
-qc = sf.Circuit(4)
-names = []
-for q in range(4):
-    nm = f"t{q}"
-    qc.ry(sf.param(nm), q)
-    names.append(nm)
-for i in range(3):
-    qc.cx(i, i + 1)
-
-obs = SparsePauliOp.from_dict({"ZZZZ": 1.0, "XIII": 0.5})
-theta = [0.1, 0.2, 0.3, 0.4]
-grad = adjoint_grad_vector(qc, obs, names, theta)
+# Parameterized circuit with gradient
+qc = sf.Circuit(1).ry(sf.param("theta"), 0)
+bound = qc.bind({"theta": 0.5})
+state = sf.simulate(bound, device="cpu")
+grads = state.grad([([3], 1.0, 0.0)], qc.to_ir(), {"theta": 0.5})
+print(grads)  # {"theta": -0.479...}
 ```
 
 ---
 
 ## Architecture
 
+**Python is the API, Rust Does the Work.** All performance-critical computation runs in Rust. Python provides the fluent API surface. JAX is used only in `nn/quantum_layer.py` for the Flax `custom_vjp` bridge.
+
 ```
 Python API (superfermion/)
-    |-- Circuit, run(), compile(), param(), train(), Pipeline
-    |-- backends/     12+ simulator backends + auto-router
-    |-- qml/          templates, gradients (adjoint, param-shift, SPSA, QNG)
-    |-- nn/           Flax/PyTorch/TF quantum layers + classical NN building blocks
-    |-- algorithms/   VQE, QAOA, QSVM, QRL, QBM, Grover, QPE, HHL, AmplitudeEst
+    |-- Circuit, run(), simulate(), State, MethodError, RunResult
+    |-- devices/      RustDevice (CPU/GPU), IBM, IonQ, Braket providers
+    |-- observables/   PauliString, SparsePauliOp, Hamiltonian, expval
+    |-- qml/          gradients (adjoint, param-shift, SPSA, QNG, Riemannian, SR)
+    |-- nn/           Thin ML bridges: Flax/PyTorch/TF → sf.State.grad()
+    |-- algorithms/   VQE, QAOA, QSVM, QBM, QRL + Grover, QPE, HHL
     |-- chemistry/    JW/BK transforms, UCCSD ansatz, PySCF bridge
-    |-- qec/          11 codes + 4 decoders
-    |-- compiler/     gate decomposition, rotation merge, SABRE routing, twirling
-    |-- runtime/      job orchestration, cloud providers (IBM, IonQ, AWS, OpenQuantum)
-    |-- pulse/        waveforms, schedules, gate calibration
-    |-- bridge/       Qiskit, Cirq, PennyLane, Braket, IonQ, QASM interop
-    |-- viz/          matplotlib circuit drawings, Bloch sphere, histograms
-    |-- serve/        FastAPI backend
-    |-- telemetry/   structured logging, tracing, metrics
-    |-- security/    credential management, TLS, tokens
-    |-- utils/        exceptions (15-class hierarchy), validation, logging
+    |-- qec/          10 codes + 4 decoders
+    |-- compiler/     gate decomposition, rotation merge, SABRE routing
+    |-- bridge/       Qiskit, Cirq, PennyLane, QASM interop
+    |-- noise/        NoiseModel (Kraus channels for density matrix)
     |
-    +-- _sf_core.pyd  (Rust PyO3 extension)
-         |-- QuantumDAG, MPSState, GateSequence, StabilizerTableau
-         |-- Compiler, Router, CouplingMap, PulseSchedule
-         |-- QECCode, MWPMDecoder, UnionFindDecoder
+    +-- _sf_core  (Rust PyO3 extension: State, QuantumDAG, ...)
 
 Rust workspace (crates/)
-    |-- sf-ir/        Quantum IR: DAG representation, MPS, stabilizer, QASM parser
-    |-- sf-compiler/  Pass manager, gate cancellation, rotation merge, twirl
-    |-- sf-router/    SABRE routing, topology (IBM Eagle/Heron, Rigetti, IonQ, IQM)
-    |-- sf-pulse/     Waveforms (Gaussian, DRAG, square), schedules, calibration
-    |-- sf-qec/       Stabilizer codes, MWPM/UnionFind decoders, syndrome extraction
-    |-- sf-bindings/  PyO3 FFI bridge (_sf_core Python extension)
-
-    |-- Landing page, docs (22 pages), dashboard, notebooks (8), CLI terminal
-    |-- Code execution via FastAPI backend at localhost:8000
+    |-- sf-ir/        QuantumStateImpl trait, DAG, statevector, MPS,
+    |                 stabilizer, density matrix simulation engines
+    |-- sf-compiler/  Pass manager, gate cancellation, rotation merge
+    |-- sf-router/    SABRE routing, hardware topology
+    |-- sf-qec/       Stabilizer codes, MWPM/UnionFind decoders
+    |-- sf-gpu/       CUDA statevector simulation (cudarc, sm_75+)
+    |-- sf-bindings/  PyO3 FFI — State, QuantumDAG, compile
 ```
 
-### Backend dispatch flow
+### Execution flow
 
 ```
-sf.run(circuit, backend=..., shots=N)
-    |
-    v
-Validate parameters -> optional hardware compile -> auto-select backend
-    |
-    v
-Gate fusion (turbo engine) -- SKIP for stabilizer
-    |
-    v
-Dispatch to resolved backend:
-    |
-    +-- SingularityBackend (auto-router):
-    |     n <= 10:      numpy turbo
-    |     10 < n <= 32: Rust dense (AVX-2/FMA)
-    |     n > 22 + Clifford: stabilizer tableau
-    |     n > 32:       MPS (bond dim 64)
-    |
-    +-- RustBackend:          fusion -> Rust IR -> ping-pong statevector
-    +-- StabilizerBackend:    Rust tableau evolution -> sample
-    +-- MPSSimulatorBackend:  Rust MPS fast path or Python sweep
-    +-- DensityMatrixBackend: Kraus noise + Rust DM path
-    +-- JAXBackend:           JAX-native scan-based kernel
-    +-- CUSimulatorBackend:   NVIDIA cuQuantum GPU
-    +-- CupyBackend:          CuPy GPU
-    +-- DistributedJAXBackend: multi-node JAX
-    +-- DWaveBackend:         D-Wave quantum annealer
+sf.run(circuit, device="cpu", method="statevector", shots=N)
+    │
+    ▼
+runner.py — resolve device, bind params, optional compile
+    │
+    ▼
+RustDevice.execute(dag, method, shots)
+    │
+    ├── statevector    → dag.simulate()             [Rust, Rayon]
+    ├── mps            → dag.simulate_mps()         [Rust, faer]
+    ├── stabilizer     → dag.simulate_stabilizer()  [Rust, tableau]
+    ├── density_matrix → dag.simulate_dm_noisy()    [Rust, Kraus]
+    └── gpu            → dag.simulate_gpu()         [CUDA]
+    │
+    ▼
+sf.State (Rust-native) → RunResult(counts, state, metadata)
 ```
 
 ---
 
-## Backends
+## Simulation Methods
 
-| Backend | Alias(es) | Max Qubits | Best For |
-|---|---|---|---|
-| `statevector` | | ~25 | Small exact circuits |
-| `rust` | | ~32 | Dense simulation with SIMD |
-| `jax` | | ~30 | JIT-compiled, GPU-ready |
-| `mps` | | 200+ | Low-entanglement, QAOA, VQE |
-| `jax_mps` | | 200+ | JAX-based MPS |
-| `stabilizer` | | ~1000 | Clifford-only circuits |
-| `density_matrix` | | ~12 | Noisy simulation, Kraus ops |
-| `cuda` | | ~30 | NVIDIA GPU (cuQuantum) |
-| `cupy` | `cupy_sim` | ~30 | CuPy GPU |
-| `cuda_mps` | | 200+ | GPU-accelerated MPS |
-| `singularity` | `god`, `lightning`, `omnipotent` | auto | Auto-routing master backend |
-| `supremacy` | | auto | Supremacy benchmark core |
-| `dwave` | | — | D-Wave quantum annealer |
-| `cluster` | | auto | Distributed JAX across nodes |
+| Method | Max Qubits | Best For |
+|---|---|---|
+| `statevector` (default) | ~25 CPU, ~30 GPU | Exact simulation, gradient computation |
+| `mps` | 200+ | Low-entanglement circuits (QAOA, VQE, GHZ) |
+| `stabilizer` | ~1000 | Clifford-only circuits (QEC, randomized benchmarking) |
+| `density_matrix` | ~12 | Noisy simulation with Kraus channels |
 
-Use `sf.list_backends()` to see available backends and `sf.get_backend(name)` to
-get a backend instance.
+```python
+# MPS simulation
+result = sf.run(circuit, device="cpu", method="mps", shots=10000, bond_dim=64)
+
+# Stabilizer simulation
+result = sf.run(clifford_circuit, device="cpu", method="stabilizer", shots=10000)
+
+# GPU simulation (requires CUDA)
+result = sf.run(circuit, device="gpu", shots=0)
+```
 
 ---
 
 ## Benchmarks
 
-Performance measured against Qiskit-Aer 0.17 and PennyLane 0.42 across
-industry-standard workloads.
+Performance measured against Qiskit Aer 0.17 and PennyLane Lightning 0.45
+on CPU (details in [`notebooks/`](notebooks/)).
 
-### Speed advantages
-
-| Workload | Best SF backend | vs best non-SF | Speedup |
-|---|---|---|---|
-| Clifford circuits (any n) | `stabilizer` | aer-stabilizer | 2.3-3.5x |
-| QAOA (n=10-40) | `mps` | aer-mps | 5-11x |
-| Gradient (n=4-10, 8-20 params) | adjoint | pl.lightning | 15-28x |
-| GHZ states (n=10-22) | `mps` | aer-stabilizer | 5-7x |
-| Grover search | `stabilizer` / `singularity` | aer-stabilizer | 3-4x |
-| Bernstein-Vazirani | `singularity` | aer-stabilizer | 4-7x |
-| VQE-H2 (full SGD loop) | `statevector` | pennylane.default | 8.5x |
-| RandomUniversal n=20 | `mps` | aer-mps | 2.7x |
-
-### Test results
-
-```
-Full test suite:     552 passed
-Smoke (core):        113 passed (~30s runtime)
-Cross-framework:     78/78 accuracy checks pass
-Industry benchmark:  23/23 cells SF fastest
-QML benchmark:       13/13 cells SF fastest
-Scientific v2:       16/16 accuracy checks pass
-Heavy-workload:      25/25 cells SF fastest
-HCQ scaling:         29/29 cells SF fastest
-```
-
-Full per-cell tables in [`docs/benchmarks.md`](docs/benchmarks.md).
-
----
-
-## CLI
-
-```bash
-sf info                                   # system info
-sf version                                # sf + dependency versions
-sf validate                               # full installation audit
-sf backends                               # list available backends
-sf benchmark --qubits 10 --iterations 50  # quick performance sweep
-sf run circuit.json --shots 4096          # execute circuit from JSON
-sf vqe --hamiltonian H2                   # VQE on H2 / LiH / BeH2 / TFIM
-sf qaoa --graph ring6 --p-layers 3        # QAOA MaxCut
-sf chemistry H2 --vqe                     # quantum chemistry workflow
-sf qec --code steane --error X            # logical qubit lifecycle
-sf plugin list                            # list registered plugins
-sf auth login --provider ibm --token XXX  # configure provider credentials
-sf auth status                            # check credential status
-sf convert circuit.json circuit.qasm      # convert between formats
-sf estimate circuit.json --backend ibm    # estimate QPU execution cost
-sf compare circuit.json --backends statevector,jax  # compare backends
-sf jobs list --provider ibm               # manage quantum jobs
-sf qpu list --provider ibm                # list available QPUs
-```
-
-Full reference: [`docs/cli.md`](docs/cli.md).
+| Workload | SF vs Competitor | Speedup |
+|---|---|---|
+| Stabilizer (n=10–500, 10k shots) | vs Qiskit Aer stabilizer | 3.7–6.8x |
+| MPS GHZ (n=10–100, 10k shots) | vs Qiskit Aer MPS | 21–33x |
+| Adjoint gradient (n=4–16, depth=1) | vs PennyLane Lightning | 1.5–800x |
+| Adjoint vs param-shift (n=10) | SF internal | 20–198x (grows with params) |
+| Shot sampling (n=10–22, 100k shots) | vs Qiskit Aer | 1.6–9.5x |
+| VQE H2 end-to-end | vs PennyLane Lightning | 100x |
 
 ---
 
@@ -286,33 +207,22 @@ Full reference: [`docs/cli.md`](docs/cli.md).
 | Finite difference | `qml/gradient/parameter_shift.py` | Centered difference fallback |
 | SPSA | `qml/gradient/spsa.py` | Stochastic approximation; noisy-hardware friendly |
 | Quantum Natural | `qml/gradient/qng.py` | Fubini-Study metric; faster convergence |
-| Riemannian | `qml/gradient/riemannian.py` | Manifold-constrained optimization |
 
 ### Machine Learning Layers
 
 ```python
-# Flax (JAX)
-from superfermion.nn.quantum_layer import QuantumLayer
-layer = QuantumLayer(n_qubits=4, ansatz="hardware_efficient", backend="singularity")
-
-# PyTorch
-from superfermion.nn.torch_layer import TorchQuantumLayer
-layer = TorchQuantumLayer(n_qubits=4, n_layers=2, backend="singularity")
-
-# TensorFlow / Keras
-from superfermion.nn.tf_layer import TFQuantumLayer
-layer = TFQuantumLayer(n_qubits=4, n_layers=2, backend="singularity")
+from superfermion.nn.quantum_layer import QuantumLayer     # Flax (JAX)
+from superfermion.nn.torch_layer import TorchQuantumLayer  # PyTorch
+from superfermion.nn.tf_layer import TFQuantumLayer        # TensorFlow
 ```
 
 ### Quantum Error Correction
 
 ```python
-from superfermion.qec import SurfaceCode, MWPMDecoder, QECManager
+from superfermion.qec import SurfaceCode2D, MWPMDecoder, QECManager
 
-code = SurfaceCode(distance=3)
-decoder = MWPMDecoder(code)
-manager = QECManager(code, decoder)
-result = manager.run_logical_cycle()
+code = SurfaceCode2D(distance=3)
+circuit = code.build()
 ```
 
 ### Cross-Framework Bridge
@@ -320,10 +230,8 @@ result = manager.run_logical_cycle()
 ```python
 from superfermion.bridge import from_qiskit, to_qiskit, from_pennylane, to_cirq
 
-sf_circuit = from_qiskit(qiskit_circuit)     # Qiskit -> SF
-qiskit_circuit = to_qiskit(sf_circuit)       # SF -> Qiskit
-sf_circuit = from_pennylane(pl_tape)         # PennyLane -> SF
-cirq_circuit = to_cirq(sf_circuit)           # SF -> Cirq
+sf_circuit = from_qiskit(qiskit_circuit)
+qiskit_circuit = to_qiskit(sf_circuit)
 ```
 
 ---
@@ -332,18 +240,12 @@ cirq_circuit = to_cirq(sf_circuit)           # SF -> Cirq
 
 | Document | Content |
 |---|---|
-| [`docs/getting_started.md`](docs/getting_started.md) | First-time install + 5-minute tour |
-| [`docs/user_manual.md`](docs/user_manual.md) | Linear read-first reference |
-| [`docs/architecture.md`](docs/architecture.md) | Python + Rust module map |
+| [`docs/getting_started.md`](docs/getting_started.md) | First-time install + tour |
+| [`docs/architecture.md`](docs/architecture.md) | Rust-core architecture, module map, execution flow |
 | [`docs/api_reference.md`](docs/api_reference.md) | Full API surface |
-| [`docs/backends.md`](docs/backends.md) | Backend selection guide |
-| [`docs/benchmarks.md`](docs/benchmarks.md) | Canonical benchmark scoreboard |
-| [`docs/cli.md`](docs/cli.md) | CLI reference (26 commands) |
-| [`docs/tutorials/`](docs/tutorials/) | 8 runnable examples |
-| [`CLAUDE.md`](CLAUDE.md) | Developer context for AI-assisted work |
+| [`docs/tutorials/`](docs/tutorials/) | Runnable examples |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution guide |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release history |
-| [`SECURITY.md`](SECURITY.md) | Security policy |
 
 ---
 

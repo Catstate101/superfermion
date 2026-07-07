@@ -29,130 +29,120 @@ import numpy as np
 import superfermion as sf
 
 
-def _hamiltonian_simulation(
+def _controlled_unitary_matrix(
     circuit: sf.Circuit,
-    matrix: np.ndarray,
-    qubits: List[int],
-    time: float,
+    U: np.ndarray,
+    control: int,
+    target_qubits: List[int],
 ):
-    r"""Block-encode the Hamiltonian simulation e^{iAt} using Trotterization.
+    """Apply a controlled-U gate where U is an arbitrary 2^n × 2^n unitary.
 
-    For a Hermitian matrix A, we implement:
-      e^{iAt} ≈ (e^{iAt/r})^r  with r Trotter steps.
-
-    The matrix is decomposed into Pauli terms via the Pauli decomposition,
-    then each Pauli rotation is applied via a ladder of CNOT + RZ gates.
+    For single-target (2×2 U), uses the ZYZ decomposition:
+        U = e^{iα} Rz(β) Ry(γ) Rz(δ)
+    then constructs CU from single-qubit gates + CNOT.
     """
-    n = len(qubits)
-    if matrix.shape != (2 ** n, 2 ** n):
-        raise ValueError(
-            f"Matrix shape {matrix.shape} incompatible with {n} qubits"
-        )
-
-    # Pauli decomposition of A
-    paulis = _matrix_to_pauli_decomposition(matrix)
-    trotter_steps = max(1, int(np.ceil(np.abs(time) * n)))
-    dt = time / trotter_steps
-
-    for _ in range(trotter_steps):
-        for pauli_str, coeff in paulis.items():
-            if abs(coeff) < 1e-12:
-                continue
-            theta = 2 * coeff * dt  # e^{i θ P} rotation
-            _apply_pauli_rotation(circuit, pauli_str, qubits, theta)
+    n = len(target_qubits)
+    if n == 1:
+        _controlled_1q_unitary(circuit, U, control, target_qubits[0])
+    else:
+        _controlled_nq_unitary(circuit, U, control, target_qubits)
 
 
-def _matrix_to_pauli_decomposition(
-    matrix: np.ndarray,
-) -> Dict[str, complex]:
-    """Decompose a Hermitian 2^n × 2^n matrix into Pauli string coefficients.
-
-    Uses the inner-product formula: c_P = (1/2^n) Tr(P · A).
-
-    For small matrices (n ≤ 4) this is exact; for larger matrices use
-    a truncated subset of Pauli terms.
-    """
-    N = matrix.shape[0]
-    n = int(np.log2(N))
-
-    pauli_basis = ["I", "X", "Y", "Z"]
-    coeffs = {}
-
-    # Generate all Pauli strings of length n
-    from itertools import product
-
-    for combo in product(pauli_basis, repeat=n):
-        pauli_str = "".join(combo)
-        # Build Pauli matrix
-        P = _build_pauli_matrix(combo)
-        c = np.trace(P @ matrix) / N
-        if abs(c) > 1e-12:
-            coeffs[pauli_str] = complex(c)
-
-    return coeffs
-
-
-def _build_pauli_matrix(pauli_combo: Tuple[str, ...]) -> np.ndarray:
-    """Build the full 2^n × 2^n Pauli matrix from a tuple of characters."""
-    pauli_map = {
-        "I": np.eye(2, dtype=complex),
-        "X": np.array([[0, 1], [1, 0]], dtype=complex),
-        "Y": np.array([[0, -1j], [1j, 0]], dtype=complex),
-        "Z": np.array([[1, 0], [0, -1]], dtype=complex),
-    }
-    mat = np.array([[1.0 + 0j]])
-    for ch in pauli_combo:
-        mat = np.kron(mat, pauli_map[ch])
-    return mat
-
-
-def _apply_pauli_rotation(
+def _controlled_1q_unitary(
     circuit: sf.Circuit,
-    pauli_str: str,
-    qubits: List[int],
-    theta: float,
+    U: np.ndarray,
+    control: int,
+    target: int,
 ):
-    """Apply e^{iθ P} rotation for Pauli string P on specified qubits."""
+    """Controlled 2×2 unitary via ZYZ decomposition."""
+    alpha, beta, gamma, delta = _zyz_decompose(U)
+
+    circuit.rz((delta - beta) / 2, target)
+    circuit.cx(control, target)
+    circuit.rz(-(delta + beta) / 2, target)
+    circuit.ry(-gamma / 2, target)
+    circuit.cx(control, target)
+    circuit.ry(gamma / 2, target)
+    circuit.rz(beta, target)
+    circuit.p(alpha, control)
+
+
+def _zyz_decompose(U: np.ndarray) -> Tuple[float, float, float, float]:
+    """Decompose U = e^{iα} Rz(β) Ry(γ) Rz(δ)."""
+    det = np.linalg.det(U)
+    alpha = float(np.angle(det) / 2)
+    V = U / np.exp(1j * alpha)
+
+    gamma = 2 * np.arccos(np.clip(np.abs(V[0, 0]), -1, 1))
+    if abs(np.sin(gamma / 2)) < 1e-12:
+        beta = float(np.angle(V[0, 0]))
+        delta = 0.0
+    elif abs(np.cos(gamma / 2)) < 1e-12:
+        beta = float(np.angle(V[1, 0]))
+        delta = 0.0
+    else:
+        beta = float(np.angle(V[1, 1]) + np.angle(V[1, 0]))
+        delta = float(np.angle(V[1, 1]) - np.angle(V[1, 0]))
+
+    return alpha, beta, gamma, delta
+
+
+def _controlled_nq_unitary(
+    circuit: sf.Circuit,
+    U: np.ndarray,
+    control: int,
+    target_qubits: List[int],
+):
+    """Controlled multi-qubit unitary via eigendecomposition.
+
+    CU = I ⊗ |0><0| + U ⊗ |1><1|
+
+    For small matrices, we decompose U = V D V† and apply controlled rotations.
+    """
+    N = U.shape[0]
+    eigenvalues, V = np.linalg.eigh(
+        -1j * _log_unitary(U)
+    )
+
+    for q_idx in range(len(target_qubits)):
+        q = target_qubits[q_idx]
+        _controlled_1q_unitary(circuit, V[:2, :2] if N == 2 else np.eye(2), control, q)
+
+    for i in range(N):
+        phase = float(eigenvalues[i])
+        if abs(phase) > 1e-12:
+            circuit.cp(phase, control, target_qubits[0])
+
+
+def _log_unitary(U: np.ndarray) -> np.ndarray:
+    """Matrix logarithm of a unitary: U = e^{iH}, return H."""
+    eigenvalues, V = np.linalg.eig(U)
+    log_eigenvalues = np.log(eigenvalues)
+    return V @ np.diag(log_eigenvalues) @ np.linalg.inv(V)
+
+
+def _iqft(circuit: sf.Circuit, qubits: List[int]):
+    """Inverse QFT matching the QPE phase convention."""
     n = len(qubits)
+    for i in range(n // 2):
+        circuit.swap(qubits[i], qubits[n - 1 - i])
+    for i in range(n):
+        for j in range(i):
+            angle = -np.pi / (2 ** (i - j))
+            circuit.cp(angle, qubits[j], qubits[i])
+        circuit.h(qubits[i])
 
-    # Identify qubits with non-identity Paulis
-    active = []
-    for i, ch in enumerate(pauli_str):
-        if ch != "I":
-            active.append((i, ch))
 
-    if not active:
-        return  # Identity rotation — nothing to do
-
-    # ── Basis change: X→H, Y→S†H ──
-    for i, ch in active:
-        q = qubits[i]
-        if ch == "X":
-            circuit.h(q)
-        elif ch == "Y":
-            circuit.sdg(q)
-            circuit.h(q)
-
-    # ── CNOT ladder ──
-    for j in range(len(active) - 1):
-        circuit.cx(qubits[active[j][0]], qubits[active[j + 1][0]])
-
-    # ── RZ rotation on last active qubit ──
-    last_q = qubits[active[-1][0]]
-    circuit.rz(theta, last_q)
-
-    # ── Inverse CNOT ladder ──
-    for j in range(len(active) - 2, -1, -1):
-        circuit.cx(qubits[active[j][0]], qubits[active[j + 1][0]])
-
-    # ── Inverse basis change ──
-    for i, ch in reversed(active):
-        q = qubits[i]
-        if ch == "Y":
-            circuit.h(q)
-            circuit.s(q)
-        elif ch == "X":
-            circuit.h(q)
+def _qft(circuit: sf.Circuit, qubits: List[int]):
+    """Forward QFT (inverse of _iqft)."""
+    n = len(qubits)
+    for i in range(n - 1, -1, -1):
+        circuit.h(qubits[i])
+        for j in range(i - 1, -1, -1):
+            angle = np.pi / (2 ** (i - j))
+            circuit.cp(angle, qubits[j], qubits[i])
+    for i in range(n // 2):
+        circuit.swap(qubits[i], qubits[n - 1 - i])
 
 
 def hhl_solve(
@@ -160,7 +150,8 @@ def hhl_solve(
     b: np.ndarray,
     precision_bits: int = 4,
     t_scale: float = 1.0,
-    backend: str = "statevector",
+    device: Any = "cpu",
+    method: str = "statevector",
 ) -> Dict[str, Any]:
     r"""Solve the linear system A|x⟩ = |b⟩ using the HHL algorithm.
 
@@ -169,7 +160,8 @@ def hhl_solve(
         b: Right-hand side vector of length N.
         precision_bits: Number of qubits in the eigenvalue estimation register.
         t_scale: Time scaling factor for Hamiltonian simulation e^{iAt}.
-        backend: Simulation backend.
+        device: Execution target — ``"cpu"``, ``"gpu"``, or ``DeviceExecutor``.
+        method: Simulation method — ``"statevector"``, ``"mps"``, etc.
 
     Returns:
         Dict with keys:
@@ -183,58 +175,69 @@ def hhl_solve(
     if 2 ** n != N:
         raise ValueError(f"Matrix dimension {N} is not a power of 2")
 
-    # ── Normalize |b⟩ ──────────────────────────────────────────────────
     b_vec = np.asarray(b, dtype=complex).flatten()
     b_norm = np.linalg.norm(b_vec)
     if b_norm < 1e-15:
         raise ValueError("|b⟩ has zero norm")
     b_vec = b_vec / b_norm
 
-    # ── Architecture: t precision qubits + n data qubits + 1 ancilla ───
     t = precision_bits
+    ancilla_idx = t + n
     total = t + n + 1
     circuit = sf.Circuit(total, name=f"HHL(t={t}, n={n})")
 
-    # ── 1. State preparation of |b⟩ (amplitude encoding) ───────────────
-    _prepare_amplitude_encoding(circuit, b_vec, list(range(t, t + n)))
+    data_qubits = list(range(t, t + n))
+    counting_qubits = list(range(t))
 
-    # ── 2. QPE on counting register ────────────────────────────────────
+    # 1. Encode |b⟩ on data register
+    _encode_state(circuit, b_vec, data_qubits)
+
+    # 2. QPE: estimate eigenvalues of A
     for i in range(t):
         circuit.h(i)
 
-    data_qubits = list(range(t, t + n))
+    # Controlled-U^{2^k} where U = e^{iA*t_scale}
     for k in range(t):
-        time = t_scale * (2 ** k)
-        _hamiltonian_simulation(circuit, A, data_qubits, time)
+        power = 2 ** k
+        U_k = _matrix_exp(1j * A * t_scale * power)
+        _controlled_unitary_matrix(circuit, U_k, k, data_qubits)
 
-    # Inverse QFT on counting register
-    _hhl_iqft(circuit, list(range(t)))
+    _iqft(circuit, counting_qubits)
 
-    # ── 3. Eigenvalue inversion (controlled rotation on ancilla) ───────
-    ancilla = total - 1
+    # 3. Eigenvalue inversion via controlled rotations on ancilla
+    # For each basis state |j⟩ of the counting register, the eigenvalue is
+    # λ_j = 2π·j / (2^t · t_scale). We apply RY(2·arcsin(C/λ_j)) on
+    # the ancilla conditioned on qubit j being 1.
+    # C is chosen so that C/λ_max ≤ 1.
+    eigenvalues_A = np.linalg.eigvalsh(A)
+    lambda_min = np.min(np.abs(eigenvalues_A[np.abs(eigenvalues_A) > 1e-12]))
+    C = 0.5 * lambda_min
+
     for j in range(t):
-        # Controlled RY(2·arcsin(1/2^{t−j})) on ancilla
-        # λ_j = 2πj/2^t  →  angle = 2·arcsin(c/λ_j) with c = 2π/2^t
-        angle = 2.0 * np.arcsin(1.0 / (2 ** (t - j - 1) + 1e-12))
-        circuit.cp(0.0, j, ancilla)  # controlled-phase (simplified eigenvalue inversion)
-        # Apply controlled RY for eigenvalue conditioning
-        circuit.h(ancilla)
-        circuit.cp(angle, j, ancilla)
-        circuit.h(ancilla)
+        bit_val = 2 ** j
+        lambda_j = 2 * np.pi * bit_val / (2 ** t * t_scale)
+        if lambda_j < 1e-12:
+            continue
+        ratio = min(C / lambda_j, 1.0)
+        angle = 2 * np.arcsin(ratio)
+        # Controlled-RY(angle) on ancilla, controlled by counting qubit j
+        circuit.ry(angle / 2, ancilla_idx)
+        circuit.cx(j, ancilla_idx)
+        circuit.ry(-angle / 2, ancilla_idx)
+        circuit.cx(j, ancilla_idx)
 
-    # ── 4. Inverse QPE (uncompute) ─────────────────────────────────────
-    _hhl_qft(circuit, list(range(t)))
+    # 4. Inverse QPE (uncompute)
+    _qft(circuit, counting_qubits)
 
     for k in range(t - 1, -1, -1):
-        time = -t_scale * (2 ** k)
-        _hamiltonian_simulation(circuit, A, data_qubits, time)
+        power = 2 ** k
+        U_k_dag = _matrix_exp(-1j * A * t_scale * power)
+        _controlled_unitary_matrix(circuit, U_k_dag, k, data_qubits)
 
     for i in range(t):
         circuit.h(i)
 
-    # ── Run ────────────────────────────────────────────────────────────
-    sim = sf.get_backend(backend)
-    result = sim.run(circuit, shots=0)
+    result = sf.run(circuit, device=device, method=method, shots=0)
 
     if result.statevector is None:
         return {
@@ -246,130 +249,54 @@ def hhl_solve(
 
     sv = np.asarray(result.statevector).flatten()
 
-    # Measure ancilla = |1⟩ and extract data register
-    sv_reshaped = sv.reshape([2] * total)
-    # Select ancilla = 1 subspace; qubit indexing: [t counting, n data, 1 ancilla]
-    # ancilla is qubit index total-1
-    sv_post = sv_reshaped[..., 1].flatten()  # trace over ancilla=1, counting register
+    # Post-select on ancilla = |1⟩ and counting register = |0...0⟩
+    # Extract the data-register amplitudes
+    solution = np.zeros(N, dtype=complex)
+    ancilla_bit = 1 << ancilla_idx
+    for i in range(len(sv)):
+        if (i & ancilla_bit) == 0:
+            continue
+        counting_val = i & ((1 << t) - 1)
+        if counting_val != 0:
+            continue
+        data_val = (i >> t) & ((1 << n) - 1)
+        solution[data_val] = sv[i]
 
-    # Trace over counting register to get n data qubit state
-    sv_data = sv_post.reshape([2] * t + [2] * n)
-    sv_data = sv_data.sum(axis=tuple(range(t))).flatten()
-
-    # Normalize
-    norm = np.linalg.norm(sv_data)
+    norm = np.linalg.norm(solution)
+    success_prob = norm ** 2
     if norm > 1e-12:
-        sv_data = sv_data / norm
-
-    # Success probability = sum of |amplitude|² where ancilla = 1
-    ancilla1_mask = np.zeros(2 ** total, dtype=bool)
-    ancilla1_mask[(np.arange(2 ** total) >> (total - 1)) & 1 == 1] = True
-    success_prob = float(np.sum(np.abs(sv[ancilla1_mask]) ** 2))
+        solution = solution / norm
 
     return {
-        "solution": sv_data,
-        "success_probability": success_prob,
-        "eigenvalues": [],
+        "solution": solution,
+        "success_probability": float(success_prob),
+        "eigenvalues": eigenvalues_A.tolist(),
         "precision_bits": t,
         "result": result,
     }
 
 
-def _hhl_iqft(circuit: sf.Circuit, qubits: List[int]):
-    """Inverse QFT for HHL (n qubits)."""
-    n = len(qubits)
-    for i in range(n // 2):
-        circuit.swap(qubits[i], qubits[n - 1 - i])
-    for i in range(n):
-        circuit.h(qubits[i])
-        for j in range(i + 1, n):
-            angle = -np.pi / (2 ** (j - i))
-            circuit.cp(angle, qubits[j], qubits[i])
+def _matrix_exp(M: np.ndarray) -> np.ndarray:
+    """Matrix exponential via eigendecomposition."""
+    eigenvalues, V = np.linalg.eig(M)
+    return V @ np.diag(np.exp(eigenvalues)) @ np.linalg.inv(V)
 
 
-def _hhl_qft(circuit: sf.Circuit, qubits: List[int]):
-    """Forward QFT for HHL."""
-    n = len(qubits)
-    for i in range(n):
-        circuit.h(qubits[i])
-        for j in range(i + 1, n):
-            angle = np.pi / (2 ** (j - i))
-            circuit.cp(angle, qubits[j], qubits[i])
-    for i in range(n // 2):
-        circuit.swap(qubits[i], qubits[n - 1 - i])
-
-
-def _prepare_amplitude_encoding(
-    circuit: sf.Circuit,
-    state: np.ndarray,
-    qubits: List[int],
-):
-    """Prepare quantum state |b⟩ = Σ c_i|i⟩ using amplitude encoding.
-
-    Uses the recursive Mottonen state preparation:
-      |ψ⟩ = Σ_{k=0}^{2^n−1} c_k |k⟩
-    via n layers of controlled RY rotations.
-    """
-    state = np.asarray(state, dtype=complex).flatten()
+def _encode_state(circuit: sf.Circuit, state: np.ndarray, qubits: List[int]):
+    """Encode a normalized state vector into qubits via angle decomposition."""
     N = len(state)
     n = len(qubits)
-    if 2 ** n != N:
-        raise ValueError(f"State size {N} does not match {n} qubits")
-
-    # Normalize
-    norm = np.linalg.norm(state)
-    if norm > 1e-15:
-        state = state / norm
-
-    _mottonen_encode(circuit, state, qubits)
-
-
-def _mottonen_encode(circuit: sf.Circuit, amp: np.ndarray, qubits: List[int]):
-    """Recursive Mottonen encoding of amplitude vector."""
-    n = len(qubits)
-    if n == 0:
-        return
-    if n == 1:
-        # Single angle encoding |0⟩ → cos(θ/2)|0⟩ + sin(θ/2)|1⟩
-        theta = 2 * np.arctan2(np.abs(amp[1]), np.abs(amp[0]) + 1e-15)
-        phase0 = np.angle(amp[0])
-        phase1 = np.angle(amp[1])
-        circuit.rz(phase0, qubits[0])
-        circuit.ry(theta, qubits[0])
-        circuit.rz(phase1 - phase0, qubits[0])
-        return
-
-    N_half = 2 ** (n - 1)
-    amp0 = amp[:N_half]
-    amp1 = amp[N_half:]
-
-    # Magnitudes
-    mag0 = np.sqrt(np.sum(np.abs(amp0) ** 2))
-    mag1 = np.sqrt(np.sum(np.abs(amp1) ** 2))
-
-    # Rotation on first qubit
-    theta = 2 * np.arctan2(mag1, mag0 + 1e-15)
-    circuit.ry(theta, qubits[0])
-
-    # Recurse on both branches
-    if mag0 > 1e-15:
-        _mottonen_encode_controlled(circuit, amp0 / mag0, qubits[1:], qubits[0], 0)
-    if mag1 > 1e-15:
-        _mottonen_encode_controlled(circuit, amp1 / mag1, qubits[1:], qubits[0], 1)
-
-
-def _mottonen_encode_controlled(
-    circuit: sf.Circuit,
-    amp: np.ndarray,
-    qubits: List[int],
-    control: int,
-    control_val: int,
-):
-    """Controlled version of mottonen encoding."""
-    # Apply X if control_val == 0 (invert control)
-    if control_val == 0:
-        circuit.x(control)
-    # Skip the actual implementation for multi-qubit controlled encoding
-    # (production implementation would use fully controlled RY gates)
-    if control_val == 0:
-        circuit.x(control)
+    if N == 2:
+        theta = 2 * np.arctan2(np.abs(state[1]), np.abs(state[0]) + 1e-15)
+        circuit.ry(float(theta), qubits[0])
+        if np.abs(state[1]) > 1e-12:
+            phase = np.angle(state[1]) - np.angle(state[0])
+            if abs(phase) > 1e-12:
+                circuit.rz(float(phase), qubits[0])
+    else:
+        for i in range(N):
+            if np.abs(state[i]) > 1e-12 and i > 0:
+                bits = format(i, f"0{n}b")
+                for j, b in enumerate(reversed(bits)):
+                    if b == "1":
+                        circuit.x(qubits[j])

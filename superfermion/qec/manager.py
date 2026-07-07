@@ -86,8 +86,7 @@ class QECManager:
         """High-intensity audit of the 4D Hypercube threshold."""
         code = self.get_code("hypercube_4d")
         c = code.build()
-        start_time = 0 # Placeholder for time profiling
-        res = sf.run(c, shots=100)
+        res = sf.run(c, method="stabilizer", shots=100)
         return {
             "dimension": "4D",
             "lattice_size": "2x2x2x2",

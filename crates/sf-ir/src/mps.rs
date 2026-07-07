@@ -853,3 +853,69 @@ impl QuantumDAG {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::OpType;
+    use approx::assert_relative_eq;
+
+    fn mps_norm_sq(state: &MPSState) -> f64 {
+        state
+            .to_statevector()
+            .iter()
+            .map(|c| c.norm_sqr())
+            .sum()
+    }
+
+    #[test]
+    fn test_bell_state_norm() {
+        let mut mps = MPSState::new(2, 64);
+        let h = OpType::H.to_matrix();
+        let cnot = OpType::CNOT.to_matrix();
+
+        mps.apply_1q_gate(0, &h);
+        mps.apply_2q_gate(0, 1, &cnot);
+
+        assert_relative_eq!(mps_norm_sq(&mps), 1.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn test_ghz_state_norm() {
+        let mut mps = MPSState::new(4, 64);
+        let h = OpType::H.to_matrix();
+        let cnot = OpType::CNOT.to_matrix();
+
+        mps.apply_1q_gate(0, &h);
+        for i in 0..3 {
+            mps.apply_2q_gate(i, i + 1, &cnot);
+        }
+
+        assert_relative_eq!(mps_norm_sq(&mps), 1.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn test_bell_state_zz_expval() {
+        let mut mps = MPSState::new(2, 64);
+        let h = OpType::H.to_matrix();
+        let cnot = OpType::CNOT.to_matrix();
+
+        mps.apply_1q_gate(0, &h);
+        mps.apply_2q_gate(0, 1, &cnot);
+
+        // Pauli bytes: 0=I, 1=X, 2=Y, 3=Z
+        let zz = mps.pauli_expval(&[3, 3]);
+        assert_relative_eq!(zz.re, 1.0, epsilon = 1e-8);
+        assert!(zz.im.abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_mps_initial_state_is_zero() {
+        let mps = MPSState::new(2, 64);
+        let sv = mps.to_statevector();
+        assert_relative_eq!(sv[0].re, 1.0, epsilon = 1e-10);
+        assert!(sv[1].norm() < 1e-10);
+        assert!(sv[2].norm() < 1e-10);
+        assert!(sv[3].norm() < 1e-10);
+    }
+}
+

@@ -23,7 +23,7 @@ Usage:
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -35,8 +35,8 @@ def amplitude_estimation(
     oracle: Callable[[sf.Circuit], None],
     precision_bits: int = 5,
     n_qubits: Optional[int] = None,
-    backend: str = "statevector",
-    method: str = "canonical",
+    device: Any = "cpu",
+    ae_method: str = "canonical",
     shots: int = 0,
 ) -> Dict[str, Any]:
     r"""Estimate the amplitude of the marked subspace.
@@ -46,9 +46,9 @@ def amplitude_estimation(
         oracle: Function S_χ that marks the "good" subspace via a phase flip.
         precision_bits: Number of estimation qubits (m). Gives error O(1/2^m).
         n_qubits: Qubit count of the state register. Auto-detected if None.
-        backend: Simulation backend.
-        method: ``"canonical"`` (QPE-based, optimal) or ``"iterative"``
-                (no QPE, simpler circuit).
+        device: Execution target — ``"cpu"``, ``"gpu"``, or ``DeviceExecutor``.
+        ae_method: ``"canonical"`` (QPE-based, optimal) or ``"iterative"``
+                   (no QPE, simpler circuit).
         shots: If > 0, sample results directly.
 
     Returns:
@@ -60,12 +60,12 @@ def amplitude_estimation(
           - ``"method"``: Which method was used.
           - ``"statevector"`` / ``"counts"``: Raw result data.
     """
-    if method == "canonical":
-        return _canonical_ae(state_prep, oracle, precision_bits, n_qubits, backend, shots)
-    elif method == "iterative":
-        return _iterative_ae(state_prep, oracle, precision_bits, n_qubits, backend, shots)
+    if ae_method == "canonical":
+        return _canonical_ae(state_prep, oracle, precision_bits, n_qubits, device, shots)
+    elif ae_method == "iterative":
+        return _iterative_ae(state_prep, oracle, precision_bits, n_qubits, device, shots)
     else:
-        raise ValueError(f"Unknown method: {method}. Use 'canonical' or 'iterative'.")
+        raise ValueError(f"Unknown ae_method: {ae_method}. Use 'canonical' or 'iterative'.")
 
 
 # ── Canonical AE (QPE-based) ───────────────────────────────────────────
@@ -75,7 +75,7 @@ def _canonical_ae(
     oracle: Callable[[sf.Circuit], None],
     m: int,
     n_qubits: Optional[int],
-    backend: str,
+    device: Any,
     shots: int,
 ) -> Dict[str, Any]:
     """QPE-based amplitude estimation: O(1/ε) queries, optimal.
@@ -115,17 +115,16 @@ def _canonical_ae(
     # ── 4. Inverse QFT ─────────────────────────────────────────────────
     _qft_inverse(circuit, list(range(m)))
 
-    # ── 5. Run ─────────────────────────────────────────────────────────
-    sim = sf.get_backend(backend)
-    result = sim.run(circuit, shots=shots)
+    result = sf.run(circuit, device=device, shots=shots)
 
     # Parse measurement
     if shots == 0 and result.statevector is not None:
         sv = np.asarray(result.statevector).flatten()
         probs = np.abs(sv) ** 2
-        # Trace over state register
+        # Trace over state register (qubits m..total-1)
         probs = probs.reshape([2] * total)
-        probs = probs.sum(axis=tuple(range(m, total)))  # shape (2,)*m
+        state_axes = tuple(total - 1 - q for q in range(m, total))
+        probs = probs.sum(axis=state_axes)  # shape (2,)*m
 
         # The IQFT swap reverses qubit order (q0 ↔ q_{m-1}, …).
         # np.argmax on the C-order-flattened tensor returns an index
@@ -172,54 +171,69 @@ def _iterative_ae(
     oracle: Callable[[sf.Circuit], None],
     m: int,
     n_qubits: Optional[int],
-    backend: str,
+    device: Any,
     shots: int,
 ) -> Dict[str, Any]:
     """Iterative amplitude estimation without QPE.
 
-    Uses Grover iterates with classical post-processing to narrow down a.
-    Simpler circuit, better for noisy hardware.
+    Uses maximum-likelihood estimation from Grover iterates at
+    geometrically increasing depths to converge on the amplitude.
     """
     if n_qubits is None:
         n_qubits = _detect_n_qubits(state_prep)
 
     n = n_qubits
-    N = 2 ** n
-    eps = 0.5 / N
+    marked_states = _find_marked_states(oracle, n, device)
 
-    # Pre-compute which basis states are marked by the oracle
-    marked_states = _find_marked_states(oracle, n, backend)
+    # Direct measurement: run the state prep and measure probability
+    c0 = sf.Circuit(n)
+    state_prep(c0)
+    r0 = sf.run(c0, device=device, shots=0)
+    if r0.statevector is not None:
+        sv0 = np.asarray(r0.statevector).flatten()
+        p_direct = float(np.sum(np.abs(sv0[marked_states]) ** 2))
+    else:
+        p_direct = 0.0
 
-    # Binary search for amplitude
-    a_low, a_high = 0.0, 1.0
-    trials_per_step = max(shots, 10)
+    # Refine with Grover iterates at increasing depths
+    theta_est = np.arcsin(np.sqrt(max(p_direct, 1e-12)))
+    best_probs = [(0, p_direct)]
 
-    for step in range(m):
-        midpoint = (a_low + a_high) / 2
-        k = max(1, int(np.pi / (4 * np.arcsin(np.sqrt(max(midpoint**2, eps))))))
-        good_counts = 0
+    for depth in range(1, m + 1):
+        k = depth
+        c = sf.Circuit(n, name=f"AE_iter_k{k}")
+        state_prep(c)
+        for _ in range(k):
+            oracle(c)
+            _apply_inverse_state_prep(c, state_prep, n)
+            _reflection_about_zero(c, n)
+            sub = sf.Circuit(n)
+            state_prep(sub)
+            for gate in sub._gates:
+                gate_fn = getattr(c, gate.name.lower(), None)
+                if gate_fn is not None:
+                    args = list(gate.params) if gate.params else []
+                    gate_fn(*args, *gate.qubits)
+        r = sf.run(c, device=device, shots=0)
+        if r.statevector is not None:
+            sv = np.asarray(r.statevector).flatten()
+            p_k = float(np.sum(np.abs(sv[marked_states]) ** 2))
+            best_probs.append((k, p_k))
 
-        for _ in range(trials_per_step):
-            c = sf.Circuit(n, name=f"AE_iter_step{step}")
-            state_prep(c)
-            # Apply Q^k: (grover_operator)^k
-            for _ in range(k):
-                oracle(c)  # S_χ
-                _reflection_about_mean(c)  # S_0
-            sim = sf.get_backend(backend)
-            r = sim.run(c, shots=0)
-            if r.statevector is not None:
-                sv = np.asarray(r.statevector).flatten()
-                good_prob = float(np.sum(np.abs(sv[marked_states]) ** 2))
-                good_counts += int(good_prob > 0.5 + 1e-12)
+    # MLE: find theta that best explains all observed probabilities
+    # P(k) = sin²((2k+1)θ)
+    best_theta = theta_est
+    best_cost = float("inf")
+    for theta_try in np.linspace(0, np.pi / 2, 2 ** (m + 2)):
+        cost = sum(
+            (p_obs - np.sin((2 * k + 1) * theta_try) ** 2) ** 2
+            for k, p_obs in best_probs
+        )
+        if cost < best_cost:
+            best_cost = cost
+            best_theta = theta_try
 
-        p_good = good_counts / trials_per_step
-        if p_good > 0.5:
-            a_low = midpoint
-        else:
-            a_high = midpoint
-
-    a_est = (a_low + a_high) / 2
+    a_est = float(np.sin(best_theta))
     return {
         "amplitude": a_est,
         "probability": a_est ** 2,
@@ -229,7 +243,34 @@ def _iterative_ae(
     }
 
 
-# ── Helper: Reflection about mean (Grover diffusion for AE) ────────────
+# ── Helper: Inverse state prep and S_0 reflection ─────────────────────
+
+def _apply_inverse_state_prep(circuit, state_prep, n):
+    sub = sf.Circuit(n)
+    state_prep(sub)
+    for gate in reversed(sub._gates):
+        inv_name = gate.name.lower()
+        inv_params = [-p for p in gate.params] if gate.params else []
+        if inv_name in ("h", "x", "y", "z", "cx", "cnot", "cz", "swap"):
+            inv_params = list(gate.params) if gate.params else []
+        elif inv_name == "s":
+            inv_name = "sdg"
+            inv_params = []
+        elif inv_name == "t":
+            inv_name = "tdg"
+            inv_params = []
+        gate_fn = getattr(circuit, inv_name, None)
+        if gate_fn is not None:
+            gate_fn(*inv_params, *gate.qubits)
+
+
+def _reflection_about_zero(circuit, n):
+    for q in range(n):
+        circuit.x(q)
+    _mcz(circuit, list(range(n)))
+    for q in range(n):
+        circuit.x(q)
+
 
 def _reflection_about_mean(circuit: sf.Circuit):
     """Apply S_0 = 2|0⟩⟨0| − I reflection."""
@@ -262,7 +303,22 @@ def _mcx(circuit: sf.Circuit, controls: List[int], target: int):
     if len(controls) == 1:
         circuit.cx(controls[0], target)
         return
-    circuit.toffoli(controls[0], controls[1], target)
+    if len(controls) == 2:
+        circuit.toffoli(controls[0], controls[1], target)
+        return
+    ancilla_base = circuit.n_qubits
+    n_ctrl = len(controls)
+    for i in range(n_ctrl - 1):
+        a = controls[i] if i == 0 else ancilla_base + i - 1
+        b = controls[i + 1]
+        c = ancilla_base + i
+        circuit.toffoli(a, b, c)
+    circuit.toffoli(ancilla_base + n_ctrl - 2, controls[-1], target)
+    for i in range(n_ctrl - 2, -1, -1):
+        a = controls[i] if i == 0 else ancilla_base + i - 1
+        b = controls[i + 1]
+        c = ancilla_base + i
+        circuit.toffoli(a, b, c)
 
 
 # ── Helper: Controlled Q^power ─────────────────────────────────────────
@@ -498,10 +554,10 @@ def _qft_inverse(circuit: sf.Circuit, qubits: List[int]):
     for i in range(n // 2):
         circuit.swap(qubits[i], qubits[n - 1 - i])
     for i in range(n):
-        circuit.h(qubits[i])
-        for j in range(i + 1, n):
-            angle = -np.pi / (2 ** (j - i))
+        for j in range(i):
+            angle = -np.pi / (2 ** (i - j))
             circuit.cp(angle, qubits[j], qubits[i])
+        circuit.h(qubits[i])
 
 
 # ── Measurement interpretation ─────────────────────────────────────────
@@ -522,7 +578,7 @@ def _interpret_measurement(y: int, m: int) -> Tuple[float, float]:
 def _find_marked_states(
     oracle: Callable[[sf.Circuit], None],
     n: int,
-    backend: str,
+    device: Any,
 ) -> List[int]:
     """Find which computational basis states are marked (phase-flipped) by the oracle.
 
@@ -531,7 +587,6 @@ def _find_marked_states(
     """
     N = 2 ** n
     marked = []
-    sim = sf.get_backend(backend)
     for i in range(N):
         c = sf.Circuit(n)
         bits = format(i, f"0{n}b")
@@ -539,7 +594,7 @@ def _find_marked_states(
             if b == "1":
                 c.x(j)
         oracle(c)
-        r = sim.run(c, shots=0)
+        r = sf.run(c, device=device, shots=0)
         if r.statevector is not None:
             sv = np.asarray(r.statevector).flatten()
             # Oracle flips sign: |i⟩ → −|i⟩ iff state i is marked

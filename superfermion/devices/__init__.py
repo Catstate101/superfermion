@@ -49,6 +49,45 @@ class DeviceExecutor(Protocol):
         ...
 
 
+@runtime_checkable
+class Provider(Protocol):
+    """Protocol for QPU hardware providers (IBM, IonQ, etc.).
+
+    Adding a new provider: implement this Protocol. No registration or
+    framework hooks needed — pass the object directly to ``sf.run()``.
+    """
+
+    def submit(self, circuit: "Circuit", shots: int, **kwargs: Any) -> "Job":
+        """Submit a circuit for execution on hardware."""
+        ...
+
+    def native_gates(self) -> set:
+        """Return the set of native gate names for this provider."""
+        ...
+
+    @property
+    def name(self) -> str:
+        """Human-readable provider name."""
+        ...
+
+
+@runtime_checkable
+class Job(Protocol):
+    """Protocol for asynchronous QPU job handles."""
+
+    def result(self, timeout: Optional[float] = None) -> "ProviderResult":
+        """Block until the job completes and return the result."""
+        ...
+
+    def status(self) -> str:
+        """Return the job status: 'queued', 'running', 'completed', 'failed'."""
+        ...
+
+    def cancel(self) -> None:
+        """Cancel the job if it hasn't completed."""
+        ...
+
+
 def _resolve_builtin(name: str) -> "DeviceExecutor":
     """Resolve a shorthand device string to a concrete ``DeviceExecutor``.
 
@@ -77,8 +116,36 @@ def _resolve_builtin(name: str) -> "DeviceExecutor":
         )
 
 
+@dataclass
+class AlgorithmResult:
+    """Result of running a quantum algorithm."""
+    optimal_params: Optional[Dict[str, float]] = None
+    optimal_value: Optional[float] = None
+    counts: Optional[Dict[str, int]] = None
+    state: Optional[Any] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    iterations: int = 0
+
+
+@runtime_checkable
+class Algorithm(Protocol):
+    """Protocol for quantum algorithms (VQE, QAOA, Grover, etc.).
+
+    Adding a new algorithm: implement ``run() -> AlgorithmResult``, use
+    ``sf.Circuit`` + ``sf.run()`` internally. No registration needed.
+    """
+
+    def run(self, **kwargs: Any) -> AlgorithmResult:
+        """Execute the algorithm and return results."""
+        ...
+
+
 __all__ = [
     "DeviceExecutor",
     "DeviceCapabilities",
+    "Provider",
+    "Job",
+    "Algorithm",
+    "AlgorithmResult",
     "_resolve_builtin",
 ]

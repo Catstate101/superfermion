@@ -111,4 +111,33 @@ mod tests {
         let dag = QuantumDAG::new(5, 0);
         assert!(router.route(&dag).is_err());
     }
+
+    #[test]
+    fn test_coupling_map_from_edges() {
+        let topo = CouplingMap::from_edges(4, &[(0, 1), (1, 2), (2, 3)]);
+
+        assert_eq!(topo.n_qubits(), 4);
+        assert_eq!(topo.n_edges(), 3);
+        assert!(topo.is_connected(0, 1));
+        assert!(topo.is_connected(1, 2));
+        assert!(!topo.is_connected(0, 2));
+        assert_eq!(topo.distance(0, 3), 3);
+    }
+
+    #[test]
+    fn test_linear_topology_routing() {
+        let topo = CouplingMap::from_edges(4, &[(0, 1), (1, 2), (2, 3)]);
+        let router = Router::new(topo);
+
+        let mut dag = QuantumDAG::new(4, 0);
+        dag.add_op(OpType::H, &[0]);
+        dag.add_op(OpType::CNOT, &[0, 3]);
+
+        let (routed, mapping) = router.route(&dag).unwrap();
+
+        assert_eq!(routed.n_qubits, 4);
+        assert_eq!(mapping.n_qubits(), 4);
+        assert!(routed.gate_count() >= dag.gate_count());
+        assert_eq!(routed.count_ops_of_type("CNOT"), 1);
+    }
 }

@@ -5,64 +5,47 @@ Quantum Boltzmann Machine (QBM) — Generative Quantum Model.
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional, Tuple
-import jax
-import jax.numpy as jnp
-from flax import linen as nn
+import numpy as np
 
 import superfermion as sf
 
 
-class QBM(nn.Module):
+class QBM:
     """A simple Quantum Boltzmann Machine implementation.
-    
+
     The energy of a state is modeled by a transverse-field Ising-like Hamiltonian
     whose coefficients are trained.
     """
-    n_qubits: int
-    backend: str = "jax"
 
-    @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        """Compute the unnormalized probability (energy) of data x.
-        
-        Note: True QBMs involve sampling. Here we implement the 
-        energy-based kernel that can be used for training.
+    def __init__(self, n_qubits: int, device: str = "cpu", method: str = "statevector"):
+        self.n_qubits = n_qubits
+        self.device = device
+        self.method = method
+        self.h = np.zeros(n_qubits)
+        self.J = np.random.normal(0, 0.1, (n_qubits, n_qubits))
+        self.J = (self.J + self.J.T) / 2.0
+
+    def energy(self, x: np.ndarray) -> np.ndarray:
+        """Compute the energy of data x.
+
+        Args:
+            x: Binary data in {0, 1}^n or batched (batch, n).
+
+        Returns:
+            Energy values.
         """
-        # 1. Learnable Hamiltonian parameters (Weights & Biases)
-        # J_ij Z_i Z_j + h_i Z_i
-        
-        # Biases
-        h = self.param(
-            "h", 
-            jax.nn.initializers.zeros, 
-            (self.n_qubits,)
-        )
-        
-        # Weights (Interaction matrix)
-        J = self.param(
-            "J", 
-            jax.nn.initializers.normal(stddev=0.1), 
-            (self.n_qubits, self.n_qubits)
-        )
-        
-        # Ensure J is symmetric for a physical Ising model
-        J_sym = (J + J.T) / 2.0
-        
-        # Energy calculation: E(x) = -sum h_i x_i - sum J_ij x_i x_j
-        # Assuming x is in {-1, 1} or {0, 1} mapped to {-1, 1}
+        x = np.asarray(x, dtype=np.float64)
         x_mapped = 2.0 * x - 1.0
-        
-        energies = -jnp.dot(x_mapped, h) - jnp.sum(x_mapped * (J_sym @ x_mapped.T).T, axis=-1)
-        
+
+        energies = -x_mapped @ self.h - np.sum(x_mapped * (self.J @ x_mapped.T).T, axis=-1)
         return energies
 
-    def get_partition_function(self, params: Dict[str, Any]) -> jnp.ndarray:
+    def partition_function(self) -> float:
         """Exhaustive partition function calculation for small qubit counts."""
-        # Generating all 2^n states
-        states = jnp.array([
+        states = np.array([
             [int(b) for b in format(i, f'0{self.n_qubits}b')]
             for i in range(2**self.n_qubits)
-        ])
-        
-        unnorm_probs = jnp.exp(-self.apply(params, states))
-        return jnp.sum(unnorm_probs)
+        ], dtype=np.float64)
+
+        unnorm_probs = np.exp(-self.energy(states))
+        return float(np.sum(unnorm_probs))

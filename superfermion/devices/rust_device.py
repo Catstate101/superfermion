@@ -37,8 +37,11 @@ class RustDevice:
             computation happens. CPU uses multi-threaded Rayon + AVX/NEON.
             GPU uses CUDA via cudarc (requires sm_75+ GPU).
         method: Simulation method. ``"statevector"`` (default), ``"mps"``,
-            or ``"stabilizer"``. Only statevector supports GPU.
+            ``"stabilizer"``, or ``"density_matrix"``. Only statevector
+            supports GPU.
     """
+
+    _VALID_METHODS = ("statevector", "mps", "stabilizer", "density_matrix")
 
     _result_cache: Dict[str, np.ndarray] = {}
     _cache_order: List[str] = []
@@ -50,10 +53,15 @@ class RustDevice:
     ) -> None:
         if hardware not in ("cpu", "gpu"):
             raise ValueError(f"hardware must be 'cpu' or 'gpu', got '{hardware}'")
-        if method not in ("statevector", "mps", "stabilizer"):
-            raise ValueError(f"method must be 'statevector', 'mps', or 'stabilizer', got '{method}'")
+        if method not in self._VALID_METHODS:
+            raise ValueError(
+                f"method must be one of {self._VALID_METHODS}, got '{method}'"
+            )
         if hardware == "gpu" and method != "statevector":
-            raise ValueError(f"GPU only supports method='statevector', got '{method}'")
+            raise ValueError(
+                f"GPU currently only has CUDA kernels for method='statevector', "
+                f"got '{method}'. Use device='cpu' for MPS/stabilizer/density_matrix."
+            )
         if hardware == "gpu":
             from superfermion._sf_core import gpu_available
             if not gpu_available():
@@ -71,6 +79,8 @@ class RustDevice:
             return self._run_stabilizer(circuit, shots, **kwargs)
         if self._method == "mps":
             return self._run_mps(circuit, shots, **kwargs)
+        if self._method == "density_matrix":
+            return self._run_density_matrix(circuit, shots, **kwargs)
         return self._run_statevector(circuit, shots, **kwargs)
 
     def capabilities(self) -> DeviceCapabilities:
@@ -89,12 +99,12 @@ class RustDevice:
         return_statevector = kwargs.get("return_statevector", True)
 
         # Fast path: shots>0, CPU, no statevector needed — sample entirely in Rust
-        # (avoids copying the full 2^n statevector from Rust to Python)
         if shots > 0 and self._hardware == "cpu" and not return_statevector:
             dag = self._prepare_dag(circuit)
             counts = dag.simulate_and_sample(shots, seed)
             return RunResult(
                 counts=counts,
+                state=None,
                 statevector=None,
                 shots=shots,
                 circuit=circuit,
@@ -106,34 +116,20 @@ class RustDevice:
                 },
             )
 
-        # Full statevector path (needed when shots=0 or statevector requested)
-        fp = self._circuit_fingerprint(circuit)
-        final_state = RustDevice._result_cache.get(fp)
-        if final_state is None:
-            dag = self._prepare_dag(circuit)
+        dag = self._prepare_dag(circuit)
+        state = dag.simulate_to_state("statevector", self._hardware)
 
-            if self._hardware == "gpu":
-                sv_lsb = np.asarray(dag.simulate_on("gpu"), dtype=np.complex128)
-                final_state = _lsb_to_msb(sv_lsb, n_qubits)
-            else:
-                final_state = np.asarray(dag.simulate_msb(), dtype=np.complex128)
-
-            # Bounded LRU-style cache: evict oldest when full
-            if len(RustDevice._result_cache) >= _CACHE_MAX_ENTRIES:
-                if RustDevice._cache_order:
-                    evict_key = RustDevice._cache_order.pop(0)
-                    RustDevice._result_cache.pop(evict_key, None)
-            RustDevice._result_cache[fp] = final_state
-            RustDevice._cache_order.append(fp)
+        # Also get the legacy numpy statevector for backward compat
+        final_state = np.asarray(state.numpy(), dtype=np.complex128)
 
         if shots > 0:
-            from superfermion.backends.turbo import sample_from_statevector
-            counts = sample_from_statevector(final_state, n_qubits, shots, seed)
+            counts = state.sample(shots, seed)
         else:
             counts = {}
 
         return RunResult(
             counts=counts,
+            state=state,
             statevector=final_state,
             shots=shots,
             circuit=circuit,
@@ -150,49 +146,123 @@ class RustDevice:
         seed = kwargs.get("seed", 42)
         dag = circuit.to_ir()
 
+        state = dag.simulate_to_state("mps", "cpu", bond_dim)
+
         if shots > 0:
-            counts = dag.sample_mps(bond_dim, shots, seed)
-            return RunResult(
-                counts=counts,
-                statevector=None,
-                shots=shots,
-                circuit=circuit,
-                metadata={
-                    "backend": "rust-cpu",
-                    "method": "mps",
-                    "bond_dim": bond_dim,
-                },
-            )
+            counts = state.sample(shots, seed)
         else:
-            sv = dag.simulate_mps(bond_dim)
-            return RunResult(
-                counts={},
-                statevector=np.asarray(sv, dtype=np.complex128),
-                shots=0,
-                circuit=circuit,
-                metadata={
-                    "backend": "rust-cpu",
-                    "method": "mps",
-                    "bond_dim": bond_dim,
+            counts = {}
+
+        sv = None
+        if shots == 0:
+            try:
+                sv = state.numpy()
+            except Exception:
+                pass
+
+        return RunResult(
+            counts=counts,
+            state=state,
+            statevector=sv,
+            shots=shots,
+            circuit=circuit,
+            metadata={
+                "backend": "rust-cpu",
+                "method": "mps",
+                "bond_dim": bond_dim,
+            },
+        )
+
+    def _run_density_matrix(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
+        """Density matrix simulation — Rust core for both noiseless and noisy paths."""
+        from superfermion.backends.density_matrix import (
+            _reverse_qubits_dm,
+            _dm_to_probs,
+            _sample_dm,
+            _apply_readout_noise,
+        )
+        noise_model = kwargs.get("noise_model", None)
+        seed = kwargs.get("seed", 42)
+        n = circuit.n_qubits
+        rng = np.random.default_rng(seed)
+
+        dag = circuit.to_ir()
+
+        if noise_model is not None and noise_model.has_noise:
+            noise_ops = noise_model.to_rust_kraus_ops(n)
+            rho_vec = dag.simulate_dm_noisy(noise_ops)
+            rho = rho_vec.reshape(2**n, 2**n).conj()
+            rho = _reverse_qubits_dm(rho, n)
+        else:
+            rho_vec = dag.simulate_dm()
+            rho = rho_vec.reshape(2**n, 2**n).conj()
+            rho = _reverse_qubits_dm(rho, n)
+
+        state = dag.simulate_to_state("density_matrix")
+
+        probs = _dm_to_probs(rho)
+        purity = float(np.real(np.trace(rho @ rho)))
+
+        counts: Dict[str, int] = {}
+        if shots > 0:
+            counts = _sample_dm(rho, shots, rng)
+            if noise_model is not None and noise_model._readout_p > 0:
+                counts = _apply_readout_noise(counts, noise_model._readout_p, rng)
+
+        return RunResult(
+            counts=counts,
+            state=state,
+            statevector=None,
+            shots=shots,
+            circuit=circuit,
+            metadata={
+                "backend": "rust-cpu",
+                "method": "density_matrix",
+                "purity": purity,
+                "density_matrix": rho,
+                "n_qubits": n,
+                "probabilities": {
+                    format(i, f'0{n}b'): float(p)
+                    for i, p in enumerate(probs) if p > 1e-12
                 },
-            )
+            },
+        )
 
     def _run_stabilizer(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
         """Stabilizer simulation for Clifford circuits."""
-        from superfermion.backends.stabilizer import maybe_clifford_dispatch
         seed = kwargs.get("seed", 42)
-        result = maybe_clifford_dispatch(circuit, shots, seed=seed, require_statevector=False)
-        if result is not None:
-            return result
-        raise RuntimeError(
-            "Circuit contains non-Clifford gates — cannot use method='stabilizer'.\n"
-            "  Use method='statevector' or method='mps' instead."
+        dag = circuit.to_ir()
+
+        try:
+            state = dag.simulate_to_state("stabilizer")
+        except (ValueError, RuntimeError) as e:
+            raise RuntimeError(
+                "Circuit contains non-Clifford gates — cannot use method='stabilizer'.\n"
+                "  Use method='statevector' or method='mps' instead."
+            ) from e
+
+        if shots > 0:
+            counts = state.sample(shots, seed)
+        else:
+            counts = {}
+
+        return RunResult(
+            counts=counts,
+            state=state,
+            statevector=None,
+            shots=shots,
+            circuit=circuit,
+            metadata={
+                "backend": "rust-cpu",
+                "method": "stabilizer",
+                "n_qubits": circuit.n_qubits,
+            },
         )
 
     def _prepare_dag(self, circuit: Circuit):
         """Decompose unsupported gates and build the Rust IR DAG."""
         _RUST_DECOMP_GATES = (
-            "CP", "CR1", "CPHASE", "CRY", "CH", "U1", "U2", "U3",
+            "CRY", "CH", "U1", "U2", "U3",
         )
         needs_decomp = any(
             g.name.upper() in _RUST_DECOMP_GATES

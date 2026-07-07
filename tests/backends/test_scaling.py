@@ -1,8 +1,8 @@
-"""Backend scaling tests — verify larger circuits complete with valid outputs."""
+"""Scaling tests — verify larger circuits complete with valid outputs via sf.run()."""
 
 import pytest
 
-from superfermion.backends.factory import get_backend
+import superfermion as sf
 from superfermion.circuit import Circuit
 
 
@@ -26,34 +26,46 @@ def _assert_bitstring_lengths(counts: dict, n_qubits: int) -> None:
         )
 
 
-class TestSingularityScaling:
-    def test_10_qubit_ghz_completes(self):
-        n = 10
-        backend = get_backend("singularity")
-        circuit = _ghz_circuit(n)
-        result = backend.run(circuit, shots=500, seed=SEED)
-        _assert_bitstring_lengths(result.counts, n)
-        assert set(result.counts.keys()).issubset(
-            {format(0, f"0{n}b"), format((1 << n) - 1, f"0{n}b")}
-        )
-
-
 class TestStatevectorScaling:
     def test_15_qubit_circuit_completes(self):
         n = 15
-        backend = get_backend("statevector")
         circuit = _ghz_circuit(n)
-        result = backend.run(circuit, shots=200, seed=SEED)
+        result = sf.run(circuit, device="cpu", shots=200, seed=SEED)
         _assert_bitstring_lengths(result.counts, n)
-        assert result.statevector is not None
+        assert result.state is not None
+
+    def test_10_qubit_ghz_completes(self):
+        n = 10
+        circuit = _ghz_circuit(n)
+        result = sf.run(circuit, device="cpu", shots=500, seed=SEED)
+        _assert_bitstring_lengths(result.counts, n)
+        all_zero = format(0, f"0{n}b")
+        all_one = format((1 << n) - 1, f"0{n}b")
+        assert set(result.counts.keys()).issubset({all_zero, all_one})
+
+
+class TestMPSScaling:
+    def test_20_qubit_mps_completes(self):
+        n = 20
+        circuit = _ghz_circuit(n)
+        result = sf.run(circuit, device="cpu", method="mps", shots=100, seed=SEED, bond_dim=32)
+        _assert_bitstring_lengths(result.counts, n)
+        assert result.state is not None
+
+
+class TestStabilizerScaling:
+    def test_50_qubit_clifford(self):
+        n = 50
+        circuit = _ghz_circuit(n)
+        result = sf.run(circuit, device="cpu", method="stabilizer", shots=100, seed=SEED)
+        _assert_bitstring_lengths(result.counts, n)
+        assert result.state is not None
 
 
 @pytest.mark.slow
 class TestLargeCircuitScaling:
-    @pytest.mark.parametrize("backend_name", ["singularity", "statevector"])
-    def test_20_qubit_ghz(self, backend_name):
+    def test_20_qubit_statevector(self):
         n = 20
-        backend = get_backend(backend_name)
         circuit = _ghz_circuit(n)
-        result = backend.run(circuit, shots=100, seed=SEED)
+        result = sf.run(circuit, device="cpu", shots=100, seed=SEED)
         _assert_bitstring_lengths(result.counts, n)

@@ -12,7 +12,7 @@ def main() -> float:
     # 4-node ring: 0-1-2-3-0. Max-cut value is 4.
     edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
 
-    qaoa   = QAOA(n_qubits=4, edges=edges, p_layers=2, backend="statevector")
+    qaoa   = QAOA(n_qubits=4, edges=edges, p_layers=2)
     result = qaoa.minimize()
 
     print(f"QAOA optimal value: {result.optimal_value:.4f}")

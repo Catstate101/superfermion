@@ -1,21 +1,15 @@
-include superfermion/_sf_core*.so
-include superfermion/_sf_core*.pyd
-include superfermion/_sf_core/*.so
-include superfermion/_sf_core/*.pyd
+include Cargo.toml
+include Cargo.lock
+include rust-toolchain.toml
+recursive-include crates *.rs *.toml
 
-# Exclude development-only directories from sdist to keep it small
 prune tests
 prune benchmarks
 prune docs
-prune crates
 prune target
 prune .github
 
-# Exclude config files not needed at runtime
 exclude .gitignore
 exclude CLAUDE.md
 exclude docker-compose.yml
 exclude Dockerfile
-exclude Cargo.toml
-exclude Cargo.lock
-exclude rust-toolchain.toml

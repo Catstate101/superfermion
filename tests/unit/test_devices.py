@@ -54,22 +54,23 @@ class TestDeviceCapabilities:
         assert caps.is_simulator is False
 
 
-class TestLocalDevice:
-    def test_wraps_statevector_backend(self, bell_circuit):
-        from superfermion.devices.local import LocalDevice
-        device = LocalDevice("statevector")
+class TestRustDevice:
+    def test_rust_device_statevector(self, bell_circuit):
+        from superfermion.devices.rust_device import RustDevice
+        device = RustDevice(hardware="cpu", method="statevector")
         assert isinstance(device, DeviceExecutor)
         result = device.execute(bell_circuit, shots=100)
         assert isinstance(result, RunResult)
         assert result.shots == 100
         assert sum(result.counts.values()) == 100
+        assert result.state is not None
 
-    def test_capabilities_from_backend(self):
-        from superfermion.devices.local import LocalDevice
-        device = LocalDevice("statevector")
-        caps = device.capabilities()
-        assert caps.is_simulator is True
-        assert caps.supports_statevector is True
+    def test_rust_device_methods(self, bell_circuit):
+        from superfermion.devices.rust_device import RustDevice
+        for method in ("statevector", "density_matrix", "mps", "stabilizer"):
+            device = RustDevice(hardware="cpu", method=method)
+            result = device.execute(bell_circuit, shots=100)
+            assert result.state is not None
 
 
 class TestResolveBuiltin:

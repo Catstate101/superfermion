@@ -1,54 +1,56 @@
 # Contributing to Superfermion
 
-Welcome! We're building the first differentiable, hardware-neutral quantum-classical framework.
+Welcome! We're building a high-performance quantum computing framework with
+a Python API and a Rust simulation core.
 
 ## 1. Setup
 
 ### Prerequisites
 
-- **Rust**: [rustup](https://rustup.rs/) (Stable 1.80+)
-- **Python**: 3.12+ (use `uv` for easy environment management)
-- **Node.js**: (For frontend development)
+- **Rust**: [rustup](https://rustup.rs/) (Stable 1.75+)
+- **Python**: 3.10+ (use `uv` or `venv` for environment management)
 
 ### Development Environment
 
 ```bash
-# Clone the repository
 git clone https://github.com/superfermion/superfermion.git
 cd superfermion
 
-# Create virtual environment (with uv)
-uv venv
+python -m venv .venv
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 
-# Install Python dev dependencies
-uv pip install -e ".[dev]"
+pip install -e ".[dev]"
 
-# Check Rust installation
-cargo check
+# Build the Rust extension
+pip install maturin
+cd crates/sf-bindings && maturin develop --release && cd ../..
+
+# Copy built extension into the package
+cp target/release/lib_sf_core.so superfermion/_sf_core.so  # Linux
+# cp target/release/lib_sf_core.dylib superfermion/_sf_core.so  # macOS
+
+# Verify
+python -c "import superfermion as sf; print(sf.run(sf.Circuit(2).h(0).cx(0,1), device='cpu', shots=100).counts)"
 ```
 
 ## 2. Development Workflow
 
-1.  **Read the Specs**: Before touching any code, review the 3 core specification files.
-2.  **Update the Plan**: If your change affects the architecture, update `superfermion_master_plan.md`.
-3.  **Implement**: Follow the guidelines in `CONVENTIONS.md`.
-4.  **Test**:
-    - Rust: `cargo test`
-    - Python: `pytest tests/`
-5.  **Track**: Update `superfermion_implementation_tracker.md` before your final commit.
+1. **Implement**: Follow conventions in `docs/conventions.md`.
+2. **Test**:
+   - Rust: `cargo test --workspace`
+   - Python: `pytest tests/`
+3. **Lint**:
+   - Rust: `cargo fmt && cargo clippy`
+   - Python: `ruff check superfermion/`
 
 ## 3. Pull Request Guidelines
 
--   **Tests**: All PRs must include passing unit tests.
--   **Documentation**: Update docstrings and the `docs/` directory.
--   **Formatting**:
-    - Rust: `cargo fmt`
-    - Python: `ruff format`
--   **Type Safety**: Ensure `mypy` passes for all changed Python code.
+- **Tests**: All PRs must include passing unit tests.
+- **Documentation**: Update docstrings and the `docs/` directory.
+- **Formatting**:
+  - Rust: `cargo fmt`
+  - Python: `ruff format`
 
 ## 4. Community
 
--   Join our Discord (link in README).
--   Report bugs via GitHub Issues.
--   For experimental features, see the `experiments/` directory.
+- Report bugs via GitHub Issues.

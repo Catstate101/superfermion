@@ -19,10 +19,8 @@ Usage:
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Union, Any
-from numpy.typing import NDArray
 import numpy as np
 
 from superfermion.parameters import SymbolicParameter
@@ -647,16 +645,14 @@ class Circuit:
                 dag.add_gate(str(gate.name), [int(q) for q in gate.qubits], params)
         return dag
 
-    def to_unitary(self) -> jnp.ndarray:
+    def to_unitary(self) -> np.ndarray:
         """Compute the full unitary matrix of the circuit using the Rust core.
-        
-        Note: This is exponentially expensive and should only be used 
+
+        Note: This is exponentially expensive and should only be used
         for small circuits (n_qubits < 12).
         """
-        import jax.numpy as jnp
         ir_dag = self.to_ir()
-        u_np = ir_dag.to_unitary()
-        return jnp.array(u_np)
+        return np.asarray(ir_dag.to_unitary())
 
     # ───────────────────────────────────────────────────────
     # Display

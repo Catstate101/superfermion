@@ -95,14 +95,15 @@ class PrimitiveJob:
 # ── SFEstimator ────────────────────────────────────────────────────────────────
 
 class SFEstimator:
-    """Compute expectation values ⟨ψ|O|ψ⟩ using any SF backend.
+    """Compute expectation values ⟨ψ|O|ψ⟩ via ``sf.run()``.
 
     Matches the Qiskit ``StatevectorEstimator`` interface (Primitives v2).
 
     Args:
-        backend: SF backend name.
-        shots:   0 = exact statevector (default); > 0 = shot-based.
-        seed:    RNG seed for shot-based runs.
+        device: Execution target — ``"cpu"``, ``"gpu"``, or ``DeviceExecutor``.
+        method: Simulation method — ``"statevector"``, ``"density_matrix"``, etc.
+        shots:  0 = exact statevector (default); > 0 = shot-based.
+        seed:   RNG seed for shot-based runs.
 
     Examples:
         Single PUB:
@@ -112,26 +113,19 @@ class SFEstimator:
         Multiple PUBs with parameter bindings:
             pubs = [(circ, H, param_values)]
             job = estimator.run(pubs)
-
-        Qiskit-compatible (circuit is a Qiskit QuantumCircuit):
-            from superfermion.bridge import from_qiskit
-            sf_circ = from_qiskit(qk_circuit)
-            sf_obs  = SparsePauliOp.from_qiskit(qk_observable)
-            job = estimator.run([(sf_circ, sf_obs)])
     """
 
     def __init__(
         self,
-        backend: str = "statevector",
+        device: Any = "cpu",
+        method: str = "statevector",
         shots: int = 0,
         seed: int = 42,
     ):
-        self.backend = backend
+        self._device = device
+        self._method = method
         self.shots = shots
         self.seed = seed
-
-        from superfermion.backends.factory import get_backend
-        self._sim = get_backend(backend)
 
     def run(
         self,
@@ -166,13 +160,13 @@ class SFEstimator:
             ev, std = self._estimate(circuit, observable, _shots)
             results.append(EstimatorPubResult(
                 data=EstimatorData(evs=ev, stds=std),
-                metadata={"backend": self.backend, "shots": _shots},
+                metadata={"device": str(self._device), "method": self._method, "shots": _shots},
             ))
 
         return PrimitiveJob(results)
 
     def _estimate(self, circuit: sf.Circuit, observable: Observable, shots: int) -> Tuple[float, float]:
-        result = self._sim.run(circuit, shots=shots, seed=self.seed)
+        result = sf.run(circuit, device=self._device, method=self._method, shots=shots, seed=self.seed)
 
         if result.statevector is not None:
             sv = np.asarray(result.statevector, dtype=np.complex128).ravel()
@@ -193,12 +187,13 @@ import math
 # ── SFSampler ─────────────────────────────────────────────────────────────────
 
 class SFSampler:
-    """Sample quasi-probability distributions using any SF backend.
+    """Sample quasi-probability distributions via ``sf.run()``.
 
     Matches the Qiskit ``StatevectorSampler`` interface (Primitives v2).
 
     Args:
-        backend: SF backend name.
+        device: Execution target — ``"cpu"``, ``"gpu"``, or ``DeviceExecutor``.
+        method: Simulation method — ``"statevector"``, ``"mps"``, etc.
         default_shots: Default shots per run.
         seed: RNG seed.
 
@@ -211,16 +206,15 @@ class SFSampler:
 
     def __init__(
         self,
-        backend: str = "statevector",
+        device: Any = "cpu",
+        method: str = "statevector",
         default_shots: int = 1024,
         seed: int = 42,
     ):
-        self.backend = backend
+        self._device = device
+        self._method = method
         self.default_shots = default_shots
         self.seed = seed
-
-        from superfermion.backends.factory import get_backend
-        self._sim = get_backend(backend)
 
     def run(
         self,
@@ -258,7 +252,7 @@ class SFSampler:
             shot_result = ShotResult(counts=counts, quasi_probs=quasi_probs, n_qubits=n)
             results.append(SamplerPubResult(
                 data=SamplerData(meas=shot_result),
-                metadata={"backend": self.backend, "shots": _shots},
+                metadata={"device": str(self._device), "method": self._method, "shots": _shots},
             ))
 
         return PrimitiveJob(results)
@@ -268,7 +262,7 @@ class SFSampler:
         circuit: sf.Circuit,
         shots: int,
     ) -> Tuple[Dict[str, int], Dict[str, float]]:
-        result = self._sim.run(circuit, shots=shots, seed=self.seed)
+        result = sf.run(circuit, device=self._device, method=self._method, shots=shots, seed=self.seed)
 
         if result.counts:
             counts = dict(result.counts)

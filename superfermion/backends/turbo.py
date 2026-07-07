@@ -223,9 +223,9 @@ def decompose_for_rust(gates: List[GateRecord]) -> List[GateRecord]:
         if name in ("CP", "CR1", "CPHASE") and nq == 2:
             phi = g.params[0] if g.params else 0.0
             p_val = float(phi) if not hasattr(phi, "value") else float(phi.value)
-            result.extend([GateRecord("RZ", [g.qubits[0]], [p_val/2]), GateRecord("CX", [g.qubits[0], g.qubits[1]]), 
-                           GateRecord("RZ", [g.qubits[1]], [-p_val/2]), GateRecord("CX", [g.qubits[0], g.qubits[1]]), 
-                           GateRecord("RZ", [g.qubits[1]], [p_val/2])])
+            result.extend([GateRecord("P", [g.qubits[0]], [p_val/2]), GateRecord("CX", [g.qubits[0], g.qubits[1]]),
+                           GateRecord("P", [g.qubits[1]], [-p_val/2]), GateRecord("CX", [g.qubits[0], g.qubits[1]]),
+                           GateRecord("P", [g.qubits[1]], [p_val/2])])
         elif name == "CRY" and nq == 2:
             th = g.params[0] if g.params else 0.0
             th_v = float(th) if not hasattr(th, "value") else float(th.value)
@@ -289,15 +289,6 @@ def simulate_statevector_turbo(circuit: Circuit, seed: int = 42) -> np.ndarray:
             res = np.tensordot(mat.reshape(2,2,2,2), st_t, axes=([2,3], [qs[0], qs[1]]))
             st_t = np.moveaxis(res, [0,1], [qs[0], qs[1]])
     return np.ascontiguousarray(st_t).reshape(dim)
-
-def sample_from_statevector(sv, n, shots, seed=42):
-    probs = np.abs(sv)**2
-    probs /= probs.sum()
-    rng = np.random.default_rng(seed)
-    idxs = rng.choice(len(probs), size=shots, p=probs)
-    unique, freq = np.unique(idxs, return_counts=True)
-    fmt = f"0{n}b"
-    return {format(int(idx), fmt): int(cnt) for idx, cnt in zip(unique, freq)}
 
 class GateMatrixCache:
     _cache: Dict[Tuple, np.ndarray] = {}

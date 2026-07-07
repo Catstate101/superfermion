@@ -4,7 +4,7 @@ Pauli Observables — Helper functions for creating common operators.
 
 from __future__ import annotations
 from typing import List, Optional
-import jax.numpy as jnp
+import numpy as np
 from superfermion.observables.core import PauliString, Hamiltonian
 
 def _pauli_on_qubit(p_char: str, qubit_idx: int, n_qubits: Optional[int] = None) -> PauliString:

@@ -67,42 +67,6 @@ def _apply_pauli_string_np(sv: np.ndarray, pauli_str: str) -> np.ndarray:
     return result
 
 
-def _is_jax_array(x) -> bool:
-    """True if x is a JAX array or tracer — avoids importing JAX if not loaded."""
-    import sys
-    if 'jax' not in sys.modules:
-        return False
-    mod = type(x).__module__
-    return mod.startswith('jax') or mod.startswith('jaxlib')
-
-
-def _apply_pauli_string_jax(sv, pauli_str: str):
-    """JAX-native mirror of _apply_pauli_string_np — preserves tracers under jit/grad."""
-    import jax.numpy as jnp
-    n = len(pauli_str)
-    dim = sv.shape[0]
-    # int32 keeps us compatible with jax_enable_x64=False (the SF default).
-    indices = jnp.arange(dim, dtype=jnp.int32)
-    result = sv
-    for k, p in enumerate(pauli_str):
-        if p == 'I':
-            continue
-        bit_pos = n - 1 - k
-        if p == 'Z':
-            bit_vals = (indices >> bit_pos) & 1
-            result = result * jnp.where(bit_vals == 1, -1.0, 1.0).astype(result.dtype)
-        elif p == 'X':
-            flipped = indices ^ (1 << bit_pos)
-            result = result[flipped]
-        elif p == 'Y':
-            # See numpy version above for derivation.
-            bit_vals = (indices >> bit_pos) & 1
-            factors = jnp.where(bit_vals == 0, -1j, 1j).astype(result.dtype)
-            flipped = indices ^ (1 << bit_pos)
-            result = factors * result[flipped]
-        else:
-            raise ValueError(f"Unknown Pauli character: '{p}'")
-    return result
 
 
 def expval(statevector: np.ndarray, observable) -> float:
@@ -131,18 +95,8 @@ class Observable(ABC):
     def _fast_expval(self, sv: np.ndarray) -> complex:
         """Fast backend-agnostic ⟨ψ|O|ψ⟩ using numpy bit manipulation."""
 
-    def _fast_expval_jax(self, sv):
-        """JAX-native ⟨ψ|O|ψ⟩. Default: subclasses that don't override it fall back
-        to numpy (only safe when not under jit/grad — dispatch guards that)."""
-        return self._fast_expval(np.asarray(sv, dtype=np.complex128).ravel())
-
     def expectation(self, statevector):
-        """⟨ψ|O|ψ⟩. Returns a Python float for numpy input, a JAX scalar for JAX
-        input (so grad/jit can trace through it)."""
-        if _is_jax_array(statevector):
-            import jax.numpy as jnp
-            sv = jnp.asarray(statevector).ravel()
-            return jnp.real(self._fast_expval_jax(sv))
+        """Compute ⟨ψ|O|ψ⟩ from a numpy statevector."""
         sv = np.asarray(statevector, dtype=np.complex128).ravel()
         return float(np.real(self._fast_expval(sv)))
 
@@ -189,11 +143,6 @@ class PauliString(Observable):
             return _rust_hamiltonian_expval(sv, [(paulis, c.real, c.imag)])
         Opsi = _apply_pauli_string_np(sv, self.pauli_str)
         return self.coeffs * np.vdot(sv, Opsi)
-
-    def _fast_expval_jax(self, sv):
-        import jax.numpy as jnp
-        Opsi = _apply_pauli_string_jax(sv, self.pauli_str)
-        return self.coeffs * jnp.vdot(sv, Opsi)
 
     def _apply(self, statevector) -> np.ndarray:
         """Apply this Pauli string operator to a statevector.
@@ -328,16 +277,6 @@ class SparsePauliOp(Observable):
                 total += coeff * np.vdot(sv, Opsi)
         return total
 
-    def _fast_expval_jax(self, sv):
-        import jax.numpy as jnp
-        total = jnp.array(0.0, dtype=sv.dtype)
-        for pauli_str, coeff in self._terms:
-            if set(pauli_str) == {'I'}:
-                total = total + coeff * jnp.vdot(sv, sv)
-            else:
-                Opsi = _apply_pauli_string_jax(sv, pauli_str)
-                total = total + coeff * jnp.vdot(sv, Opsi)
-        return total
 
     # ── Arithmetic ─────────────────────────────────────────────────────────────
 
@@ -387,13 +326,6 @@ class Hamiltonian(Observable):
         total: complex = 0.0
         for term in self.terms:
             total += term._fast_expval(sv)
-        return total
-
-    def _fast_expval_jax(self, sv):
-        import jax.numpy as jnp
-        total = jnp.array(0.0, dtype=sv.dtype)
-        for term in self.terms:
-            total = total + term._fast_expval_jax(sv)
         return total
 
     def to_sparse_pauli_op(self) -> SparsePauliOp:

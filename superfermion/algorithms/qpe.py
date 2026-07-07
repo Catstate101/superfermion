@@ -18,7 +18,7 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -118,23 +118,28 @@ def _controlled_generic(
 
 
 def _iqft(circuit: sf.Circuit, qubits: List[int]):
-    """Inverse Quantum Fourier Transform on the given qubits."""
+    """Inverse Quantum Fourier Transform on the given qubits.
+
+    Applies bit-reversal swap first, then the cascade of H and
+    controlled-phase rotations, matching the QPE phase convention where
+    qubit k carries phase 2^k * phi.
+    """
     n = len(qubits)
-    # Swap qubits (reverse order)
     for i in range(n // 2):
         circuit.swap(qubits[i], qubits[n - 1 - i])
     for i in range(n):
-        circuit.h(qubits[i])
-        for j in range(i + 1, n):
-            angle = -np.pi / (2 ** (j - i))
+        for j in range(i):
+            angle = -np.pi / (2 ** (i - j))
             circuit.cp(angle, qubits[j], qubits[i])
+        circuit.h(qubits[i])
 
 
 def quantum_phase_estimation(
     unitary_circuit: sf.Circuit,
     eigenstate_prep: Callable[[sf.Circuit], None],
     precision_bits: int = 4,
-    backend: str = "statevector",
+    device: Any = "cpu",
+    method: str = "statevector",
     shots: int = 0,
 ) -> Dict[str, Any]:
     r"""Run Quantum Phase Estimation.
@@ -145,7 +150,8 @@ def quantum_phase_estimation(
         unitary_circuit: Circuit implementing U (acts on target qubits).
         eigenstate_prep: Function that prepares |ψ⟩ on target qubits.
         precision_bits: Number of estimation (counting) qubits (t).
-        backend: Simulation backend.
+        device: Execution target — ``"cpu"``, ``"gpu"``, or ``DeviceExecutor``.
+        method: Simulation method — ``"statevector"``, ``"mps"``, etc.
         shots: If > 0, sample counting register.
 
     Returns:
@@ -164,7 +170,14 @@ def quantum_phase_estimation(
         circuit.h(i)
 
     # ── Eigenstate preparation ───────────────────────────────────────────
-    eigenstate_prep(circuit)
+    sub = sf.Circuit(n_target)
+    eigenstate_prep(sub)
+    for gate in sub._gates:
+        phys_qubits = [t + q for q in gate.qubits]
+        method_fn = getattr(circuit, gate.name.lower(), None)
+        if method_fn is not None:
+            args = list(gate.params) if gate.params else []
+            method_fn(*args, *phys_qubits)
 
     # ── Controlled-U^{2^k} chain ─────────────────────────────────────────
     target_qubits = list(range(t, t + n_target))
@@ -181,16 +194,16 @@ def quantum_phase_estimation(
     counting_qubits = list(range(t))
     _iqft(circuit, counting_qubits)
 
-    # ── Run ──────────────────────────────────────────────────────────────
-    sim = sf.get_backend(backend)
-    result = sim.run(circuit, shots=shots)
+    result = sf.run(circuit, device=device, method=method, shots=shots)
 
     if shots == 0 and result.statevector is not None:
         sv = np.asarray(result.statevector).flatten()
         probs = np.abs(sv) ** 2
-        # Trace out target register (qubits t..t+n_target-1)
+        # Trace out target register (qubits t..t+n_target-1).
+        # In C-order reshape, axis k = qubit (total-1-k).
         probs = probs.reshape([2] * total)
-        probs = probs.sum(axis=tuple(range(t, total))).flatten()
+        target_axes = tuple(total - 1 - q for q in range(t, total))
+        probs = probs.sum(axis=target_axes).flatten()
         best = int(np.argmax(probs))
         phase = best / (2 ** t)
         return {

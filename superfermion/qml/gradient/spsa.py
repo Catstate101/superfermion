@@ -2,34 +2,32 @@
 SPSA Optimizer — Simultaneous Perturbation Stochastic Approximation.
 """
 
-import jax
-import jax.numpy as jnp
-from typing import Callable, Tuple
+import numpy as np
+from typing import Callable
 
-def spsa_grad(fun: Callable, params: jnp.ndarray, key: jax.random.PRNGKey, 
-              delta: float = 0.01) -> jnp.ndarray:
+
+def spsa_grad(fun: Callable, params: np.ndarray, seed: int = 42,
+              delta: float = 0.01) -> np.ndarray:
     """Approximate gradient using SPSA.
-    
+
     Args:
-        fun: Function to differentiate.
-        params: Current parameters.
-        key: PRNG key for generating perturbations.
+        fun: Function to differentiate (params -> scalar).
+        params: Current parameters as numpy array.
+        seed: Random seed for generating perturbations.
         delta: Perturbation magnitude.
-        
+
     Returns:
-        Approximated gradient.
+        Approximated gradient as numpy array.
     """
-    # 1. Generate random perturbation direction (Bernoulli +/- 1)
-    perturbation = jax.random.bernoulli(key, 0.5, shape=params.shape).astype(jnp.float32) * 2 - 1
-    
-    # 2. Evaluate function at perturbed points
+    seed_int = int(seed) if np.ndim(seed) == 0 else int(np.asarray(seed).flat[0])
+    rng = np.random.default_rng(seed_int)
+    perturbation = rng.choice([-1.0, 1.0], size=params.shape)
+
     params_plus = params + delta * perturbation
     params_minus = params - delta * perturbation
-    
+
     y_plus = fun(params_plus)
     y_minus = fun(params_minus)
-    
-    # 3. Compute gradient approximation
+
     grad = (y_plus - y_minus) / (2 * delta * perturbation)
-    
     return grad

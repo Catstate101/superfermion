@@ -5,7 +5,7 @@ import re
 import pytest
 
 import superfermion as sf
-from superfermion.devices.local import LocalDevice
+from superfermion.devices.rust_device import RustDevice
 
 
 pytestmark = pytest.mark.integration
@@ -18,7 +18,7 @@ def _assert_valid_bitstrings(counts, n_qubits):
 
 
 def _assert_bell_counts(counts, shots, tolerance=0.25):
-    """Bell state should produce only |00⟩ and |11⟩ with roughly equal counts."""
+    """Bell state should produce only |00> and |11> with roughly equal counts."""
     assert set(counts.keys()) <= {"00", "11"}
     assert "00" in counts
     assert "11" in counts
@@ -38,14 +38,19 @@ class TestRunPipeline:
         _assert_valid_bitstrings(result.counts, bell_circuit.n_qubits)
         _assert_bell_counts(result.counts, shots)
 
-    def test_sf_run_local_device_statevector(self, bell_circuit):
+    def test_sf_run_rust_device(self, bell_circuit):
         shots = 1500
-        device = LocalDevice("statevector")
+        device = RustDevice(hardware="cpu")
         result = sf.run(bell_circuit, device=device, shots=shots)
 
         assert result.shots == shots
         _assert_valid_bitstrings(result.counts, bell_circuit.n_qubits)
         _assert_bell_counts(result.counts, shots)
+
+    def test_run_returns_state(self, bell_circuit):
+        result = sf.run(bell_circuit, device="cpu", shots=0)
+        assert result.state is not None
+        assert result.state.n_qubits == bell_circuit.n_qubits
 
     def test_circuit_run_delegates_equivalently(self, bell_circuit):
         shots = 1000

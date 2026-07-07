@@ -29,31 +29,38 @@ Application modules (importable but not promoted to ``sf.*``):
     superfermion.viz          — circuit visualization
 """
 
-import sys
-
 __version__ = "0.1.0"
 
 # ── Core imports (only numpy required) ────────────────────────────────
 from superfermion.circuit import Circuit
-from superfermion.runner import run
+from superfermion.runner import run, simulate
 from superfermion.compiler.manager import compile
 from superfermion.parameters import param
 from superfermion.results import RunResult
-from superfermion.backends.factory import get_backend, list_backends
+from superfermion._sf_core import State
+from superfermion.utils.exceptions import MethodError
 
-from superfermion.devices import DeviceExecutor, DeviceCapabilities
+from superfermion.devices import (
+    DeviceExecutor, DeviceCapabilities,
+    Provider, Job, Algorithm, AlgorithmResult,
+)
 from superfermion.experiment.protocols import TrackerProtocol
 from superfermion.experiment.context import experiment
 from superfermion.experiment.local_tracker import LocalTracker
 
 from superfermion.observables.core import PauliString, SparsePauliOp, Hamiltonian, expval
+from superfermion.noise import NoiseModel
+
 
 __all__ = [
     # Core
-    "Circuit", "run", "compile", "param", "RunResult",
-    "list_backends", "get_backend",
-    # Device protocol
+    "Circuit", "run", "simulate", "compile", "param",
+    "RunResult", "State", "MethodError",
+    # Device/Provider protocols
     "DeviceExecutor", "DeviceCapabilities",
+    "Provider", "Job", "Algorithm", "AlgorithmResult",
+    # Noise
+    "NoiseModel",
     # Experiment tracking
     "TrackerProtocol", "experiment", "LocalTracker",
     # Observables

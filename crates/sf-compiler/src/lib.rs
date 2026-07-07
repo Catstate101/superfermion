@@ -186,4 +186,41 @@ mod tests {
         assert_eq!(compiled.gate_count(), 3);
         Ok(())
     }
+
+    #[test]
+    fn test_compile_with_connectivity_constraints() -> Result<(), CompilerError> {
+        let mut backend = BackendSpec::default();
+        backend.n_qubits = 4;
+        backend.connectivity = vec![(0, 1), (1, 2), (2, 3)];
+
+        let mut dag = QuantumDAG::new(4, 0);
+        dag.add_op(OpType::H, &[0]);
+        dag.add_op(OpType::CNOT, &[0, 3]); // non-adjacent on linear chain
+
+        let compiler = Compiler::new(backend);
+        let compiled = compiler.compile(&dag)?;
+
+        assert_eq!(compiled.n_qubits, 4);
+        assert!(compiled.gate_count() > dag.gate_count());
+        Ok(())
+    }
+
+    #[test]
+    fn test_compiled_circuit_preserves_qubit_count() -> Result<(), CompilerError> {
+        let mut backend = BackendSpec::default();
+        backend.n_qubits = 5;
+        backend.connectivity = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
+
+        let mut dag = QuantumDAG::new(5, 0);
+        dag.add_op(OpType::H, &[0]);
+        dag.add_op(OpType::CNOT, &[0, 4]);
+        dag.add_op(OpType::SWAP, &[1, 3]);
+
+        let compiler = Compiler::new(backend);
+        let compiled = compiler.compile(&dag)?;
+
+        assert_eq!(compiled.n_qubits, 5);
+        assert_eq!(dag.n_qubits, compiled.n_qubits);
+        Ok(())
+    }
 }

@@ -1,11 +1,17 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "crates/sf-bindings/Cargo.toml"
+module-name = "superfermion._sf_core"
+python-source = "."
+features = ["pyo3/extension-module"]
 
 [project]
 name = "superfermion"
 version = "0.1.0"
-description = "The Holy Grail of Quantum Machine Learning"
+description = "High-performance quantum computing framework with a Python API and Rust simulation core"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -88,13 +94,8 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://superfermion.io"
-Documentation = "https://docs.superfermion.io"
 Repository = "https://github.com/superfermion/superfermion"
 Issues = "https://github.com/superfermion/superfermion/issues"
-
-[tool.setuptools.packages.find]
-include = ["superfermion*"]
 
 [tool.black]
 line-length = 100

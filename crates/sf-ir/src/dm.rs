@@ -143,3 +143,92 @@ impl DensityMatrixState {
         *data = next_data;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::OpType;
+    use approx::assert_relative_eq;
+    use num_complex::Complex64;
+
+    fn dm_trace(state: &DensityMatrixState) -> Complex64 {
+        let n = state.n_qubits;
+        let dim = 1 << n;
+        (0..dim)
+            .map(|i| state.data[i | (i << n)])
+            .fold(Complex64::new(0.0, 0.0), |acc, v| acc + v)
+    }
+
+    fn dm_purity(state: &DensityMatrixState) -> f64 {
+        let n = state.n_qubits;
+        let dim = 1 << n;
+        let mut rho = DMatrix::<Complex64>::zeros(dim, dim);
+        for ket in 0..dim {
+            for bra in 0..dim {
+                rho[(ket, bra)] = state.data[ket | (bra << n)];
+            }
+        }
+        (&rho * &rho).trace().re
+    }
+
+    fn depolarizing_kraus(p: f64) -> Vec<DMatrix<Complex64>> {
+        let s0 = (1.0 - 3.0 * p / 4.0).sqrt();
+        let sp = (p / 4.0).sqrt();
+        let i = Complex64::i();
+
+        let mut k0 = DMatrix::zeros(2, 2);
+        k0[(0, 0)] = Complex64::new(s0, 0.0);
+        k0[(1, 1)] = Complex64::new(s0, 0.0);
+
+        let mut k1 = DMatrix::zeros(2, 2);
+        k1[(0, 1)] = Complex64::new(sp, 0.0);
+        k1[(1, 0)] = Complex64::new(sp, 0.0);
+
+        let mut k2 = DMatrix::zeros(2, 2);
+        k2[(0, 1)] = -i * sp;
+        k2[(1, 0)] = i * sp;
+
+        let mut k3 = DMatrix::zeros(2, 2);
+        k3[(0, 0)] = Complex64::new(sp, 0.0);
+        k3[(1, 1)] = Complex64::new(-sp, 0.0);
+
+        vec![k0, k1, k2, k3]
+    }
+
+    #[test]
+    fn test_depolarizing_kraus_preserves_trace() {
+        let mut state = DensityMatrixState::new(2);
+        let h = OpType::H.to_matrix();
+        let cnot = OpType::CNOT.to_matrix();
+        state.apply_unitary(&h, &[0]);
+        state.apply_unitary(&cnot, &[0, 1]);
+
+        state.apply_kraus(&depolarizing_kraus(0.1), 0);
+
+        let tr = dm_trace(&state);
+        assert_relative_eq!(tr.re, 1.0, epsilon = 1e-8);
+        assert!(tr.im.abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_pure_state_purity_one() {
+        let state = DensityMatrixState::new(1);
+        assert_relative_eq!(dm_purity(&state), 1.0, epsilon = 1e-10);
+        assert_relative_eq!(dm_trace(&state).re, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_trace_one_after_gate_application() {
+        let mut state = DensityMatrixState::new(2);
+        let h = OpType::H.to_matrix();
+        let cnot = OpType::CNOT.to_matrix();
+
+        state.apply_unitary(&h, &[0]);
+        state.apply_unitary(&cnot, &[0, 1]);
+
+        let tr = dm_trace(&state);
+        assert_relative_eq!(tr.re, 1.0, epsilon = 1e-10);
+        assert!(tr.im.abs() < 1e-10);
+        assert_relative_eq!(dm_purity(&state), 1.0, epsilon = 1e-10);
+    }
+}

@@ -1,8 +1,8 @@
 """
-Backend-agnostic variational algorithms: VQE and QAOA.
+Variational algorithms: VQE and QAOA.
 
-Uses scipy.optimize for classical optimization — works with every SF backend
-(statevector, rust, mps, singularity, density_matrix, …).
+Uses scipy.optimize for classical optimization. Executes circuits via
+``sf.run()`` — works with any device and simulation method.
 
 Cross-validated against:
   Qiskit: VQE (qiskit_algorithms), QAOA (qiskit_algorithms)
@@ -16,18 +16,19 @@ Usage:
     # VQE on 2-qubit TFIM Hamiltonian
     >>> H = SparsePauliOp.from_dict({'ZZ': -1.0, 'XX': -0.5, 'II': 0.25})
     >>> ansatz = HardwareEfficientAnsatz(2, n_layers=2)
-    >>> vqe = VQE(ansatz, H, backend='statevector')
+    >>> vqe = VQE(ansatz, H, device='cpu', method='statevector')
     >>> result = vqe.minimize()
     >>> print(result.optimal_value)  # ground state energy
 
     # QAOA on MaxCut (3-node triangle)
     >>> edges = [(0,1), (1,2), (0,2)]
-    >>> qaoa = QAOA(3, edges, p_layers=2, backend='statevector')
+    >>> qaoa = QAOA(3, edges, p_layers=2, device='cpu')
     >>> result = qaoa.minimize()
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -41,19 +42,23 @@ from superfermion.observables.core import Observable, SparsePauliOp, PauliString
 from superfermion.qml.gradient.parameter_shift import parameter_shift_grad_vector
 from superfermion.qml.gradient.adjoint import adjoint_grad_vector
 
+logger = logging.getLogger(__name__)
+
 
 # ── VQE ───────────────────────────────────────────────────────────────────────
 
 
 class VQE:
-    """Variational Quantum Eigensolver — backend-agnostic.
+    """Variational Quantum Eigensolver.
 
     Minimizes <psi(theta)|H|psi(theta)> using scipy.optimize.minimize.
 
     Args:
         ansatz:      Parametric SF Circuit (built with ``sf.param(...)`` gates).
         hamiltonian: SF observable (SparsePauliOp, Hamiltonian, PauliString).
-        backend:     SF backend name ('statevector', 'rust', 'mps', etc.).
+        device:      Execution target — ``"cpu"``, ``"gpu"``, or a
+                     ``DeviceExecutor`` object.
+        method:      Simulation method — ``"statevector"``, ``"mps"``, etc.
         optimizer:   scipy optimizer method. Default 'L-BFGS-B' (uses gradients).
         shots:       0 = exact statevector (default); > 0 = shot-based sampling.
         diff_method: Gradient method: ``'adjoint'`` (default, Rust, O(M+N)*2^n)
@@ -64,26 +69,25 @@ class VQE:
         self,
         ansatz: sf.Circuit,
         hamiltonian: Observable,
-        backend: str = "statevector",
+        device: Any = "cpu",
+        method: str = "statevector",
         optimizer: str = "L-BFGS-B",
         shots: int = 0,
         diff_method: str = "adjoint",
     ):
         self.ansatz = ansatz
         self.hamiltonian = hamiltonian
-        self.backend = backend
+        self._device = device
+        self._method = method
         self.optimizer = optimizer
         self.shots = shots
         self.diff_method = diff_method
         self._param_names: List[str] = list(ansatz.parameters)
 
-        from superfermion.backends.factory import get_backend
-        self._sim = get_backend(backend)
-
     def _energy(self, param_values: np.ndarray) -> float:
         params = {n: float(v) for n, v in zip(self._param_names, param_values)}
         bound = self.ansatz.bind(params)
-        result = self._sim.run(bound, shots=self.shots)
+        result = sf.run(bound, device=self._device, method=self._method, shots=self.shots)
         if result.statevector is not None:
             sv = np.asarray(result.statevector, dtype=np.complex128).ravel()
             return float(np.real(self.hamiltonian._fast_expval(sv)))
@@ -104,7 +108,8 @@ class VQE:
             self.hamiltonian,
             self._param_names,
             param_values,
-            backend=self.backend,
+            device=self._device,
+            method=self._method,
             shots=self.shots,
         )
 
@@ -141,7 +146,7 @@ class VQE:
             e = self._energy(xk)
             history.append(e)
             if verbose and len(history) % callback_freq == 0:
-                print(f"  VQE iter {len(history):4d}: E = {e:+.8f}")
+                logger.info("  VQE iter %4d: E = %+.8f", len(history), e)
 
         use_jac = self.optimizer in ("L-BFGS-B", "CG", "BFGS", "trust-ncg")
 
@@ -175,7 +180,8 @@ class VQE:
                 "scipy_message": scipy_result.message,
                 "n_fun_evals": scipy_result.nfev,
                 "optimizer": self.optimizer,
-                "backend": self.backend,
+                "device": str(self._device),
+                "method": self._method,
                 "n_params": n_params,
                 "n_qubits": self.ansatz.n_qubits,
             },
@@ -186,7 +192,7 @@ class VQE:
 
 
 class QAOA:
-    """Quantum Approximate Optimization Algorithm — backend-agnostic.
+    """Quantum Approximate Optimization Algorithm.
 
     Implements p-layer QAOA for MaxCut and general Ising Hamiltonians.
 
@@ -203,7 +209,9 @@ class QAOA:
         n_qubits:         Number of qubits.
         edges:            List of (i, j) or (i, j, weight) tuples.
         p_layers:         QAOA depth.
-        backend:          SF backend name.
+        device:           Execution target — ``"cpu"``, ``"gpu"``, or
+                          ``DeviceExecutor``.
+        method:           Simulation method — ``"statevector"``, ``"mps"``, etc.
         optimizer:        Scipy method.
     """
 
@@ -212,13 +220,15 @@ class QAOA:
         n_qubits: int,
         edges: List[Tuple],
         p_layers: int = 1,
-        backend: str = "statevector",
+        device: Any = "cpu",
+        method: str = "statevector",
         optimizer: str = "L-BFGS-B",
         shots: int = 0,
     ):
         self.n_qubits = n_qubits
         self.p_layers = p_layers
-        self.backend = backend
+        self._device = device
+        self._method = method
         self.optimizer = optimizer
         self.shots = shots
 
@@ -232,9 +242,6 @@ class QAOA:
 
         # Build the cost Hamiltonian: H_C = Σ w_{ij}/2 * (I - Z_iZ_j)
         self.cost_hamiltonian = self._build_cost_hamiltonian()
-
-        from superfermion.backends.factory import get_backend
-        self._sim = get_backend(backend)
 
     def _build_cost_hamiltonian(self) -> SparsePauliOp:
         """MaxCut cost: ½ Σ w_{ij} (I - Z_i Z_j)."""
@@ -281,7 +288,7 @@ class QAOA:
         gamma = params[:self.p_layers]
         beta  = params[self.p_layers:]
         c = self._build_circuit(gamma, beta)
-        result = self._sim.run(c, shots=self.shots)
+        result = sf.run(c, device=self._device, method=self._method, shots=self.shots)
 
         if result.statevector is not None:
             sv = np.asarray(result.statevector, dtype=np.complex128).ravel()
@@ -318,7 +325,7 @@ class QAOA:
         def _cb(xk):
             history.append(self._cost(xk))
             if verbose and len(history) % 20 == 0:
-                print(f"  QAOA iter {len(history):4d}: ⟨H_C⟩ = {history[-1]:+.6f}")
+                logger.info("  QAOA iter %4d: ⟨H_C⟩ = %+.6f", len(history), history[-1])
 
         res = scipy.optimize.minimize(
             fun=self._cost,
@@ -334,7 +341,7 @@ class QAOA:
 
         # Sample the optimized circuit to get the best bitstring
         opt_circuit = self._build_circuit(np.array(opt_gamma), np.array(opt_beta))
-        sample_result = self._sim.run(opt_circuit, shots=8192)
+        sample_result = sf.run(opt_circuit, device=self._device, method=self._method, shots=8192)
         best_bitstring = max(sample_result.counts, key=lambda b: sample_result.counts[b]) if sample_result.counts else "0" * self.n_qubits
         max_cut = self._cut_value(best_bitstring)
 
@@ -350,7 +357,8 @@ class QAOA:
                 "scipy_success": res.success,
                 "optimizer": self.optimizer,
                 "p_layers": self.p_layers,
-                "backend": self.backend,
+                "device": str(self._device),
+                "method": self._method,
                 "n_qubits": self.n_qubits,
             },
         )

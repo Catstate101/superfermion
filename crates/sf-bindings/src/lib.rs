@@ -17,6 +17,7 @@ use pyo3::prelude::*;
 use numpy::PyArrayMethods;
 use sf_ir::{QuantumDAG, OpType, Parameter, SerializedCircuit, MPSState};
 use sf_ir::gate_list::GateSequence;
+use sf_ir::state::{QuantumStateImpl, StatevectorState, DensityMatrixStateWrapper, MPSStateWrapper, StabilizerStateWrapper};
 
 // ═══════════════════════════════════════════════════════════
 // MPS State Bindings
@@ -82,6 +83,156 @@ impl PyMPSState {
             "MPSState(n_qubits={}, bond_dim={})",
             self.inner.n_qubits, self.inner.bond_dim,
         )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// State — Rust-native quantum state handle (sf.State)
+// ═══════════════════════════════════════════════════════════
+
+#[pyclass(name = "State")]
+pub struct PyState {
+    inner: Box<dyn QuantumStateImpl>,
+}
+
+#[pymethods]
+impl PyState {
+    fn expectation(&self, observable: Vec<(Vec<u8>, f64, f64)>) -> PyResult<f64> {
+        let terms = Self::parse_observable(&observable);
+        self.inner.expectation(&terms)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (shots, seed=42))]
+    fn sample(&self, shots: usize, seed: u64) -> PyResult<std::collections::HashMap<String, usize>> {
+        self.inner.sample(shots, seed)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn grad(
+        &self,
+        observable: Vec<(Vec<u8>, f64, f64)>,
+        dag: &PyQuantumDAG,
+        param_values: std::collections::HashMap<String, f64>,
+    ) -> PyResult<std::collections::HashMap<String, f64>> {
+        let terms = Self::parse_observable(&observable);
+        let gradients = self.inner.grad(&terms, &dag.inner, &param_values)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let names = dag.inner.parameter_names();
+        let mut result = std::collections::HashMap::new();
+        for (name, grad) in names.into_iter().zip(gradients.into_iter()) {
+            result.insert(name, grad);
+        }
+        Ok(result)
+    }
+
+    fn entropy(&self) -> PyResult<f64> {
+        self.inner.entropy()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn purity(&self) -> PyResult<f64> {
+        self.inner.purity()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn fidelity(&self, other: &PyState) -> PyResult<f64> {
+        self.inner.fidelity(other.inner.as_ref())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn qfim<'py>(
+        &self,
+        py: Python<'py>,
+        dag: &PyQuantumDAG,
+        param_values: std::collections::HashMap<String, f64>,
+    ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+        let matrix = self.inner.qfim(&dag.inner, &param_values)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let n = matrix.len();
+        if n == 0 {
+            return Ok(numpy::PyArray2::from_vec2(py, &[]).unwrap());
+        }
+        Ok(numpy::PyArray2::from_vec2(py, &matrix).unwrap())
+    }
+
+    fn numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        let v = self.inner.to_vec()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(numpy::PyArray1::from_vec(py, v))
+    }
+
+    fn probabilities<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        let p = self.inner.probabilities()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(numpy::PyArray1::from_vec(py, p))
+    }
+
+    fn partial_trace(&self, keep_qubits: Vec<usize>) -> PyResult<Self> {
+        let new_state = self.inner.partial_trace(&keep_qubits)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyState { inner: new_state })
+    }
+
+    #[staticmethod]
+    fn from_numpy(data: numpy::PyReadonlyArray1<num_complex::Complex64>, n_qubits: usize) -> PyResult<Self> {
+        let v: Vec<num_complex::Complex64> = data.as_slice()?.to_vec();
+        if v.len() != 1 << n_qubits {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("array length {} doesn't match 2^{} = {}", v.len(), n_qubits, 1usize << n_qubits)
+            ));
+        }
+        Ok(PyState {
+            inner: Box::new(StatevectorState::new(v, n_qubits, "cpu")),
+        })
+    }
+
+    #[getter]
+    fn n_qubits(&self) -> usize {
+        self.inner.n_qubits()
+    }
+
+    #[getter]
+    fn method(&self) -> &str {
+        self.inner.method_name()
+    }
+
+    #[getter]
+    fn device(&self) -> &str {
+        self.inner.device_name()
+    }
+
+    #[getter]
+    fn shape(&self) -> Vec<usize> {
+        let n = self.inner.n_qubits();
+        match self.inner.method_name() {
+            "density_matrix" => vec![1 << n, 1 << n],
+            _ => vec![1 << n],
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "State(n_qubits={}, method='{}', device='{}')",
+            self.inner.n_qubits(),
+            self.inner.method_name(),
+            self.inner.device_name(),
+        )
+    }
+}
+
+impl PyState {
+    pub fn new(inner: Box<dyn QuantumStateImpl>) -> Self {
+        PyState { inner }
+    }
+
+    fn parse_observable(terms: &[(Vec<u8>, f64, f64)]) -> Vec<sf_ir::PauliTerm> {
+        terms.iter().map(|(paulis, re, im)| {
+            sf_ir::PauliTerm {
+                paulis: paulis.clone(),
+                coef: num_complex::Complex64::new(*re, *im),
+            }
+        }).collect()
     }
 }
 
@@ -263,6 +414,49 @@ impl PyQuantumDAG {
     fn evolve_mps(&self, bond_dim: usize) -> PyMPSState {
         PyMPSState {
             inner: self.inner.evolve_mps(bond_dim),
+        }
+    }
+
+    /// Simulate and return a State handle (sf.State).
+    /// Method can be "statevector", "density_matrix", "mps", or "stabilizer".
+    #[pyo3(signature = (method="statevector", device="cpu", bond_dim=64))]
+    fn simulate_to_state(&self, method: &str, device: &str, bond_dim: usize) -> PyResult<PyState> {
+        match method {
+            "statevector" => {
+                let sv = if device == "gpu" {
+                    self.inner.simulate_on("gpu")
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?
+                } else {
+                    self.inner.simulate()
+                };
+                Ok(PyState::new(Box::new(StatevectorState::new(sv, self.inner.n_qubits, device))))
+            }
+            "density_matrix" => {
+                let dm_vec = self.inner.simulate_dm();
+                let mut dm = sf_ir::dm::DensityMatrixState::new(self.inner.n_qubits);
+                dm.data = dm_vec;
+                Ok(PyState::new(Box::new(DensityMatrixStateWrapper::new(dm, device))))
+            }
+            "mps" => {
+                let mps = self.inner.evolve_mps(bond_dim);
+                Ok(PyState::new(Box::new(MPSStateWrapper::new(mps, device))))
+            }
+            "stabilizer" => {
+                let gates = self.inner.to_gate_records();
+                let gate_list: Vec<(String, Vec<usize>)> = gates.iter()
+                    .filter(|(name, _, _)| {
+                        let up = name.to_uppercase();
+                        up != "BARRIER" && up != "MEASURE" && up != "RESET"
+                    })
+                    .map(|(name, qubits, _params)| (name.to_uppercase(), qubits.clone()))
+                    .collect();
+                let tab = sf_ir::stabilizer::StabilizerTableau::from_gate_list(self.inner.n_qubits, &gate_list)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+                Ok(PyState::new(Box::new(StabilizerStateWrapper::new(tab, device))))
+            }
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Unknown method '{}'. Use 'statevector', 'density_matrix', 'mps', or 'stabilizer'.", method)
+            ))
         }
     }
 
@@ -1282,6 +1476,7 @@ fn _sf_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQuantumDAG>()?;
     m.add_class::<PyGateSequence>()?;
     m.add_class::<PyMPSState>()?;
+    m.add_class::<PyState>()?;
 
     // Stabilizer (Clifford simulation + Pauli twirl)
     m.add_class::<PyStabilizerTableau>()?;

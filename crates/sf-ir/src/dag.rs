@@ -642,12 +642,9 @@ impl QuantumDAG {
             let u11 = gate_u[(1, 1)];
             let stride = 1usize << t;
 
-            // Diagonal 1q: scale each amplitude by its diagonal element.
-            let is_diag = matches!(
-                op.op_type,
-                OpType::Z | OpType::S | OpType::Sdg | OpType::T | OpType::Tdg
-                | OpType::Id | OpType::Rz(_) | OpType::R1(_) | OpType::P(_)
-            );
+            // Detect diagonal from the ACTUAL matrix (not op_type, which may
+            // be stale after 1q gate fusion).
+            let is_diag = u01.norm() < 1e-14 && u10.norm() < 1e-14;
             if is_diag {
                 let a = u00;
                 let b = u11;
@@ -669,8 +666,11 @@ impl QuantumDAG {
                 return;
             }
 
-            // X gate: swap pairs in-place
-            if op.op_type == OpType::X {
+            // X gate: swap pairs in-place (only if matrix is actually X)
+            let is_x = u00.norm() < 1e-14 && u11.norm() < 1e-14
+                && (u01 - num_complex::Complex64::new(1.0, 0.0)).norm() < 1e-14
+                && (u10 - num_complex::Complex64::new(1.0, 0.0)).norm() < 1e-14;
+            if is_x {
                 inplace_swap_pairs(state, stride, use_par);
                 return;
             }
@@ -1615,5 +1615,61 @@ mod tests {
         let sv = dag.simulate();
         // |01> = index 2 in LSB convention (q0=0, q1=1)
         assert!((sv[2].re - 1.0).abs() < 1e-10, "sv[2]={}", sv[2]);
+    }
+
+    #[test]
+    fn test_to_unitary_h_gate() {
+        let mut dag = QuantumDAG::new(1, 0);
+        dag.add_op(OpType::H, &[0]);
+
+        let u = dag.to_unitary();
+        let h = OpType::H.to_matrix();
+
+        for r in 0..2 {
+            for c in 0..2 {
+                assert!(
+                    (u[(r, c)] - h[(r, c)]).norm() < 1e-10,
+                    "u[({r},{c})]={}, h[({r},{c})]={}",
+                    u[(r, c)],
+                    h[(r, c)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_update_parameters_in_place() {
+        let mut dag = QuantumDAG::new(1, 0);
+        dag.add_op(
+            OpType::Rx(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+
+        let mut values = HashMap::new();
+        values.insert("theta".into(), std::f64::consts::FRAC_PI_2);
+        dag.update_parameters(&values);
+
+        let ops = dag.to_instructions();
+        assert_eq!(ops.len(), 1);
+        match &ops[0].op_type {
+            OpType::Rx(Parameter::Const(v)) => {
+                assert!((v - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+            }
+            other => panic!("Expected Rx(Const), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_identity_circuit_yields_zero_state() {
+        let dag = QuantumDAG::new(3, 0);
+        let sv = dag.simulate();
+
+        assert!((sv[0].re - 1.0).abs() < 1e-10);
+        for i in 1..sv.len() {
+            assert!(sv[i].norm() < 1e-10, "sv[{i}]={}", sv[i]);
+        }
     }
 }

@@ -29,7 +29,7 @@ class TestParameterShiftGradient:
         params = {"theta": 0.5}
 
         grad = parameter_shift.parameter_shift_grad(
-            circuit, observable, params, backend="statevector"
+            circuit, observable, params, device="cpu"
         )
         assert "theta" in grad
         expected = -math.sin(0.5)
@@ -44,7 +44,7 @@ class TestParameterShiftGradient:
         values = np.array([0.3, 0.7])
 
         grad_vec = parameter_shift.parameter_shift_grad_vector(
-            circuit, observable, names, values, backend="statevector"
+            circuit, observable, names, values, device="cpu"
         )
         assert grad_vec.shape == (2,)
         assert np.all(np.isfinite(grad_vec))
@@ -59,7 +59,7 @@ class TestAdjointGradient:
         values = np.array([0.5])
 
         ps_grad = parameter_shift.parameter_shift_grad_vector(
-            circuit, observable, names, values, backend="statevector"
+            circuit, observable, names, values, device="cpu"
         )
         adj_grad = adjoint.adjoint_grad_vector(
             circuit, observable, names, values

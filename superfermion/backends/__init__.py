@@ -1,15 +1,7 @@
 """
-Backends module for Superfermion.
+Backends utilities — gate fusion, decomposition, Clifford detection, Kraus helpers.
 
-Provides access to simulators, accelerators, and QPU interfaces
-through a declarative factory.
+Legacy Backend classes have been removed. Use sf.run() with device/method parameters.
 """
 
-from superfermion.backends.base import Backend
-from superfermion.backends.factory import get_backend, list_backends
-
-__all__ = [
-    "Backend",
-    "get_backend",
-    "list_backends",
-]
+__all__: list = []

@@ -1,65 +1,66 @@
 # Superfermion Coding Conventions
 
-> Essential guidelines for maintaining the world-class quality and performance of the Superfermion codebase.
+> Guidelines for maintaining quality and performance in the Superfermion codebase.
 
 ---
 
-## 🐍 Python Style (Layer 2-10)
+## Python Style
 
 ### 1. Differentiable First
-All logic that touches data must be **JAX-compatible**.
-- Use `jnp` instead of `np` inside algorithms.
+Logic inside algorithms should be JAX-compatible where gradients are needed.
+- Use `jnp` instead of `np` inside JAX-transformed code.
 - Avoid side effects in simulation logic.
-- Always implement a **Batching Rule** if adding a new JAX-primitive.
 
 ### 2. Properties Over Methods
-If a value is a static property of an object (like circuit depth or qubit count), use `@property`. Do not use getter methods.
+Static properties use `@property`, not getter methods.
 - **Good**: `circuit.n_qubits`
 - **Bad**: `circuit.get_n_qubits()`
 
 ### 3. Fluent API (Chainable)
-Always return `self` for gate methods and configuration setters to enable readable chaining.
-- **Example**: `sf.Circuit(2).h(0).cx(0,1).draw()`
+Gate methods return `self` for chaining:
+- **Example**: `sf.Circuit(2).h(0).cnot(0, 1).draw()`
 
 ### 4. Logging
-Use `sf.utils.info()`, `sf.utils.warning()`, and `sf.utils.error()` for internal communications. This ensures world-class, colorful terminal feedback via the **Rich** library.
+Use `superfermion.utils.logging` helpers for internal messages.
 
 ---
 
-## 🦀 Rust Style (Layer 0-1)
+## Rust Style
 
 ### 1. Performance Critical
-Only implement logic in Rust if it is on the **Critical Path** (e.g., SABRE routing, DAG traversal, or Memory Management).
+Implement in Rust only on the critical path (simulation kernels, routing, IR).
 
 ### 2. Minimal Bindings
-Keep the PyO3 interface simple. Use the `_sf_core` internal module for high-speed calls, but wrap them in high-level Python classes for the user.
+Keep the PyO3 interface simple. Wrap `_sf_core` in high-level Python classes.
 
 ---
 
-## 🧪 Testing Guidelines
+## Testing Guidelines
 
-### 1. Full Regression
-Every major change must pass the `test_full_regression.py` suite. This covers 115+ critical paths across JAX, Rust (CI), and Python.
+### 1. Pytest Suite
+Run `python -m pytest tests/unit/ -q` for fast smoke tests.
+Full suite: `python -m pytest tests/ -q --timeout=120`.
 
 ### 2. Hardware Mocking
-When testing `runtime` or `providers`, use the `JobStatus.MOCK_RESULT_MAP` if live credentials are not available. Do not break the CI by requiring a physical QPU connection.
+QPU adapter tests use mocks when live credentials are unavailable.
 
 ---
 
-## 📖 Component Ownership
+## Component Ownership
 
 | Module | Responsible For | Primary Language |
 |--------|-----------------|------------------|
 | `sf-ir` | Gate definitions & DAG | Rust |
-| `qml` | JAX Primitives & Gradients | Python/JAX |
-| `algorithms` | VQE, QAOA, QSVM | Python/JAX |
-| `runtime` | Job Orchestration | Python |
-| `intelligence` | QNS & Agents | Python/JAX |
-| `classical` | JAX Classical AI | Python/JAX |
-| `qec` | Fault-Tolerance | Python/JAX |
-| `serve` | FastAPI & Auth | Python |
+| `qml` | Gradients & templates | Python |
+| `algorithms` | VQE, QAOA, QSVM | Python |
+| `devices` | DeviceExecutor protocol, QPU adapters | Python |
+| `qec` | Fault-tolerance codes & decoders | Python |
+| `compiler` | Transpilation passes | Python + Rust |
 
 ---
 
-## 🚀 Vision: THE HOLY GRAIL
-The ultimate goal of every commit is to bring Superfermion closer to being the **Holy Grail of QML**: A framework that is as easy as PyTorch but as powerful as a 127-qubit quantum processor.
+## API Principles
+
+- **No hidden global state** — pass device objects explicitly
+- **Pass objects, not magic strings** — `IBMDevice(token=...)` not hidden registries
+- **Scope is visible** — tracking via `with sf.experiment(...)` context manager

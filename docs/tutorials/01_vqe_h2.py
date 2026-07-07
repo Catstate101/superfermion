@@ -14,7 +14,7 @@ def main() -> float:
     H      = get_molecular_hamiltonian("H2")
     ansatz = uccsd_ansatz(n_qubits=4, n_electrons=2)
 
-    vqe    = VQE(ansatz, H, backend="statevector")
+    vqe    = VQE(ansatz, H)
     result = vqe.minimize(iterations=200)
 
     print(f"H2 ground-state energy (VQE): {result.optimal_value:.6f} Ha")

@@ -80,4 +80,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "integration: integration tests")
     config.addinivalue_line("markers", "backend: backend correctness tests")
     config.addinivalue_line("markers", "domain: domain-specific tests")
+    config.addinivalue_line("markers", "e2e: end-to-end tests")
     config.addinivalue_line("markers", "slow: slow tests (skipped by default)")
+    config.addinivalue_line("markers", "timeout: timeout for test")
+    config.addinivalue_line("markers", "timeout(timeout): per-test timeout in seconds")
