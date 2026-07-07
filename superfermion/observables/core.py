@@ -1,8 +1,11 @@
 """
 Observables — measurement operators for expected values.
 
-Provides efficient backend-agnostic expectation value computation using
-bit-manipulation (no Kronecker products) — O(2^n) time and space instead of O(4^n).
+Hot-path expectation values are computed in Rust via ``_sf_core.hamiltonian_expval``
+(MSB-convention statevector, weighted Pauli sum, single FFI call).
+
+The NumPy ``_apply_pauli_string_np`` function is kept as a reference/fallback
+and for the ``_apply`` method, but all ``_fast_expval`` paths route through Rust.
 """
 
 from __future__ import annotations
@@ -11,6 +14,14 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+
+_PAULI_ENCODE = {"I": 0, "X": 1, "Y": 2, "Z": 3}
+
+try:
+    from superfermion._sf_core import hamiltonian_expval as _rust_hamiltonian_expval
+    _HAS_RUST_EXPVAL = True
+except ImportError:
+    _HAS_RUST_EXPVAL = False
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -172,6 +183,10 @@ class PauliString(Observable):
         self.coeffs = coeff if coeff is not None else coeffs
 
     def _fast_expval(self, sv: np.ndarray) -> complex:
+        if _HAS_RUST_EXPVAL:
+            paulis = [_PAULI_ENCODE[ch] for ch in self.pauli_str]
+            c = complex(self.coeffs)
+            return _rust_hamiltonian_expval(sv, [(paulis, c.real, c.imag)])
         Opsi = _apply_pauli_string_np(sv, self.pauli_str)
         return self.coeffs * np.vdot(sv, Opsi)
 
@@ -183,10 +198,7 @@ class PauliString(Observable):
     def _apply(self, statevector) -> np.ndarray:
         """Apply this Pauli string operator to a statevector.
 
-        Returns O|ψ⟩ as a numpy array (coefficient included).
-        Kept for backward compatibility with code that calls term._apply(sv).
-
-        For JAX arrays, converts to numpy first.
+        Returns O|psi> as a numpy array (coefficient included).
         """
         sv = np.asarray(statevector, dtype=np.complex128).ravel()
         return self.coeffs * _apply_pauli_string_np(sv, self.pauli_str)
@@ -300,6 +312,13 @@ class SparsePauliOp(Observable):
     # ── Expectation ────────────────────────────────────────────────────────────
 
     def _fast_expval(self, sv: np.ndarray) -> complex:
+        if _HAS_RUST_EXPVAL:
+            rust_terms = []
+            for pauli_str, coeff in self._terms:
+                paulis = [_PAULI_ENCODE[ch] for ch in pauli_str]
+                c = complex(coeff)
+                rust_terms.append((paulis, c.real, c.imag))
+            return _rust_hamiltonian_expval(sv, rust_terms)
         total: complex = 0.0
         for pauli_str, coeff in self._terms:
             if set(pauli_str) == {'I'}:
@@ -358,6 +377,13 @@ class Hamiltonian(Observable):
         self.terms = terms
 
     def _fast_expval(self, sv: np.ndarray) -> complex:
+        if _HAS_RUST_EXPVAL:
+            rust_terms = []
+            for term in self.terms:
+                paulis = [_PAULI_ENCODE[ch] for ch in term.pauli_str]
+                c = complex(term.coeffs)
+                rust_terms.append((paulis, c.real, c.imag))
+            return _rust_hamiltonian_expval(sv, rust_terms)
         total: complex = 0.0
         for term in self.terms:
             total += term._fast_expval(sv)

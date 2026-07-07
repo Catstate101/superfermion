@@ -40,6 +40,7 @@ def run(
     method: Optional[str] = None,
     target: Optional[str] = None,
     tracker: Optional[Any] = None,
+    params: Optional[dict] = None,
     **kwargs: Any,
 ) -> RunResult:
     """Execute a quantum circuit and return measurement results.
@@ -59,6 +60,8 @@ def run(
             and topology before execution.
         tracker: An explicit ``TrackerProtocol`` object. If omitted, the
             runner checks for an active ``sf.experiment()`` context.
+        params: Parameter values for symbolic circuits.  If provided,
+            ``circuit.bind(params)`` is called automatically.
         **kwargs: Passed through to the device executor (e.g. ``bond_dim``
             for MPS, ``seed`` for sampling).
 
@@ -71,12 +74,16 @@ def run(
         RuntimeError: If stabilizer method is used on non-Clifford circuit.
         ValueError: If device or method string is unrecognized.
     """
+    # 0. Bind parameters if provided
+    if params is not None:
+        circuit = circuit.bind(params)
+
     # 1. Parameter validation
     if circuit.n_parameters > 0:
         unbound = circuit.parameters
         raise RuntimeError(
             f"Circuit has {len(unbound)} unbound parameter(s): {unbound}\n"
-            f"  Fix: Call circuit.bind({{{unbound[0]!r}: 0.5, ...}}) before sf.run()"
+            f"  Fix: Call sf.run(circuit, params={{{unbound[0]!r}: 0.5, ...}})"
         )
 
     # 2. Resolve device
@@ -87,14 +94,8 @@ def run(
     if target:
         exec_circuit = _compile_for_target(circuit, target)
 
-    # 4. Gate fusion (skip if device says so)
+    # 4. Gate fusion is handled in Rust during simulation
     caps = executor.capabilities()
-    if not caps.skip_fusion:
-        try:
-            from superfermion.backends.turbo import fuse_single_qubit_gates
-            exec_circuit = fuse_single_qubit_gates(exec_circuit)
-        except ImportError:
-            pass
 
     # 5. Resolve tracker (explicit > context > None)
     active_tracker = tracker

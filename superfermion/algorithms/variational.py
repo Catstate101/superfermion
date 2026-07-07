@@ -39,6 +39,7 @@ import superfermion as sf
 from superfermion.algorithms.core import AlgorithmResult
 from superfermion.observables.core import Observable, SparsePauliOp, PauliString, expval
 from superfermion.qml.gradient.parameter_shift import parameter_shift_grad_vector
+from superfermion.qml.gradient.adjoint import adjoint_grad_vector
 
 
 # ── VQE ───────────────────────────────────────────────────────────────────────
@@ -47,16 +48,16 @@ from superfermion.qml.gradient.parameter_shift import parameter_shift_grad_vecto
 class VQE:
     """Variational Quantum Eigensolver — backend-agnostic.
 
-    Minimizes ⟨ψ(θ)|H|ψ(θ)⟩ using scipy.optimize.minimize with analytical
-    parameter-shift gradients.
+    Minimizes <psi(theta)|H|psi(theta)> using scipy.optimize.minimize.
 
     Args:
-        ansatz:    Parametric SF Circuit (built with ``sf.param(...)`` gates).
+        ansatz:      Parametric SF Circuit (built with ``sf.param(...)`` gates).
         hamiltonian: SF observable (SparsePauliOp, Hamiltonian, PauliString).
-        backend:   SF backend name ('statevector', 'rust', 'mps', etc.).
-        optimizer: scipy optimizer method. Default 'L-BFGS-B' (uses gradients).
-                   Use 'COBYLA' or 'Nelder-Mead' for gradient-free.
-        shots:     0 = exact statevector (default); > 0 = shot-based sampling.
+        backend:     SF backend name ('statevector', 'rust', 'mps', etc.).
+        optimizer:   scipy optimizer method. Default 'L-BFGS-B' (uses gradients).
+        shots:       0 = exact statevector (default); > 0 = shot-based sampling.
+        diff_method: Gradient method: ``'adjoint'`` (default, Rust, O(M+N)*2^n)
+                     or ``'parameter-shift'`` (2N forward passes).
     """
 
     def __init__(
@@ -66,12 +67,14 @@ class VQE:
         backend: str = "statevector",
         optimizer: str = "L-BFGS-B",
         shots: int = 0,
+        diff_method: str = "adjoint",
     ):
         self.ansatz = ansatz
         self.hamiltonian = hamiltonian
         self.backend = backend
         self.optimizer = optimizer
         self.shots = shots
+        self.diff_method = diff_method
         self._param_names: List[str] = list(ansatz.parameters)
 
         from superfermion.backends.factory import get_backend
@@ -89,6 +92,13 @@ class VQE:
         return _expval_from_counts(result.counts, self.hamiltonian, self.ansatz.n_qubits)
 
     def _gradient(self, param_values: np.ndarray) -> np.ndarray:
+        if self.diff_method == "adjoint" and self.shots == 0:
+            return adjoint_grad_vector(
+                self.ansatz,
+                self.hamiltonian,
+                self._param_names,
+                param_values,
+            )
         return parameter_shift_grad_vector(
             self.ansatz,
             self.hamiltonian,

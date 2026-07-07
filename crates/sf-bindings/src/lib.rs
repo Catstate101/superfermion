@@ -1214,6 +1214,64 @@ fn reverse_bits(val: usize, n_bits: usize) -> usize {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Standalone Pauli expval on existing statevector
+// ═══════════════════════════════════════════════════════════
+
+/// Compute weighted Pauli expectation value on an existing statevector.
+///
+/// Takes an MSB-convention statevector and a list of (paulis_u8, coef_re, coef_im)
+/// terms, and returns the real part of sum_k coef_k * <sv|P_k|sv>.
+///
+/// Pauli encoding per qubit: 0=I, 1=X, 2=Y, 3=Z.
+/// The qubit ordering in each Pauli list is MSB-first (q0 first).
+#[pyfunction]
+fn hamiltonian_expval(
+    sv: numpy::PyReadonlyArray1<num_complex::Complex64>,
+    terms: Vec<(Vec<u8>, f64, f64)>,
+) -> f64 {
+    let sv = sv.as_slice().unwrap();
+    let n_qubits = (sv.len() as f64).log2() as usize;
+    let dim = sv.len();
+    let mut total = num_complex::Complex64::new(0.0, 0.0);
+
+    for (paulis, coef_re, coef_im) in &terms {
+        let coef = num_complex::Complex64::new(*coef_re, *coef_im);
+        let mut expval = num_complex::Complex64::new(0.0, 0.0);
+
+        for i in 0..dim {
+            let mut phase = num_complex::Complex64::new(1.0, 0.0);
+            let mut target_idx = i;
+
+            for (q, &pauli_op) in paulis.iter().enumerate() {
+                let bit_pos = n_qubits - 1 - q;
+                match pauli_op {
+                    1 => { // X
+                        target_idx ^= 1 << bit_pos;
+                    }
+                    2 => { // Y
+                        target_idx ^= 1 << bit_pos;
+                        if (i >> bit_pos) & 1 == 0 {
+                            phase *= num_complex::Complex64::new(0.0, -1.0);
+                        } else {
+                            phase *= num_complex::Complex64::new(0.0, 1.0);
+                        }
+                    }
+                    3 => { // Z
+                        if (i >> bit_pos) & 1 == 1 {
+                            phase *= -1.0;
+                        }
+                    }
+                    _ => {} // I
+                }
+            }
+            expval += sv[i].conj() * phase * sv[target_idx];
+        }
+        total += coef * expval;
+    }
+    total.re
+}
+
+// ═══════════════════════════════════════════════════════════
 // Module Registration
 // ═══════════════════════════════════════════════════════════
 
@@ -1248,6 +1306,9 @@ fn _sf_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // GPU availability check and diagnostics
     m.add_function(wrap_pyfunction!(gpu_available, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_diagnose, m)?)?;
+
+    // Standalone compute on existing statevectors
+    m.add_function(wrap_pyfunction!(hamiltonian_expval, m)?)?;
 
     m.add("__version__", "0.1.0")?;
     Ok(())

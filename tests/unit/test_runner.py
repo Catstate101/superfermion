@@ -81,25 +81,14 @@ class TestRunCompilation:
         executor.execute.assert_called_once_with(bell_circuit, shots=1000)
 
 
-class TestRunGateFusion:
-    def test_fusion_called_when_not_skipped(self, bell_circuit):
-        executor = _mock_executor(skip_fusion=False)
-        fused = MagicMock()
-        with patch("superfermion.runner._resolve_device", return_value=executor), \
-             patch("superfermion.backends.turbo.fuse_single_qubit_gates", return_value=fused) as mock_fuse:
-            sf.run(bell_circuit, device=executor)
-
-        mock_fuse.assert_called_once_with(bell_circuit)
-        executor.execute.assert_called_once_with(fused, shots=1000)
-
-    def test_fusion_skipped_when_capabilities_say_so(self, bell_circuit):
-        executor = _mock_executor(skip_fusion=True)
-        with patch("superfermion.runner._resolve_device", return_value=executor), \
-             patch("superfermion.backends.turbo.fuse_single_qubit_gates") as mock_fuse:
-            sf.run(bell_circuit, device=executor)
-
-        mock_fuse.assert_not_called()
-        executor.execute.assert_called_once_with(bell_circuit, shots=1000)
+class TestRunParams:
+    def test_params_kwarg_binds_circuit(self, parametric_circuit):
+        """sf.run(circuit, params={...}) should bind and execute."""
+        executor = _mock_executor()
+        with patch("superfermion.runner._resolve_device", return_value=executor):
+            result = sf.run(parametric_circuit, device=executor, params={"theta": 0.5, "phi": 1.0})
+        executor.execute.assert_called_once()
+        assert isinstance(result, RunResult)
 
 
 class TestRunErrorPropagation:

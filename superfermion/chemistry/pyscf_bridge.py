@@ -107,10 +107,11 @@ class MolecularData:
         ferm_op = FermionicOperator.from_coeffs(h1_as, h2_as)
 
         # Map to qubits
+        n_qubits = 2 * n_orbs
         if mapping == "jordan_wigner":
-            H = ferm_op.to_jordan_wigner()
+            H = ferm_op.jordan_wigner(n_qubits)
         elif mapping == "bravyi_kitaev":
-            H = ferm_op.to_bravyi_kitaev()
+            H = ferm_op.bravyi_kitaev(n_qubits)
         else:
             raise ValueError(f"Unknown mapping: {mapping}")
 

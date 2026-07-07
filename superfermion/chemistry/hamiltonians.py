@@ -95,17 +95,6 @@ class FermionicOperator:
         f, res = FermionicOperator._MUL[(l, r)]
         return f, FermionicOperator._IDX_PAULI[res]
 
-    # Cached Hamiltonians for common molecules (precomputed with OpenFermion)
-    _CACHED = {
-        "h2_sto3g": [
-            PauliString("II", -1.052373),
-            PauliString("ZI", 0.397937),
-            PauliString("IZ", 0.397937),
-            PauliString("ZZ", 0.011280),
-            PauliString("XX", 0.180931),
-        ],
-    }
-
     def jordan_wigner(self, n_qubits: int) -> Hamiltonian:
         """Perform the Jordan-Wigner transformation.
 
@@ -292,13 +281,18 @@ class FermionicOperator:
 
 def get_molecular_hamiltonian(molecule: str, basis: str = "sto-3g") -> Hamiltonian:
     """High-level API to retrieve pre-computed molecular Hamiltonians."""
+    # H2 STO-3G at d=0.735 Å, parity-reduced 2-qubit Hamiltonian
+    # (O'Malley et al. 2016, Kandala et al. 2017).
+    # Nuclear repulsion (0.7199689 Ha) is folded into the II coefficient
+    # so VQE eigenvalues are total energies directly.
+    # Ground state ≈ -1.1373 Ha in the {|01>, |10>} subspace.
     _CACHED = {
         "h2_sto-3g": [
-            PauliString("II", -1.052373),
-            PauliString("ZI", 0.397937),
-            PauliString("IZ", 0.397937),
-            PauliString("ZZ", 0.011280),
-            PauliString("XX", 0.180931),
+            PauliString("II", -0.3324043),
+            PauliString("ZI",  0.3979374),
+            PauliString("IZ", -0.3979374),
+            PauliString("ZZ", -0.0112801),
+            PauliString("XX",  0.1809312),
         ],
     }
     key = f"{molecule.lower()}_{basis.lower()}"
@@ -306,4 +300,3 @@ def get_molecular_hamiltonian(molecule: str, basis: str = "sto-3g") -> Hamiltoni
         return Hamiltonian(_CACHED[key])
 
     raise NotImplementedError(f"Molecule {molecule} not supported yet.")
-#ggjj
