@@ -10,7 +10,6 @@ This replaces the old LocalDevice + factory.py + multiple backend classes.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-import hashlib
 import numpy as np
 
 from superfermion.circuit import Circuit
@@ -27,8 +26,6 @@ def _lsb_to_msb(sv: np.ndarray, n_qubits: int) -> np.ndarray:
     return tensor.reshape(-1)
 
 
-_CACHE_MAX_ENTRIES = 32
-
 class RustDevice:
     """High-performance local simulator backed entirely by Rust.
 
@@ -42,9 +39,6 @@ class RustDevice:
     """
 
     _VALID_METHODS = ("statevector", "mps", "stabilizer", "density_matrix")
-
-    _result_cache: Dict[str, np.ndarray] = {}
-    _cache_order: List[str] = []
 
     def __init__(
         self,
@@ -277,14 +271,6 @@ class RustDevice:
             return fused.to_ir()
         else:
             return circuit.to_ir()
-
-    @staticmethod
-    def _circuit_fingerprint(circuit: Circuit) -> str:
-        """Fast hash of circuit structure + parameters for caching."""
-        parts = [str(circuit.n_qubits)]
-        for g in circuit._gates:
-            parts.append(f"{g.name}:{g.qubits}:{g.params}")
-        return hashlib.md5("|".join(parts).encode()).hexdigest()
 
     def __repr__(self) -> str:
         return f"RustDevice(hardware='{self._hardware}', method='{self._method}')"
