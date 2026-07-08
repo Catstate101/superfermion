@@ -52,16 +52,21 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
     
     for instruction in qiskit_circuit.data:
         gate = instruction.operation
-        gate_name = gate.name.upper() # Case-insensitive matching
-        # Reverse endianness: Qiskit LSB (0) -> SF MSB (n-1)
+        gate_name = gate.name.lower()
         qubits = [n_qubits - 1 - qiskit_circuit.find_bit(q).index for q in instruction.qubits]
         params = list(gate.params) if gate.params else []
         
-        sf_name = GATE_MAP.get(gate_name.lower()) # Standard matching logic
+        if gate_name == "unitary":
+            import numpy as np
+            matrix = np.array(gate.to_matrix())
+            circuit.unitary(matrix, qubits)
+            continue
+        
+        sf_name = GATE_MAP.get(gate_name)
         if sf_name is None:
             raise ValueError(
-                f"Unsupported Qiskit gate: '{gate_name}'. "
-                f"Supported: {list(GATE_MAP.keys())}"
+                f"Unsupported Qiskit gate: '{gate.name}'. "
+                f"Supported: {list(GATE_MAP.keys()) + ['unitary']}"
             )
         
         method = getattr(circuit, sf_name)
@@ -105,6 +110,12 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
     }
     
     for gate in circuit._gates:
+        if gate.name.upper() == "UNITARY" and gate.matrix is not None:
+            from qiskit.circuit.library import UnitaryGate
+            mapped_qubits = [circuit.n_qubits - 1 - q for q in gate.qubits]
+            qc.append(UnitaryGate(gate.matrix), mapped_qubits)
+            continue
+
         qiskit_name = GATE_MAP.get(gate.name.upper())
         if qiskit_name is None:
             raise ValueError(f"Cannot map gate '{gate.name}' to Qiskit")
@@ -213,8 +224,8 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             # Single-pass bulk append: avoids intermediate list + double .upper()
             circ.extend_raw_from_records(records)
             return circ
-        except Exception:
-            pass  # Fall back to Python parser
+        except BaseException:
+            pass  # Fall back to Python parser (catches PanicException too)
 
     from superfermion.circuit import GateRecord as _GateRecord
     import re
@@ -532,6 +543,11 @@ def from_cirq(cirq_circuit: Any) -> sf.Circuit:
             sf_name = GATE_MAP.get(gate_type)
             
             if sf_name is None:
+                if hasattr(gate, '_unitary_') or gate_type == 'MatrixGate':
+                    import numpy as np
+                    matrix = np.array(cirq.unitary(gate))
+                    circuit.unitary(matrix, qubit_indices)
+                    continue
                 raise ValueError(f"Unsupported Cirq gate: {gate_type} ({gate})")
             
             method = getattr(circuit, sf_name)
@@ -620,6 +636,12 @@ def to_cirq(circuit: sf.Circuit) -> Any:
     
     for gate in circuit._gates:
         gate_name = gate.name.upper()
+
+        if gate_name == "UNITARY" and gate.matrix is not None:
+            target_qubits = [qubits[i] for i in gate.qubits]
+            operations.append(cirq.MatrixGate(gate.matrix).on(*target_qubits))
+            continue
+
         cirq_gate = GATE_MAP.get(gate_name)
         
         if cirq_gate is None:
@@ -628,7 +650,6 @@ def to_cirq(circuit: sf.Circuit) -> Any:
         target_qubits = [qubits[i] for i in gate.qubits]
         
         if gate_name in ('RX', 'RY', 'RZ'):
-            # Parameterized rotation
             angle = gate.params[0] if gate.params else 0
             operations.append(cirq_gate(angle).on(*target_qubits))
         else:

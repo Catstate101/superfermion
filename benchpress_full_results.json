@@ -1,0 +1,421 @@
+[
+  {
+    "category": "Construction",
+    "test": "bench_qv_build",
+    "sf_time_s": 0.262745,
+    "qk_time_s": 0.309908,
+    "winner": "SF",
+    "ratio": "1.2x",
+    "sf_extra": {
+      "n_qubits": 100,
+      "depth": 100,
+      "gate_count": 35000
+    },
+    "qk_extra": {
+      "n_qubits": 100,
+      "depth": 100,
+      "gate_count": 35000
+    }
+  },
+  {
+    "category": "Construction",
+    "test": "bench_dtc_build",
+    "sf_time_s": 0.264322,
+    "qk_time_s": 0.402795,
+    "winner": "SF",
+    "ratio": "1.5x",
+    "sf_extra": {
+      "n_qubits": 100,
+      "n_layers": 100,
+      "gate_count": 29900
+    },
+    "qk_extra": {
+      "n_qubits": 100,
+      "n_layers": 100,
+      "gate_count": 29900
+    }
+  },
+  {
+    "category": "Construction",
+    "test": "bench_clifford_build",
+    "sf_time_s": 0.432463,
+    "qk_time_s": 0.785999,
+    "winner": "SF",
+    "ratio": "1.8x",
+    "sf_extra": {
+      "n_qubits": 100,
+      "gate_count": 27173
+    },
+    "qk_extra": {
+      "n_qubits": 100,
+      "gate_count": 27173
+    }
+  },
+  {
+    "category": "Construction",
+    "test": "bench_multi_control_build",
+    "sf_time_s": 0.000219,
+    "qk_time_s": 0.000587,
+    "winner": "SF",
+    "ratio": "2.7x",
+    "sf_extra": {
+      "n_controls": 16,
+      "gate_count": 29
+    },
+    "qk_extra": {
+      "n_controls": 16,
+      "gate_count": 1
+    }
+  },
+  {
+    "category": "Construction",
+    "test": "bench_su2_build",
+    "sf_time_s": 0.017117,
+    "qk_time_s": 0.171887,
+    "winner": "SF",
+    "ratio": "10.0x",
+    "sf_extra": {
+      "n_qubits": 100,
+      "reps": 4,
+      "n_parameters": 1000,
+      "gate_count": 1400
+    },
+    "qk_extra": {
+      "n_qubits": 100,
+      "reps": 4,
+      "n_parameters": 1000,
+      "gate_count": 1400
+    }
+  },
+  {
+    "category": "Construction",
+    "test": "bench_su2_bind",
+    "sf_time_s": 0.012727,
+    "qk_time_s": 0.024021,
+    "winner": "SF",
+    "ratio": "1.9x",
+    "sf_extra": {
+      "n_parameters": 1000,
+      "bound_parameters": 0
+    },
+    "qk_extra": {
+      "n_parameters": 1000,
+      "bound_parameters": 0
+    }
+  },
+  {
+    "category": "Construction",
+    "test": "bench_qasm2_import",
+    "sf_time_s": 0.213156,
+    "qk_time_s": 0.180461,
+    "winner": "Qiskit",
+    "ratio": "1.2x",
+    "sf_extra": {
+      "qasm_length": 278097,
+      "gate_count": 15000
+    },
+    "qk_extra": {
+      "qasm_length": 278097,
+      "gate_count": 15000
+    }
+  },
+  {
+    "category": "Construction",
+    "test": "bench_qasm2_bigint",
+    "sf_time_s": 0.000853,
+    "qk_time_s": 0.001308,
+    "winner": "SF",
+    "ratio": "1.5x",
+    "sf_extra": {
+      "qasm_length": 1758
+    },
+    "qk_extra": {
+      "qasm_length": 1758
+    }
+  },
+  {
+    "category": "Manipulation",
+    "test": "bench_pauli_twirl",
+    "sf_time_s": 0.000449,
+    "qk_time_s": -1.0,
+    "winner": "SF",
+    "ratio": "only",
+    "sf_extra": {
+      "input_gate_count": 2990,
+      "output_gate_count": 2990
+    },
+    "qk_extra": {
+      "error": "cannot import name 'PauliTwirl' from 'qiskit.transpiler.passes' (/home/faisal/miniconda3/lib/python3.13/site-packages/qiskit/transpiler/passes/__init__.py)"
+    }
+  },
+  {
+    "category": "Manipulation",
+    "test": "bench_multi_control_decompose",
+    "sf_time_s": 0.008615,
+    "qk_time_s": 0.551193,
+    "winner": "SF",
+    "ratio": "64.0x",
+    "sf_extra": {
+      "target_basis": [
+        "rx",
+        "ry",
+        "rz",
+        "cz"
+      ]
+    },
+    "qk_extra": {
+      "target_basis": [
+        "rx",
+        "ry",
+        "rz",
+        "cz"
+      ]
+    }
+  },
+  {
+    "category": "Manipulation",
+    "test": "bench_basis_change",
+    "sf_time_s": 0.082344,
+    "qk_time_s": 0.020209,
+    "winner": "Qiskit",
+    "ratio": "4.1x",
+    "sf_extra": {
+      "target_basis": [
+        "sx",
+        "x",
+        "rz",
+        "cz"
+      ],
+      "gate_count_2q": 500
+    },
+    "qk_extra": {
+      "target_basis": [
+        "sx",
+        "x",
+        "rz",
+        "cz"
+      ],
+      "gate_count_2q": 500
+    }
+  },
+  {
+    "category": "Manipulation",
+    "test": "bench_clifford_decompose",
+    "sf_time_s": 0.014576,
+    "qk_time_s": 0.007747,
+    "winner": "Qiskit",
+    "ratio": "1.9x",
+    "sf_extra": {
+      "target_basis": [
+        "rz",
+        "sx",
+        "x",
+        "cz"
+      ],
+      "gate_count_2q": 528
+    },
+    "qk_extra": {
+      "target_basis": [
+        "rz",
+        "sx",
+        "x",
+        "cz"
+      ],
+      "gate_count_2q": 528
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_qft_transpile",
+    "sf_time_s": 1.829659,
+    "qk_time_s": 2.926472,
+    "winner": "SF",
+    "ratio": "1.6x",
+    "sf_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 5100,
+      "output_gate_count": 205059,
+      "output_gate_count_2q": 35892,
+      "output_depth": 110295
+    },
+    "qk_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 5100,
+      "output_gate_count": 45282,
+      "output_gate_count_2q": 8018,
+      "output_depth": 9289
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_qv_transpile",
+    "sf_time_s": 0.470146,
+    "qk_time_s": 2.666312,
+    "winner": "SF",
+    "ratio": "5.7x",
+    "sf_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 3500,
+      "output_gate_count": 37783,
+      "output_gate_count_2q": 7160,
+      "output_depth": 7821
+    },
+    "qk_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 3500,
+      "output_gate_count": 30388,
+      "output_gate_count_2q": 4965,
+      "output_depth": 2748
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_su2_transpile",
+    "sf_time_s": 0.10262,
+    "qk_time_s": 10.172267,
+    "winner": "SF",
+    "ratio": "99.1x",
+    "sf_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 1100,
+      "output_gate_count": 8703,
+      "output_gate_count_2q": 1233,
+      "output_depth": 4692
+    },
+    "qk_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 1100,
+      "output_gate_count": 6240,
+      "output_gate_count_2q": 893,
+      "output_depth": 2641
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_bv_transpile",
+    "sf_time_s": 0.031942,
+    "qk_time_s": 0.26958,
+    "winner": "SF",
+    "ratio": "8.4x",
+    "sf_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 299,
+      "output_gate_count": 4097,
+      "output_gate_count_2q": 756,
+      "output_depth": 2165
+    },
+    "qk_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 299,
+      "output_gate_count": 3282,
+      "output_gate_count_2q": 540,
+      "output_depth": 1174
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_heisenberg_transpile",
+    "sf_time_s": 0.126084,
+    "qk_time_s": 10.344482,
+    "winner": "SF",
+    "ratio": "82.0x",
+    "sf_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 397,
+      "output_gate_count": 9342,
+      "output_gate_count_2q": 858,
+      "output_depth": 5704
+    },
+    "qk_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 397,
+      "output_gate_count": 3126,
+      "output_gate_count_2q": 528,
+      "output_depth": 1866
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_qaoa_transpile",
+    "sf_time_s": 0.140923,
+    "qk_time_s": 10.526512,
+    "winner": "SF",
+    "ratio": "74.7x",
+    "sf_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 697,
+      "output_gate_count": 10136,
+      "output_gate_count_2q": 1428,
+      "output_depth": 1717
+    },
+    "qk_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 697,
+      "output_gate_count": 7388,
+      "output_gate_count_2q": 1202,
+      "output_depth": 1781
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_simplification_transpile",
+    "sf_time_s": 0.010676,
+    "qk_time_s": 0.040273,
+    "winner": "SF",
+    "ratio": "3.8x",
+    "sf_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 300,
+      "output_gate_count": 700,
+      "output_gate_count_2q": 0,
+      "output_depth": 7
+    },
+    "qk_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 300,
+      "output_gate_count": 100,
+      "output_gate_count_2q": 0,
+      "output_depth": 1
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_clifford_transpile",
+    "sf_time_s": -1.0,
+    "qk_time_s": 16.934446,
+    "winner": "Qiskit",
+    "ratio": "only",
+    "sf_extra": {
+      "error": "Routing failed: No valid SWAP found to make progress (stuck at gate on qubits [50, 51])"
+    },
+    "qk_extra": {
+      "input_n_qubits": 100,
+      "input_gate_count": 27173,
+      "output_gate_count": 98846,
+      "output_gate_count_2q": 17914,
+      "output_depth": 7185
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_circsu2_89_transpile",
+    "sf_time_s": 0.049239,
+    "qk_time_s": 9.676433,
+    "winner": "SF",
+    "ratio": "196.5x",
+    "sf_extra": {
+      "input_n_qubits": 89,
+      "input_gate_count": 979,
+      "output_gate_count": 7811,
+      "output_gate_count_2q": 1113,
+      "output_depth": 4266
+    },
+    "qk_extra": {
+      "input_n_qubits": 89,
+      "input_gate_count": 979,
+      "output_gate_count": 6634,
+      "output_gate_count_2q": 981,
+      "output_depth": 2939
+    }
+  }
+]

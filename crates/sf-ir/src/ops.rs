@@ -265,6 +265,10 @@ pub enum OpType {
     Output,
     /// Custom opaque gate
     Custom(String, Vec<Parameter>),
+    /// Opaque unitary matrix gate -- stored without decomposition.
+    /// Applied directly to statevector during simulation; decomposed
+    /// into basis gates by UnitaryDecompositionPass during compilation.
+    Unitary(nalgebra::DMatrix<num_complex::Complex64>),
 }
 
 impl OpType {
@@ -290,6 +294,7 @@ impl OpType {
             // Special
             OpType::MeasureAll => 0, // acts on all qubits
             OpType::Custom(_, _) => 0,
+            OpType::Unitary(ref m) => (m.nrows() as f64).log2() as usize,
         }
     }
 
@@ -659,6 +664,20 @@ impl OpType {
             OpType::Measure | OpType::MeasureAll | OpType::Barrier
             | OpType::Reset | OpType::Input | OpType::Output => None,
 
+            OpType::Unitary(ref m) => {
+                let rows = m.nrows();
+                let cols = m.ncols();
+                let mut result = Vec::with_capacity(rows);
+                for r in 0..rows {
+                    let mut row = Vec::with_capacity(cols);
+                    for c in 0..cols {
+                        row.push(m[(r, c)]);
+                    }
+                    result.push(row);
+                }
+                Some(result)
+            }
+
             // For remaining gates, we can add them as needed
             _ => {
                 log::warn!("Unitary not yet implemented for {:?}", self);
@@ -686,6 +705,7 @@ impl OpType {
                 let bound_params = params.iter().map(|p| p.bind(values)).collect();
                 OpType::Custom(name.clone(), bound_params)
             }
+            OpType::Unitary(m) => OpType::Unitary(m.clone()),
             other => other.clone(),
         }
     }
@@ -699,6 +719,7 @@ impl OpType {
             | OpType::CRx(p) | OpType::CRz(p) | OpType::CP(p) => vec![p],
             OpType::U(a, b, c) => vec![a, b, c],
             OpType::Custom(_, params) => params.iter().collect(),
+            OpType::Unitary(_) => vec![],
             _ => vec![],
         }
     }
@@ -720,6 +741,7 @@ impl OpType {
             OpType::Barrier => "Barrier".to_string(), OpType::Reset => "Reset".to_string(),
             OpType::Input => "Input".to_string(), OpType::Output => "Output".to_string(),
             OpType::Custom(ref name, _) => name.clone(),
+            OpType::Unitary(_) => "UNITARY".to_string(),
         }
     }
 }

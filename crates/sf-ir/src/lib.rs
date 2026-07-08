@@ -30,6 +30,7 @@ pub mod qasm;
 pub mod stabilizer;
 pub mod gate_list;
 pub mod adjoint;
+pub mod commutation;
 pub mod state;
 
 // Re-export core types at crate root for convenience

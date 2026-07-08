@@ -12,3 +12,4 @@ smallvec = { workspace = true }
 indexmap = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+rand = { workspace = true }

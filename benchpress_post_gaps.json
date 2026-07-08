@@ -1,0 +1,156 @@
+[
+  {
+    "category": "Manipulation",
+    "test": "bench_basis_change",
+    "sf_time_s": 1.30619814199963,
+    "qk_time_s": 1.3037546520026808,
+    "winner": "Qiskit",
+    "ratio": "1.0x",
+    "sf_extra": {
+      "gate_count_2q": 500,
+      "target_basis": [
+        "SX",
+        "X",
+        "RZ",
+        "CZ"
+      ]
+    },
+    "qk_extra": {
+      "gate_count_2q": 500,
+      "target_basis": [
+        "sx",
+        "x",
+        "rz",
+        "cz"
+      ]
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_qft_transpile",
+    "sf_time_s": 26.022930172999622,
+    "qk_time_s": 4.122824477002723,
+    "winner": "Qiskit",
+    "ratio": "6.3x",
+    "sf_extra": {
+      "gate_count": 30795,
+      "gate_count_2q": 20865
+    },
+    "qk_extra": {
+      "gate_count": 47293,
+      "gate_count_2q": 8300
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_qv_transpile",
+    "sf_time_s": 1.4007172410019848,
+    "qk_time_s": 3.035533480997401,
+    "winner": "SF",
+    "ratio": "2.2x",
+    "sf_extra": {
+      "gate_count": 11013,
+      "gate_count_2q": 5553
+    },
+    "qk_extra": {
+      "gate_count": 28025,
+      "gate_count_2q": 4805
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_su2_transpile",
+    "sf_time_s": 0.04288007200011634,
+    "qk_time_s": 12.079622023000411,
+    "winner": "SF",
+    "ratio": "281.7x",
+    "sf_extra": {
+      "gate_count": 1761,
+      "gate_count_2q": 751
+    },
+    "qk_extra": {
+      "gate_count": 4458,
+      "gate_count_2q": 655
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_bv_transpile",
+    "sf_time_s": 0.011573967000003904,
+    "qk_time_s": 1.0568108220031718,
+    "winner": "SF",
+    "ratio": "91.3x",
+    "sf_extra": {
+      "gate_count": 641,
+      "gate_count_2q": 226
+    },
+    "qk_extra": {
+      "gate_count": 857,
+      "gate_count_2q": 127
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_heisenberg_transpile",
+    "sf_time_s": 0.017479536996688694,
+    "qk_time_s": 11.70439275100216,
+    "winner": "SF",
+    "ratio": "669.6x",
+    "sf_extra": {
+      "gate_count": 1284,
+      "gate_count_2q": 339
+    },
+    "qk_extra": {
+      "gate_count": 2546,
+      "gate_count_2q": 450
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_qaoa_transpile",
+    "sf_time_s": 0.045065832000545925,
+    "qk_time_s": 1.6713490230031312,
+    "winner": "SF",
+    "ratio": "37.1x",
+    "sf_extra": {
+      "gate_count": 2524,
+      "gate_count_2q": 919
+    },
+    "qk_extra": {
+      "gate_count": 4201,
+      "gate_count_2q": 694
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_simplification_transpile",
+    "sf_time_s": 0.009210077001625905,
+    "qk_time_s": 1.041166898998199,
+    "winner": "SF",
+    "ratio": "113.0x",
+    "sf_extra": {
+      "gate_count": 500,
+      "gate_count_2q": 0
+    },
+    "qk_extra": {
+      "gate_count": 100,
+      "gate_count_2q": 0
+    }
+  },
+  {
+    "category": "Transpilation",
+    "test": "bench_clifford_transpile",
+    "sf_time_s": 19.38546574800057,
+    "qk_time_s": 27.307419362001383,
+    "winner": "SF",
+    "ratio": "1.4x",
+    "sf_extra": {
+      "gate_count": 111468,
+      "gate_count_2q": 64303
+    },
+    "qk_extra": {
+      "gate_count": 317137,
+      "gate_count_2q": 57898
+    }
+  }
+]

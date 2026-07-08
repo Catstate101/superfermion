@@ -1,5 +1,79 @@
 # Superfermion Architecture
 
+## Design Philosophy: Hexagonal Architecture (Ports & Adapters)
+
+Superfermion is built on a single architectural axiom:
+
+> **The domain core defines the contracts; the outside world conforms to them — never the reverse.**
+
+This is **Hexagonal Architecture** (Ports & Adapters), coined by Alistair Cockburn. The core is sovereign — nothing in it imports, references, or depends on any external vendor, framework, or cloud provider. All external integrations plug in through well-defined protocols. The result is a kernel architecture: a small, stable, self-contained core surrounded by a growing ecosystem of adapters.
+
+### The Three Reinforcing Principles
+
+**1. Dependency Inversion (the "D" in SOLID)**
+
+High-level policy (`sf.run`, `sf.compile`) never imports low-level detail (IBM API calls, IonQ REST endpoints, Qiskit internals). Both depend on abstract Protocols. Dependencies always point **inward** toward `sf.State`.
+
+```
+Applications → Runner → Circuit → Rust IR → sf.State
+     ↑              ↑          ↑
+  Adapters       Adapters   Adapters
+(algorithms)  (providers)  (bridges)
+```
+
+**2. Open/Closed Principle**
+
+Superfermion is *open for extension* (add a new provider, simulation backend, bridge, or ML layer) but *closed for modification* (the core never changes when you add a new vendor). Adding `GoogleDevice` means writing one adapter file — zero lines touched in core.
+
+**3. Strategy Pattern at the Architecture Level**
+
+Every major subsystem is a family of interchangeable strategies behind a stable interface:
+
+| Subsystem | Interface | Strategies |
+|---|---|---|
+| Simulation | `QuantumStateImpl` trait | statevector, MPS, stabilizer, density_matrix, GPU |
+| Devices | `DeviceExecutor` protocol | RustDevice, IBMDevice, IonQDevice, BraketDevice |
+| Providers | `Provider` protocol | IBM, IonQ, Braket, OpenQuantum, Catstate |
+| Compilation | `CompilerPass` base | SwapDecomp, GateCancel, RotMerge, SABRE, ... |
+| ML bridges | framework-native gradient | JAX custom_vjp, PyTorch autograd, TF custom_gradient |
+| Tracking | `TrackerProtocol` | LocalTracker, CatstateTracker |
+
+### Ports (Abstractions SF Owns)
+
+These are the contracts that define the boundary between core and outside world:
+
+| Port | Purpose |
+|---|---|
+| `DeviceExecutor` | Anything that can execute a circuit |
+| `Provider` | Anything that can submit a job to hardware |
+| `TrackerProtocol` | Anything that can observe experiment lifecycle |
+| `HardwareSpec` | Anything that describes a target topology and basis gate set |
+| `NoiseModel` | Anything that describes quantum channel noise |
+| `QuantumStateImpl` | Rust trait — anything that is a quantum state |
+
+### Adapters (Implementations That Plug In)
+
+Adapters conform to SF's ports — SF never conforms to them:
+
+| Adapter | Port it implements |
+|---|---|
+| `IBMDevice`, `IonQDevice`, `BraketDevice` | `DeviceExecutor` / `Provider` |
+| `from_qiskit()`, `from_cirq()`, `from_pennylane()` | Bridge adapters translating foreign circuits into SF IR |
+| `TorchQuantumLayer`, `TFQuantumLayer`, `QuantumLayer` | ML framework adapters around `sf.State.grad()` |
+| `LocalTracker`, `CatstateTracker` | `TrackerProtocol` |
+| `RustDevice` (statevector, MPS, stabilizer, DM, GPU) | `DeviceExecutor` + `QuantumStateImpl` |
+
+### The Kernel Analogy
+
+| System | Kernel | Adapters |
+|---|---|---|
+| **Linux** | kernel syscall ABI | device drivers |
+| **PyTorch** | Tensor + autograd | backends (CPU, CUDA, XLA, MPS) |
+| **Kubernetes** | API server + scheduler | CNI, CSI, CRI plugins |
+| **Superfermion** | sf.State + sf-ir + Circuit + compile + run | providers, bridges, ML layers |
+
+---
+
 ## Design Principle: Python is the API, Rust Does the Work
 
 Superfermion follows a strict two-layer architecture. Python owns the user-facing API surface — circuit construction, configuration, experiment tracking, ML framework bridges. Rust owns all performance-critical computation — statevector simulation, gate application, sampling, gradients, tensor operations.

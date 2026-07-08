@@ -119,73 +119,69 @@ def _eval_qasm_angle(s: str) -> float:
 
 
 def compile_rust(
-    circuit: Circuit,
+    circuit: "Circuit",
     level: int = 1,
     target: Optional[object] = None,
     pre_simplified: bool = False,
-) -> Circuit:
+) -> "Circuit":
     """Compile a circuit using the Rust-native compilation pipeline.
 
-    The Rust pipeline includes:
-      - Gate cancellation
-      - High-level decomposition (SWAP → 3 CNOTs)
-      - Superconducting basis translation (if SX in native gates)
-      - Rotation merging
-      - SABRE routing (if coupling map is provided)
-      - Pauli twirling (at level >= 2)
+    This is the **sole** compilation path. The Rust ``sf-compiler`` crate
+    runs gate cancellation, SWAP decomposition, superconducting basis
+    translation (when SX is in the native gate set), rotation merging,
+    SABRE routing (when connectivity is provided), and Pauli twirling
+    (at level >= 2).
 
     Args:
         circuit: SF Circuit to compile.
         level: Optimization level (0-2). Level 2 includes Pauli twirling.
-        target: Optional HardwareSpec with coupling_map and native_gates.
+        target: Optional ``HardwareSpec`` with ``coupling_map``, ``native_gates``,
+                and ``n_qubits`` attributes.
+        pre_simplified: Skip Clifford pre-simplification if True.
 
     Returns:
         Compiled SF Circuit.
+
+    Raises:
+        ImportError: If ``_sf_core`` is not available (Rust extension required).
+        RuntimeError: If the Rust compiler encounters an unsupported gate.
     """
     from superfermion._sf_core import Compiler
 
-    # Determine native gates and connectivity
     if target is not None:
-        native_gates = getattr(target, "native_gates", ["h", "x", "y", "z", "cx"])
-        coupling_map = getattr(target, "coupling_map", [])
+        native_gates = list(getattr(target, "native_gates", []))
+        coupling_map = list(getattr(target, "coupling_map", []))
         n_qubits = getattr(target, "n_qubits", circuit.n_qubits)
+        name = getattr(target, "name", "target")
     else:
-        native_gates = ["h", "x", "y", "z", "cx"]
+        native_gates = []
         coupling_map = []
         n_qubits = circuit.n_qubits
+        name = "none"
 
-    # -- Clifford pre-simplification --
-    # For Clifford circuits, synthesize a canonical circuit via the
-    # Aaronson-Gottesman tableau decomposition before Rust compilation.
-    # This reduces gate count from O(n^2) to O(n^2/log n) and can be
-    # 10-50x faster for downstream compilation (basis translation, etc.).
-    # Set pre_simplified=True if the caller has already called
-    # simplify_clifford() — avoids redundant tableau evolution.
-    if not pre_simplified:
+    # Clifford pre-simplification: reduces gate count via Aaronson-Gottesman
+    # tableau decomposition. Only applied when there is no coupling map,
+    # because the synthesis produces long-range CNOTs that destroy locality
+    # and make routing harder (or impossible) on constrained topologies.
+    if not pre_simplified and not coupling_map:
         simplified = _simplify_clifford(circuit)
         if simplified is not None:
             circuit = simplified
 
-    # Convert to Rust DAG
     dag = circuit.to_ir()
 
-    # Create Rust compiler with target spec
     compiler = Compiler(
-        name="rust_pipeline",
+        name=name,
         native_gates=native_gates,
         n_qubits=n_qubits,
         connectivity=coupling_map,
         optimization_level=level,
     )
 
-    # Compile
     compiled_dag = compiler.compile(dag)
 
-    # Convert back to SF Circuit directly via PyO3 gate records.
-    # Uses extend_raw_from_records which pre-allocates the gate list
-    # and avoids the intermediate list-comprehension batch allocation.
-    from superfermion.circuit import Circuit
+    from superfermion.circuit import Circuit as CircuitCls
     records = compiled_dag.to_gate_records()
-    c = Circuit(n_qubits)
+    c = CircuitCls(n_qubits)
     c.extend_raw_from_records(records)
     return c

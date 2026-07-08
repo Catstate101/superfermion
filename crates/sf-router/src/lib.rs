@@ -44,9 +44,10 @@ impl Router {
 
     /// Route a circuit for the given hardware topology.
     ///
-    /// 1. Choose initial layout
-    /// 2. Run SABRE routing (forward + backward passes)
-    /// 3. Return routed DAG + final qubit mapping
+    /// Uses multi-trial bidirectional SABRE:
+    /// 1. Runs N trials with different initial layouts (first is trivial)
+    /// 2. Each trial does forward + backward passes
+    /// 3. Returns the result with the fewest SWAPs
     pub fn route(&self, dag: &QuantumDAG) -> Result<(QuantumDAG, QubitMapping), RouterError> {
         if dag.n_qubits > self.topology.n_qubits() {
             return Err(RouterError::InsufficientQubits(
@@ -55,19 +56,23 @@ impl Router {
             ));
         }
 
-        let initial_layout = TrivialLayout::compute(dag.n_qubits);
-        let router = SabreRouter::new(&self.topology);
-        router.route(dag, &initial_layout)
+        let config = sabre::SabreConfig {
+            n_trials: 5,
+            seed: None,
+            ..Default::default()
+        };
+        let router = SabreRouter::with_config(&self.topology, config);
+        router.route_multi_trial(dag, dag.n_qubits)
     }
 
-    /// Route with a specific initial layout.
+    /// Route with a specific initial layout (single bidirectional pass).
     pub fn route_with_layout(
         &self,
         dag: &QuantumDAG,
         layout: &QubitMapping,
     ) -> Result<(QuantumDAG, QubitMapping), RouterError> {
         let router = SabreRouter::new(&self.topology);
-        router.route(dag, layout)
+        router.route_bidirectional(dag, layout)
     }
 }
 
@@ -92,15 +97,19 @@ mod tests {
 
     #[test]
     fn test_swap_inserted_for_non_adjacent() {
-        let topo = CouplingMap::linear(3);
-        let router = Router::new(topo);
+        // Single forward pass with identity layout guarantees SWAPs
+        let topo = CouplingMap::linear(4);
+        let sabre = SabreRouter::new(&topo);
+        let layout = QubitMapping::identity(4);
 
-        let mut dag = QuantumDAG::new(3, 0);
-        dag.add_op(OpType::CNOT, &[0, 2]); // NOT adjacent on 0-1-2
+        let mut dag = QuantumDAG::new(4, 0);
+        dag.add_op(OpType::CNOT, &[0, 3]); // non-adjacent on 0-1-2-3
 
-        let (routed, _mapping) = router.route(&dag).unwrap();
-        // Must insert at least one SWAP
-        assert!(routed.gate_count() > 1);
+        let (routed, _mapping) = sabre.route(&dag, &layout).unwrap();
+        // With identity layout on linear(4), CNOT(0,3) needs SWAPs
+        assert!(routed.count_ops_of_type("SWAP") > 0,
+            "Expected SWAPs, got {} gates, {} SWAPs",
+            routed.gate_count(), routed.count_ops_of_type("SWAP"));
     }
 
     #[test]

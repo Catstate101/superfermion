@@ -56,6 +56,51 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
             None => continue, // skip unknown gates silently
         };
 
+        // Handle measure specially: "measure q[i] -> c[j]" has two bracket
+        // pairs but only q[i] is a qubit. Parse only before "->".
+        if gate_name == "measure" {
+            // "measure q[i] -> c[j];" — parse q part and c part separately
+            let (q_part, c_part) = if let Some(arrow) = qubits_str.find("->") {
+                (&qubits_str[..arrow], Some(&qubits_str[arrow + 2..]))
+            } else {
+                (qubits_str.as_str(), None)
+            };
+            if let Some(q_idx) = parse_first_bracket_index(q_part) {
+                if q_idx >= n { continue; }
+                let qubit = n - 1 - q_idx;
+                let cbit = c_part
+                    .and_then(parse_first_bracket_index)
+                    .filter(|&ci| ci < n)
+                    .map(|ci| n - 1 - ci)
+                    .unwrap_or(qubit);
+                dag_ref.add_measure(qubit, cbit);
+            }
+            continue;
+        }
+
+        if gate_name == "reset" || gate_name == "barrier" {
+            let mut qubit_indices = Vec::new();
+            let mut search_from = 0usize;
+            while let Some(bracket_start) = qubits_str[search_from..].find('[') {
+                let abs_start = search_from + bracket_start + 1;
+                let bracket_end = match qubits_str[abs_start..].find(']') {
+                    Some(i) => abs_start + i,
+                    None => break,
+                };
+                let num_str = &qubits_str[abs_start..bracket_end];
+                if let Ok(idx) = num_str.parse::<usize>() {
+                    if idx < n {
+                        qubit_indices.push(n - 1 - idx);
+                    }
+                }
+                search_from = bracket_end + 1;
+            }
+            if !qubit_indices.is_empty() {
+                dag_ref.add_op(op, &qubit_indices);
+            }
+            continue;
+        }
+
         // Parse qubit indices from "qreg[q]" or "name[q]" patterns
         let mut qubit_indices = Vec::new();
         let mut search_from = 0usize;
@@ -67,8 +112,10 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
             };
             let num_str = &qubits_str[abs_start..bracket_end];
             if let Ok(idx) = num_str.parse::<usize>() {
-                // Reverse endianness: QASM LSB(0) → SF MSB(n-1)
-                qubit_indices.push(n - 1 - idx);
+                if idx < n {
+                    // Reverse endianness: QASM LSB(0) → SF MSB(n-1)
+                    qubit_indices.push(n - 1 - idx);
+                }
             }
             search_from = bracket_end + 1;
         }
@@ -196,6 +243,13 @@ fn find_op_at_level(s: &str, ops: &[char], _level: u32) -> Option<usize> {
     None
 }
 
+/// Extract the first bracket-enclosed integer from a string, e.g. "q[3]" → Some(3).
+fn parse_first_bracket_index(s: &str) -> Option<usize> {
+    let start = s.find('[')? + 1;
+    let end = s[start..].find(']')?;
+    s[start..start + end].parse::<usize>().ok()
+}
+
 /// Parse qubit count from qreg declaration: `qreg q[N];` or `qreg name[N];`
 fn parse_qreg_size(line: &str) -> Option<usize> {
     parse_bracket_size(line, "qreg")
@@ -298,6 +352,37 @@ cx qregless[0], qregless[1];
         assert!((eval_param("0.1") - 0.1).abs() < eps);
         assert!((eval_param("-0.3") - (-0.3)).abs() < eps);
         assert!((eval_param("2*pi/3") - 2.0 * std::f64::consts::PI / 3.0).abs() < eps);
+    }
+
+    #[test]
+    fn test_parse_measure_no_cycle() {
+        let qasm = r#"OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[2];
+creg c[2];
+h q[0];
+cx q[0], q[1];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+"#;
+        let dag = parse_qasm2(qasm).expect("should parse without cycle");
+        assert_eq!(dag.n_qubits, 2);
+        // h + cx + 2 measures
+        assert!(dag.gate_count() >= 2);
+        // Verify topo order succeeds (no cycle panic)
+        let _order = dag.topological_order();
+    }
+
+    #[test]
+    fn test_parse_reset_line() {
+        let qasm = r#"OPENQASM 2.0;
+qreg q[2];
+reset q[0];
+h q[0];
+"#;
+        let dag = parse_qasm2(qasm).expect("should parse");
+        assert_eq!(dag.n_qubits, 2);
+        let _order = dag.topological_order();
     }
 
     #[test]

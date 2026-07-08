@@ -1,12 +1,8 @@
 """
-Advanced Transpilation — SABRE routing, Dynamical Decoupling, and Scheduling.
+Advanced Transpilation — Dynamical Decoupling, Scheduling, and Pauli Twirling.
 
-Provides qubit routing for hardware connectivity constraints, noise-suppressing
-pulse sequences, and timing-aware gate scheduling.
-
-SABRE (SWAP-based BidiREctional routing):
-    Maps logical qubits to physical qubits on a device with limited connectivity,
-    inserting SWAP gates to satisfy two-qubit gate coupling requirements.
+These are **standalone utilities**, not part of the ``sf.compile()`` pipeline.
+Routing is handled entirely by the Rust ``sf-router`` crate via ``_sf_core``.
 
 Dynamical Decoupling (DD):
     Inserts identity-equivalent pulse sequences (X2, XY4, CPMG) between gates
@@ -16,276 +12,28 @@ Scheduling:
     Aligns gates to a discrete time grid, respecting gate durations and
     parallelism constraints.
 
+Pauli Twirling:
+    Converts coherent errors into stochastic Pauli errors by inserting
+    random Pauli sandwiches around two-qubit gates.
+
 Usage:
     >>> from superfermion.compiler.advanced import (
-    ...     sabre_route, apply_dynamical_decoupling, schedule_circuit,
+    ...     apply_dynamical_decoupling, schedule_circuit,
     ... )
-    >>>
-    >>> coupling_map = [(0,1), (1,2), (2,3), (3,4)]  # linear chain
-    >>> routed = sabre_route(circuit, coupling_map)
-    >>> decoupled = apply_dynamical_decoupling(routed, sequence="XY4")
+    >>> decoupled = apply_dynamical_decoupling(compiled, sequence="XY4")
     >>> scheduled = schedule_circuit(decoupled)
 """
 
 from __future__ import annotations
 
-import copy
-import math
 import random
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from superfermion.circuit import Circuit, GateRecord
 from superfermion.compiler.passes import Pass
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# SABRE Routing
-# ═════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class _RoutingState:
-    """Internal state for SABRE routing."""
-
-    mapping: Dict[int, int]  # logical → physical
-    inv_mapping: Dict[int, int]  # physical → logical
-    coupling: Set[Tuple[int, int]]  # allowed edges
-    decay: List[float]  # per-physical-qubit decay counter
-    n_physical: int
-
-    def can_execute(self, gate: GateRecord) -> bool:
-        """Check if a gate is executable given the current mapping."""
-        phys_qubits = [self.mapping.get(q, q) for q in gate.qubits]
-        if len(phys_qubits) == 1:
-            return True
-        if len(phys_qubits) == 2:
-            a, b = phys_qubits[0], phys_qubits[1]
-            return (a, b) in self.coupling or (b, a) in self.coupling
-        return False
-
-    def swap(self, a: int, b: int):
-        """Swap the mapping of physical qubits a and b."""
-        la = self.inv_mapping.get(a)
-        lb = self.inv_mapping.get(b)
-        if la is not None:
-            self.mapping[la] = b
-            self.inv_mapping[b] = la
-        if lb is not None:
-            self.mapping[lb] = a
-            self.inv_mapping[a] = lb
-        self.decay[a] = 0.0
-        self.decay[b] = 0.0
-
-
-def _build_coupling_set(coupling_map: List[Tuple[int, int]]) -> Set[Tuple[int, int]]:
-    """Build a bi-directional coupling set from edge list."""
-    cset = set()
-    for a, b in coupling_map:
-        cset.add((a, b))
-        cset.add((b, a))
-    return cset
-
-
-def _shortest_path_length(
-    src: int,
-    dst: int,
-    coupling: Set[Tuple[int, int]],
-) -> int:
-    """BFS shortest path distance between src and dst in coupling graph."""
-    if src == dst:
-        return 0
-    from collections import deque
-
-    visited = {src}
-    queue = deque([(src, 0)])
-    while queue:
-        node, dist = queue.popleft()
-        for a, b in coupling:
-            nb = b if a == node else (a if b == node else None)
-            if nb is not None and nb not in visited:
-                if nb == dst:
-                    return dist + 1
-                visited.add(nb)
-                queue.append((nb, dist + 1))
-    return float("inf")
-
-
-def sabre_route(
-    circuit: Circuit,
-    coupling_map: List[Tuple[int, int]],
-    initial_mapping: Optional[Dict[int, int]] = None,
-    n_iters: int = 3,
-    seed: Optional[int] = None,
-) -> Circuit:
-    """SABRE routing: map logical circuit to physical topology via SWAP insertion.
-
-    Args:
-        circuit: Input circuit with logical qubits.
-        coupling_map: List of physical qubit pairs that can interact, e.g.
-                      ``[(0,1), (1,2), (2,3)]`` for a 4-qubit line.
-        initial_mapping: Optional initial logical→physical mapping.
-                         If None, uses the trivial mapping (0→0, 1→1, ...).
-        n_iters: Number of forward-backward SABRE refinement passes.
-        seed: Random seed for tie-breaking.
-
-    Returns:
-        A new circuit with SWAP gates inserted to satisfy coupling constraints.
-
-    Algorithm (Li et al., ASPLOS 2019):
-      1. Forward pass: greedily process gates. When a gate is not executable,
-         insert SWAPs that minimize the look-ahead distance to future gates.
-      2. Backward pass: reverse circuit, refine mapping.
-      3. Repeat n_iters times.
-    """
-    if seed is not None:
-        random.seed(seed)
-
-    # Determine physical qubit count
-    all_nodes = set()
-    for a, b in coupling_map:
-        all_nodes.add(a)
-        all_nodes.add(b)
-    n_physical = max(all_nodes) + 1 if all_nodes else circuit.n_qubits
-
-    coupling = _build_coupling_set(coupling_map)
-    gates = list(circuit._gates)
-    n_logical = circuit.n_qubits
-
-    # Initial mapping: trivial or provided
-    if initial_mapping is None:
-        mapping = {i: i for i in range(n_logical)}
-    else:
-        mapping = dict(initial_mapping)
-
-    inv_mapping = {p: l for l, p in mapping.items()}
-
-    state = _RoutingState(
-        mapping=mapping,
-        inv_mapping=inv_mapping,
-        coupling=coupling,
-        decay=[0.0] * n_physical,
-        n_physical=n_physical,
-    )
-
-    # ── SABRE iterations ────────────────────────────────────────────────
-    routed_gates: List[GateRecord] = []
-
-    for _iter in range(n_iters):
-        # Forward pass
-        routed_gates = []
-        for gate in gates:
-            if state.can_execute(gate):
-                # Remap qubits
-                phys_qubits = tuple(state.mapping.get(q, q) for q in gate.qubits)
-                remapped = GateRecord(
-                    name=gate.name,
-                    qubits=phys_qubits,
-                    params=gate.params,
-                )
-                routed_gates.append(remapped)
-                # Decay increment (SABRE decay heuristic)
-                for pq in phys_qubits:
-                    if pq < n_physical:
-                        state.decay[pq] += 1.0
-            else:
-                # Gate not executable — insert SWAPs
-                phys_qubits = [state.mapping.get(q, q) for q in gate.qubits]
-                # Find best SWAP to bring qubits closer
-                best_swap = _pick_best_swap(state, phys_qubits, gates, routed_gates)
-                if best_swap is not None:
-                    a, b = best_swap
-                    # Insert SWAP gate
-                    routed_gates.append(GateRecord(name="SWAP", qubits=(a, b), params=[]))
-                    state.swap(a, b)
-                # Now try the gate again
-                phys_qubits = tuple(state.mapping.get(q, q) for q in gate.qubits)
-                if state.can_execute(gate):
-                    remapped = GateRecord(
-                        name=gate.name,
-                        qubits=phys_qubits,
-                        params=gate.params,
-                    )
-                    routed_gates.append(remapped)
-                else:
-                    # Still can't execute — fall through (shouldn't happen for 2q)
-                    remapped = GateRecord(
-                        name=gate.name,
-                        qubits=phys_qubits,
-                        params=gate.params,
-                    )
-                    routed_gates.append(remapped)
-
-        # Backward pass (reverse gates, similar logic)
-        if _iter < n_iters - 1:
-            gates = list(reversed(routed_gates))
-            routed_gates = []
-            state.decay = [0.0] * n_physical
-
-    # Build output circuit
-    base_name = getattr(circuit, '_name', None) or 'circuit'
-    out = Circuit(n_physical, circuit.n_cbits, name=f"{base_name}_sabre")
-    out._gates = routed_gates
-    return out
-
-
-def _pick_best_swap(
-    state: _RoutingState,
-    target_phys: List[int],
-    future_gates: List[GateRecord],
-    past_gates: List[GateRecord],
-) -> Optional[Tuple[int, int]]:
-    """Choose the best SWAP to bring target qubits closer (SABRE heuristic)."""
-    candidates: List[Tuple[int, int, float]] = []  # (a, b, score)
-
-    for a, b in state.coupling:
-        if a >= b:
-            continue  # Process each undirected edge once
-
-        if a not in state.inv_mapping and b not in state.inv_mapping:
-            continue
-
-        # Heuristic cost = Σ (distance after SWAP) + decay penalty
-        cost = 0.0
-        # Distance for current target
-        for tq in target_phys:
-            d_before = _shortest_path_length(tq, a, state.coupling)
-            d_after_a = _shortest_path_length(tq, b, state.coupling)
-            cost += (d_after_a - d_before)
-
-            d_before_b = _shortest_path_length(tq, b, state.coupling)
-            d_after_b = _shortest_path_length(tq, a, state.coupling)
-            cost += (d_after_b - d_before_b)
-
-        # Look-ahead: next few future gates
-        look_ahead = min(5, len(future_gates))
-        for fg in future_gates[:look_ahead]:
-            fq_phys = [state.mapping.get(q, q) for q in fg.qubits]
-            for tq in fq_phys:
-                d_before = _shortest_path_length(tq, a, state.coupling)
-                d_after = _shortest_path_length(tq, b, state.coupling)
-                cost += 0.3 * (d_after - d_before)
-
-        # Decay penalty
-        cost += 0.1 * (state.decay[a] + state.decay[b])
-
-        candidates.append((a, b, cost))
-
-    if not candidates:
-        return None
-
-    # Filter out NaN/inf costs (can occur when coupling graph is disconnected)
-    candidates = [c for c in candidates if math.isfinite(c[2])]
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x[2])
-    # Pick lowest cost, tie-break randomly
-    best_cost = candidates[0][2]
-    tied = [c for c in candidates if abs(c[2] - best_cost) < 1e-6]
-    chosen = random.choice(tied)
-    return (chosen[0], chosen[1])
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -512,20 +260,6 @@ def _compute_critical_path(scheduled: List[ScheduledGate]) -> List[str]:
 # ═════════════════════════════════════════════════════════════════════════
 # Compiler Pass wrappers
 # ═════════════════════════════════════════════════════════════════════════
-
-class SABRERoutingPass:
-    """Compiler pass: apply SABRE routing."""
-
-    def __init__(self, coupling_map: List[Tuple[int, int]], **kwargs):
-        self.coupling_map = coupling_map
-        self.kwargs = kwargs
-
-    def name(self) -> str:
-        return "SABRERoutingPass"
-
-    def run(self, circuit: Circuit) -> Circuit:
-        return sabre_route(circuit, self.coupling_map, **self.kwargs)
-
 
 class DynamicalDecouplingPass:
     """Compiler pass: insert dynamical decoupling sequences."""

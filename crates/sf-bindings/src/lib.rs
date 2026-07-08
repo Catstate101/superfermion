@@ -14,7 +14,7 @@
 //! ```
 
 use pyo3::prelude::*;
-use numpy::PyArrayMethods;
+use numpy::{PyArrayMethods, PyUntypedArrayMethods};
 use sf_ir::{QuantumDAG, OpType, Parameter, SerializedCircuit, MPSState};
 use sf_ir::gate_list::GateSequence;
 use sf_ir::state::{QuantumStateImpl, StatevectorState, DensityMatrixStateWrapper, MPSStateWrapper, StabilizerStateWrapper};
@@ -271,6 +271,22 @@ impl PyQuantumDAG {
         
         let op = Self::parse_gate(gate_name, &rust_params)?;
         self.inner.add_op(op, &qubits);
+        Ok(())
+    }
+
+    /// Add an opaque unitary matrix gate directly to the DAG.
+    fn add_unitary(&mut self, qubits: Vec<usize>, matrix: numpy::PyReadonlyArray2<num_complex::Complex64>) -> PyResult<()> {
+        let shape = matrix.shape();
+        let rows = shape[0];
+        let cols = shape[1];
+        if rows != cols || !rows.is_power_of_two() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Unitary matrix must be square with power-of-2 dimension, got {}x{}", rows, cols)
+            ));
+        }
+        let slice = matrix.as_slice()?;
+        let dm = nalgebra::DMatrix::from_row_slice(rows, cols, slice);
+        self.inner.add_op(OpType::Unitary(dm), &qubits);
         Ok(())
     }
 
@@ -843,6 +859,19 @@ impl PyCouplingMap {
         self.inner.distance(a, b)
     }
 
+    /// Get all edges as a list of (qubit_a, qubit_b) pairs.
+    fn edges(&self) -> Vec<(usize, usize)> {
+        self.inner.edges()
+    }
+
+    /// Create a heavy-hex coupling map with n qubits.
+    #[staticmethod]
+    fn heavy_hex(n: usize) -> Self {
+        PyCouplingMap {
+            inner: sf_router::CouplingMap::heavy_hex(n),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "CouplingMap(n_qubits={}, n_edges={})",
@@ -1287,6 +1316,24 @@ impl PyGateSequence {
     /// Add a single gate.  Gate name is case-insensitive (uppercased).
     fn add_gate(&mut self, name: &str, qubits: Vec<usize>, params: Vec<f64>) {
         self.inner.push(&name.to_uppercase(), &qubits, &params);
+    }
+
+    /// Add an opaque unitary matrix gate.
+    /// The matrix is stored in Rust without decomposition and emitted as
+    /// OpType::Unitary when converting to a QuantumDAG via to_dag().
+    fn add_unitary(&mut self, qubits: Vec<usize>, matrix: numpy::PyReadonlyArray2<num_complex::Complex64>) -> PyResult<()> {
+        let shape = matrix.shape();
+        let rows = shape[0];
+        let cols = shape[1];
+        if rows != cols || !rows.is_power_of_two() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Unitary matrix must be square with power-of-2 dimension, got {}x{}", rows, cols)
+            ));
+        }
+        let slice = matrix.as_slice()?;
+        let dm = nalgebra::DMatrix::from_row_slice(rows, cols, slice);
+        self.inner.add_unitary(&qubits, dm);
+        Ok(())
     }
 
     /// Batch-extend from a list of (name, qubits, params) tuples.

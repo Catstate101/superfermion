@@ -7,6 +7,8 @@
 //! QuantumDAG.  For memory benchmarks, gates live in Rust Vecs — invisible to
 //! Python's tracemalloc.
 
+use std::collections::HashMap;
+
 use crate::dag::{QubitId, QuantumDAG};
 use crate::ops::{OpType, Parameter};
 
@@ -37,6 +39,10 @@ pub struct GateSequence {
     /// param_offsets[i] = start index in params_data for gate i
     param_offsets: Vec<u32>,
     
+    /// Opaque unitary matrices keyed by gate index (sparse -- only populated
+    /// for gates added via `add_unitary`, zero overhead for normal circuits)
+    matrices: HashMap<usize, nalgebra::DMatrix<num_complex::Complex64>>,
+
     /// Number of qubits in the circuit
     pub n_qubits: usize,
     /// Number of classical bits in the circuit  
@@ -49,9 +55,10 @@ impl GateSequence {
         Self {
             names: Vec::new(),
             qubits_data: Vec::new(),
-            qubit_offsets: Vec::new(),     // qubit_offsets[i] = end idx for gate i
+            qubit_offsets: Vec::new(),
             params_data: Vec::new(),
-            param_offsets: Vec::new(),      // param_offsets[i] = end idx for gate i
+            param_offsets: Vec::new(),
+            matrices: HashMap::new(),
             n_qubits,
             n_cbits,
         }
@@ -62,10 +69,11 @@ impl GateSequence {
     pub fn with_capacity(n_qubits: usize, n_cbits: usize, expected_gates: usize) -> Self {
         Self {
             names: Vec::with_capacity(expected_gates),
-            qubits_data: Vec::with_capacity(expected_gates * 2),  // avg 2 qubits/gate
+            qubits_data: Vec::with_capacity(expected_gates * 2),
             qubit_offsets: Vec::with_capacity(expected_gates),
-            params_data: Vec::with_capacity(expected_gates),      // avg 1 param/gate  
+            params_data: Vec::with_capacity(expected_gates),
             param_offsets: Vec::with_capacity(expected_gates),
+            matrices: HashMap::new(),
             n_qubits,
             n_cbits,
         }
@@ -97,6 +105,14 @@ impl GateSequence {
         }
     }
     
+    /// Add an opaque unitary matrix gate. The matrix is stored internally
+    /// and emitted as `OpType::Unitary` when converting to a QuantumDAG.
+    pub fn add_unitary(&mut self, qubits: &[QubitId], matrix: nalgebra::DMatrix<num_complex::Complex64>) {
+        let idx = self.names.len();
+        self.push("UNITARY", qubits, &[]);
+        self.matrices.insert(idx, matrix);
+    }
+
     /// Build a Quantum Volume circuit entirely in Rust — zero per-gate FFI.
     ///
     /// Pre-generated permutations and angles are passed as flat slices
@@ -191,13 +207,16 @@ impl GateSequence {
         let mut dag = QuantumDAG::new(self.n_qubits, self.n_cbits);
         
         for i in 0..self.len() {
-            let name = &self.names[i];
             let qubits = self.qubits_at(i);
-            let params = self.params_at(i);
-            
-            // Convert name + params back to OpType
-            let op_type = parse_gate_name(name, params);
-            dag.add_op(op_type, qubits);
+
+            if let Some(matrix) = self.matrices.get(&i) {
+                dag.add_op(OpType::Unitary(matrix.clone()), qubits);
+            } else {
+                let name = &self.names[i];
+                let params = self.params_at(i);
+                let op_type = parse_gate_name(name, params);
+                dag.add_op(op_type, qubits);
+            }
         }
         
         dag

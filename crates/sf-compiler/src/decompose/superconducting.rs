@@ -175,7 +175,7 @@ impl Pass for SuperconductingDecomposePass {
 }
 
 /// Replace a single node in the DAG with a sequence of gates.
-fn replace_node_with_gates(
+pub fn replace_node_with_gates(
     dag: &mut QuantumDAG,
     node_id: petgraph::prelude::NodeIndex,
     gates: &[(OpType, Vec<usize>)],

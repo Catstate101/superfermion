@@ -511,6 +511,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "serde",
  "simba",
  "typenum",
 ]
@@ -629,6 +630,7 @@ checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "bytemuck",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -1077,6 +1079,7 @@ dependencies = [
  "indexmap",
  "log",
  "petgraph",
+ "rand",
  "sf-ir",
  "smallvec",
  "thiserror 2.0.18",

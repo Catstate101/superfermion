@@ -20,7 +20,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Union, Any
+from typing import Union, Any, Optional
 import numpy as np
 
 from superfermion.parameters import SymbolicParameter
@@ -37,12 +37,17 @@ class GateRecord:
     qubits: list[int]
     params: list[ParamValue] = field(default_factory=list)
     classical_bits: list[int] = field(default_factory=list)
+    matrix: Optional[np.ndarray] = field(default=None, repr=False)
 
     def to_unitary(self) -> np.ndarray:
         """Convert this specific gate record to a unitary matrix.
 
-        Delegates to ``gate_unitary_matrix`` — the single source of truth.
+        If this gate stores an opaque unitary matrix, return it directly.
+        Otherwise delegates to ``gate_unitary_matrix``.
         """
+        if self.matrix is not None:
+            return self.matrix
+
         from superfermion.gates.matrices import gate_unitary_matrix
 
         params = [float(x) if not hasattr(x, "value") else x.value for x in self.params]
@@ -143,6 +148,18 @@ class Circuit:
                 qubit_depth[q] = new_depth
         result = max(qubit_depth.values(), default=0)
         return FunctionalInt(result)
+
+    def count_ops(self) -> dict[str, int]:
+        """Count gate operations by name.
+
+        Returns:
+            Dictionary mapping gate name to its occurrence count.
+        """
+        self._ensure_gates()
+        ops: dict[str, int] = {}
+        for g in self._gates:
+            ops[g.name] = ops.get(g.name, 0) + 1
+        return ops
 
     @property
     def parameters(self) -> list[str]:
@@ -488,6 +505,46 @@ class Circuit:
         """Reset qubit to |0⟩."""
         return self._add_gate("RESET", [qubit])
 
+    def unitary(self, matrix: np.ndarray, qubits: list[int]) -> Circuit:
+        """Apply an arbitrary unitary matrix as a single opaque gate.
+
+        The matrix is stored without decomposition. During ``sf.run()``,
+        it is applied directly to the statevector (one matrix multiply).
+        During ``sf.compile(target=...)``, it is decomposed into basis
+        gates by ``UnitaryDecompositionPass``.
+
+        Args:
+            matrix: A unitary matrix of shape ``(2^k, 2^k)`` where
+                ``k = len(qubits)``.
+            qubits: The qubit indices this unitary acts on.
+
+        Returns:
+            ``self``, for fluent chaining.
+        """
+        matrix = np.asarray(matrix, dtype=complex)
+        k = len(qubits)
+        expected = 2 ** k
+        if matrix.shape != (expected, expected):
+            raise ValueError(
+                f"Unitary matrix shape {matrix.shape} doesn't match "
+                f"{k} qubits (expected ({expected}, {expected}))"
+            )
+        check = matrix @ matrix.conj().T
+        if not np.allclose(check, np.eye(expected), atol=1e-6):
+            raise ValueError("Matrix is not unitary (U @ U^dagger != I)")
+
+        self._validate_qubits(qubits, "UNITARY")
+
+        if self._use_rust and self._gates_rust is not None:
+            self._gates_rust.add_unitary(qubits, matrix)
+        else:
+            self._gates.append(GateRecord(
+                name="UNITARY",
+                qubits=qubits,
+                matrix=matrix,
+            ))
+        return self
+
     # ───────────────────────────────────────────────────────
     # Convenience execution
     # ───────────────────────────────────────────────────────
@@ -555,6 +612,7 @@ class Circuit:
                 qubits=gate.qubits[:],
                 params=new_params,
                 classical_bits=gate.classical_bits[:],
+                matrix=gate.matrix,
             )
             new_circuit._gates.append(new_gate)
         # Update remaining parameters
@@ -639,8 +697,9 @@ class Circuit:
                 q = gate.qubits[0]
                 c = gate.classical_bits[0] if gate.classical_bits else q
                 dag.add_measure(q, c)
+            elif gate.matrix is not None:
+                dag.add_unitary([int(q) for q in gate.qubits], gate.matrix)
             else:
-                # Pass symbolic parameters as strings so Rust can track them.
                 params = [float(p) if not isinstance(p, SymbolicParameter) else str(p.name) for p in gate.params]
                 dag.add_gate(str(gate.name), [int(q) for q in gate.qubits], params)
         return dag

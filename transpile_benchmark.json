@@ -1,0 +1,457 @@
+{
+  "benchmarks": [
+    {
+      "name": "bench_qft_transpile",
+      "group": "bench_qft",
+      "stats": {
+        "min": 2.0507820500000284,
+        "mean": 2.0507820500000284,
+        "max": 2.0507820500000284,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "input_n_qubits": 100,
+        "input_gate_count": 5100,
+        "output_gate_count": 204932,
+        "output_gate_count_2q": 35892,
+        "output_depth": 110458,
+        "output_ops": {
+          "RZ": 69658,
+          "RX": 71784,
+          "ECR": 35892,
+          "SX": 17452,
+          "X": 10146
+        }
+      }
+    },
+    {
+      "name": "bench_qft_transpile",
+      "group": "bench_qft",
+      "stats": {
+        "min": 3.5737662330005455,
+        "mean": 3.5737662330005455,
+        "max": 3.5737662330005455,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 100,
+        "input_gate_count": 5100,
+        "output_gate_count": 45500,
+        "output_gate_count_2q": 8047,
+        "output_depth": 9126,
+        "output_ops": {
+          "rz": 22916,
+          "sx": 12579,
+          "ecr": 8047,
+          "x": 1958
+        }
+      }
+    },
+    {
+      "name": "bench_qv_transpile",
+      "group": "bench_qv",
+      "stats": {
+        "min": 0.3293998576670371,
+        "mean": 0.3293998576670371,
+        "max": 0.3293998576670371,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "input_n_qubits": 100,
+        "input_gate_count": 3500,
+        "output_gate_count": 37640,
+        "output_gate_count_2q": 7160,
+        "output_depth": 7803,
+        "output_ops": {
+          "RZ": 12722,
+          "SX": 2924,
+          "RX": 14320,
+          "ECR": 7160,
+          "X": 514
+        }
+      }
+    },
+    {
+      "name": "bench_qv_transpile",
+      "group": "bench_qv",
+      "stats": {
+        "min": 2.2659928733337438,
+        "mean": 2.2659928733337438,
+        "max": 2.2659928733337438,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 100,
+        "input_gate_count": 3500,
+        "output_gate_count": 30094,
+        "output_gate_count_2q": 4888,
+        "output_depth": 2247,
+        "output_ops": {
+          "rz": 15567,
+          "sx": 8394,
+          "ecr": 4888,
+          "x": 1245
+        }
+      }
+    },
+    {
+      "name": "bench_su2_transpile",
+      "group": "bench_su2",
+      "stats": {
+        "min": 0.04973058333295436,
+        "mean": 0.04973058333295436,
+        "max": 0.04973058333295436,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "input_n_qubits": 100,
+        "input_gate_count": 1100,
+        "output_gate_count": 8684,
+        "output_gate_count_2q": 1233,
+        "output_depth": 4682,
+        "output_ops": {
+          "RZ": 3394,
+          "SX": 1296,
+          "X": 295,
+          "RX": 2466,
+          "ECR": 1233
+        }
+      }
+    },
+    {
+      "name": "bench_su2_transpile",
+      "group": "bench_su2",
+      "stats": {
+        "min": 9.816310542333667,
+        "mean": 9.816310542333667,
+        "max": 9.816310542333667,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 100,
+        "input_gate_count": 1100,
+        "output_gate_count": 7239,
+        "output_gate_count_2q": 1059,
+        "output_depth": 3781,
+        "output_ops": {
+          "rz": 3831,
+          "sx": 2294,
+          "ecr": 1059,
+          "x": 55
+        }
+      }
+    },
+    {
+      "name": "bench_bv_transpile",
+      "group": "bench_bv",
+      "stats": {
+        "min": 0.055920383000435926,
+        "mean": 0.055920383000435926,
+        "max": 0.055920383000435926,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "input_n_qubits": 100,
+        "input_gate_count": 299,
+        "output_gate_count": 4058,
+        "output_gate_count_2q": 756,
+        "output_depth": 2118,
+        "output_ops": {
+          "X": 112,
+          "RZ": 1335,
+          "SX": 343,
+          "RX": 1512,
+          "ECR": 756
+        }
+      }
+    },
+    {
+      "name": "bench_bv_transpile",
+      "group": "bench_bv",
+      "stats": {
+        "min": 0.23078740400039047,
+        "mean": 0.23078740400039047,
+        "max": 0.23078740400039047,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 100,
+        "input_gate_count": 299,
+        "output_gate_count": 2825,
+        "output_gate_count_2q": 455,
+        "output_depth": 1074,
+        "output_ops": {
+          "rz": 1510,
+          "sx": 789,
+          "ecr": 455,
+          "x": 71
+        }
+      }
+    },
+    {
+      "name": "bench_heisenberg_transpile",
+      "group": "bench_heisenberg",
+      "stats": {
+        "min": 0.05677820666642219,
+        "mean": 0.05677820666642219,
+        "max": 0.05677820666642219,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "input_n_qubits": 100,
+        "input_gate_count": 397,
+        "output_gate_count": 9308,
+        "output_gate_count_2q": 858,
+        "output_depth": 5694,
+        "output_ops": {
+          "RZ": 4201,
+          "SX": 1884,
+          "X": 649,
+          "RX": 1716,
+          "ECR": 858
+        }
+      }
+    },
+    {
+      "name": "bench_heisenberg_transpile",
+      "group": "bench_heisenberg",
+      "stats": {
+        "min": 10.593441245332846,
+        "mean": 10.593441245332846,
+        "max": 10.593441245332846,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 100,
+        "input_gate_count": 397,
+        "output_gate_count": 3073,
+        "output_gate_count_2q": 519,
+        "output_depth": 1851,
+        "output_ops": {
+          "rz": 1441,
+          "sx": 1078,
+          "ecr": 519,
+          "x": 35
+        }
+      }
+    },
+    {
+      "name": "bench_qaoa_transpile",
+      "group": "bench_qaoa",
+      "stats": {
+        "min": 0.09644234900042647,
+        "mean": 0.09644234900042647,
+        "max": 0.09644234900042647,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "input_n_qubits": 100,
+        "input_gate_count": 697,
+        "output_gate_count": 10188,
+        "output_gate_count_2q": 1428,
+        "output_depth": 1719,
+        "output_ops": {
+          "RZ": 3920,
+          "SX": 1400,
+          "RX": 2856,
+          "ECR": 1428,
+          "X": 584
+        }
+      }
+    },
+    {
+      "name": "bench_qaoa_transpile",
+      "group": "bench_qaoa",
+      "stats": {
+        "min": 10.348097551333922,
+        "mean": 10.348097551333922,
+        "max": 10.348097551333922,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 100,
+        "input_gate_count": 697,
+        "output_gate_count": 7755,
+        "output_gate_count_2q": 1268,
+        "output_depth": 1978,
+        "output_ops": {
+          "rz": 3890,
+          "sx": 2360,
+          "ecr": 1268,
+          "x": 237
+        }
+      }
+    },
+    {
+      "name": "bench_simplification_transpile",
+      "group": "bench_simplification",
+      "stats": {
+        "min": 0.006022649666798922,
+        "mean": 0.006022649666798922,
+        "max": 0.006022649666798922,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "input_n_qubits": 100,
+        "input_gate_count": 300,
+        "output_gate_count": 700,
+        "output_gate_count_2q": 0,
+        "output_depth": 7,
+        "output_ops": {
+          "RZ": 400,
+          "SX": 200,
+          "X": 100
+        }
+      }
+    },
+    {
+      "name": "bench_simplification_transpile",
+      "group": "bench_simplification",
+      "stats": {
+        "min": 0.03792905399980858,
+        "mean": 0.03792905399980858,
+        "max": 0.03792905399980858,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 100,
+        "input_gate_count": 300,
+        "output_gate_count": 100,
+        "output_gate_count_2q": 0,
+        "output_depth": 1,
+        "output_ops": {
+          "rz": 100
+        }
+      }
+    },
+    {
+      "name": "bench_clifford_transpile",
+      "group": "bench_clifford",
+      "stats": {
+        "min": -1.0,
+        "mean": -1.0,
+        "max": -1.0,
+        "rounds": 1
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "error": "Routing failed: No valid SWAP found to make progress (stuck at gate on qubits [50, 51])"
+      }
+    },
+    {
+      "name": "bench_clifford_transpile",
+      "group": "bench_clifford",
+      "stats": {
+        "min": 19.815135443332718,
+        "mean": 19.815135443332718,
+        "max": 19.815135443332718,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 100,
+        "input_gate_count": 27173,
+        "output_gate_count": 97403,
+        "output_gate_count_2q": 17955,
+        "output_depth": 7618,
+        "output_ops": {
+          "rz": 47291,
+          "sx": 29018,
+          "ecr": 17955,
+          "x": 3139
+        }
+      }
+    },
+    {
+      "name": "bench_circsu2_89_transpile",
+      "group": "bench_circsu2_89",
+      "stats": {
+        "min": 0.03290435833393227,
+        "mean": 0.03290435833393227,
+        "max": 0.03290435833393227,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "superfermion",
+        "sdk_version": "0.1.0",
+        "input_n_qubits": 89,
+        "input_gate_count": 979,
+        "output_gate_count": 7917,
+        "output_gate_count_2q": 1113,
+        "output_depth": 4276,
+        "output_ops": {
+          "RZ": 3049,
+          "SX": 1264,
+          "X": 265,
+          "RX": 2226,
+          "ECR": 1113
+        }
+      }
+    },
+    {
+      "name": "bench_circsu2_89_transpile",
+      "group": "bench_circsu2_89",
+      "stats": {
+        "min": 10.903286542666441,
+        "mean": 10.903286542666441,
+        "max": 10.903286542666441,
+        "rounds": 3
+      },
+      "extra_info": {
+        "sdk_name": "qiskit",
+        "sdk_version": "2.3.1",
+        "input_n_qubits": 89,
+        "input_gate_count": 979,
+        "output_gate_count": 6238,
+        "output_gate_count_2q": 900,
+        "output_depth": 2710,
+        "output_ops": {
+          "rz": 3276,
+          "sx": 1964,
+          "ecr": 900,
+          "x": 98
+        }
+      }
+    }
+  ],
+  "machine_info": {
+    "node": "LAPTOP-F085CVPQ",
+    "processor": "x86_64",
+    "machine": "x86_64",
+    "python_implementation": "CPython",
+    "python_version": "3.13.11",
+    "system": "Linux"
+  },
+  "commit_info": {},
+  "datetime": "2026-07-08T23:03:25"
+}

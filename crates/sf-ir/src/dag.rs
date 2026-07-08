@@ -164,6 +164,16 @@ impl QuantumDAG {
                 q, self.n_qubits
             );
         }
+        // Guard against duplicate qubits which would create a self-loop
+        for i in 0..qubits.len() {
+            for j in (i + 1)..qubits.len() {
+                assert!(
+                    qubits[i] != qubits[j],
+                    "Duplicate qubit index {} in gate {:?}",
+                    qubits[i], op_type
+                );
+            }
+        }
 
         // Register any new parameters and track their locations
         let node_id_to_be = self.graph.add_node(QuantumOp::new(op_type.clone(), qubits));
@@ -448,6 +458,32 @@ impl QuantumDAG {
         self.graph[node].op_type.is_boundary()
     }
 
+    /// Return immediate predecessor gate nodes for a given node (non-boundary).
+    pub fn predecessors(&self, node: NodeId) -> Vec<NodeId> {
+        self.graph
+            .neighbors_directed(node, petgraph::Direction::Incoming)
+            .filter(|&n| !self.is_boundary_node(n))
+            .collect()
+    }
+
+    /// Return immediate successor gate nodes for a given node (non-boundary).
+    pub fn successors(&self, node: NodeId) -> Vec<NodeId> {
+        self.graph
+            .neighbors_directed(node, petgraph::Direction::Outgoing)
+            .filter(|&n| !self.is_boundary_node(n))
+            .collect()
+    }
+
+    /// Return the input boundary nodes.
+    pub fn input_nodes(&self) -> &[NodeId] {
+        &self.input_nodes
+    }
+
+    /// Return the output boundary nodes.
+    pub fn output_nodes(&self) -> &[NodeId] {
+        &self.output_nodes
+    }
+
     /// Get a reference to the graph (for compiler passes).
     pub fn graph(&self) -> &StableDiGraph<QuantumOp, WireType> {
         &self.graph
@@ -551,9 +587,9 @@ impl QuantumDAG {
                 let mut temp_u = DMatrix::from_element(1, 1, Complex64::new(1.0, 0.0));
                 for q in 0..self.n_qubits {
                     if q == target {
-                        temp_u = kronecker(&temp_u, &gate_u);
+                        temp_u = kronecker(&gate_u, &temp_u);
                     } else {
-                        temp_u = kronecker(&temp_u, &DMatrix::identity(2, 2));
+                        temp_u = kronecker(&DMatrix::identity(2, 2), &temp_u);
                     }
                 }
                 current_u = temp_u;
@@ -607,10 +643,10 @@ impl QuantumDAG {
         // Pre-compute gate matrices and fuse consecutive 1q gates on the same qubit
         let raw_ops: Vec<_> = order.iter()
             .filter_map(|&node_id| {
-                let op = &self.graph[node_id];
-                if op.op_type.is_boundary() || op.op_type == OpType::Barrier || op.op_type.is_measurement() {
+            let op = &self.graph[node_id];
+            if op.op_type.is_boundary() || op.op_type == OpType::Barrier || op.op_type.is_measurement() {
                     None
-                } else {
+            } else {
                     Some((op, op.op_type.to_matrix()))
                 }
             })
@@ -797,14 +833,14 @@ impl QuantumDAG {
     ) {
         let gate_u = op.op_type.to_matrix();
         if op.qubits.len() == 2 {
-            let q1 = op.qubits[0];
-            let q2 = op.qubits[1];
+                    let q1 = op.qubits[0];
+                    let q2 = op.qubits[1];
             let mq1 = 1usize << q1;
             let mq2 = 1usize << q2;
             let dim = src.len();
             for i in 0..dim {
-                let bit1 = (i >> q1) & 1;
-                let bit2 = (i >> q2) & 1;
+                        let bit1 = (i >> q1) & 1;
+                        let bit2 = (i >> q2) & 1;
                 let i00 = i & !mq1 & !mq2;
                 let i01 = i00 | mq2;
                 let i10 = i00 | mq1;
@@ -954,7 +990,7 @@ unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
 impl SendPtr {
-    #[inline(always)]
+#[inline(always)]
     unsafe fn get(&self, idx: usize) -> num_complex::Complex64 {
         *self.0.add(idx)
     }

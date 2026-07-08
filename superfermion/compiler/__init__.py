@@ -1,39 +1,25 @@
-from superfermion.compiler.manager import compile
+from superfermion.compiler.manager import compile, apply_noise_suppression, PassManager
 from superfermion.compiler.passes import (
-    GateCancellationPass,
-    RotationMergingPass,
-    ConstantFoldingPass,
-    SwapDecompositionPass,
     BasisTranslationPass,
+    UnitaryDecompositionPass,
 )
 from superfermion.compiler.advanced import (
-    sabre_route,
     apply_dynamical_decoupling,
     schedule_circuit,
-    SABRERoutingPass,
     DynamicalDecouplingPass,
     SchedulingPass,
     PauliTwirlingPass,
 )
-from superfermion.compiler.advanced_passes import (
-    CommutationPass,
-    KAKDecompositionPass,
-)
 
 __all__ = [
     "compile",
-    "GateCancellationPass",
-    "RotationMergingPass",
-    "ConstantFoldingPass",
-    "SwapDecompositionPass",
+    "apply_noise_suppression",
+    "PassManager",
     "BasisTranslationPass",
-    "sabre_route",
+    "UnitaryDecompositionPass",
     "apply_dynamical_decoupling",
     "schedule_circuit",
-    "SABRERoutingPass",
     "DynamicalDecouplingPass",
     "SchedulingPass",
     "PauliTwirlingPass",
-    "CommutationPass",
-    "KAKDecompositionPass",
 ]

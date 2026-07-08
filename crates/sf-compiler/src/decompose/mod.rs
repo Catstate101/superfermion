@@ -1,5 +1,6 @@
 //! Gate decomposition modules for different hardware targets.
 
+pub mod basis;
 pub mod superconducting;
 
 use sf_ir::{QuantumDAG, OpType};
