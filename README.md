@@ -43,7 +43,7 @@ with a Rust acceleration core (Rayon multithreading + in-place statevector).
 ## Installation
 
 ```bash
-git clone https://github.com/superfermion/superfermion.git
+git clone https://github.com/Catstate101/superfermion.git
 cd superfermion
 pip install -e .
 
@@ -238,12 +238,12 @@ qiskit_circuit = to_qiskit(sf_circuit)
 
 ## Documentation
 
+Full documentation is available at [superfermion.com](https://superfermion.com) (or [superfermion-docs.pages.dev](https://superfermion-docs.pages.dev)).
+
 | Document | Content |
 |---|---|
-| [`docs/getting_started.md`](docs/getting_started.md) | First-time install + tour |
-| [`docs/architecture.md`](docs/architecture.md) | Rust-core architecture, module map, execution flow |
-| [`docs/api_reference.md`](docs/api_reference.md) | Full API surface |
-| [`docs/tutorials/`](docs/tutorials/) | Runnable examples |
+| [`docs/usage_guide.md`](docs/usage_guide.md) | Canonical API reference with runnable examples |
+| [`docs/architecture.md`](docs/architecture.md) | Hexagonal architecture, module map, execution flow |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution guide |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release history |
 
@@ -257,7 +257,7 @@ qiskit_circuit = to_qiskit(sf_circuit)
             with native adjoint differentiation},
   author = {SuperFermion Team},
   year   = {2026},
-  url    = {https://github.com/superfermion/superfermion}
+  url    = {https://github.com/Catstate101/superfermion}
 }
 ```
 

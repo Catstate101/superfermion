@@ -1,7 +1,5 @@
 {
   "name": "superfermion-docs",
   "compatibility_date": "2025-06-05",
-  "assets": {
-    "directory": "./out"
-  }
+  "pages_build_output_dir": "./out"
 }

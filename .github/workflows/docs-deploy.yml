@@ -37,10 +37,10 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Deploy to Cloudflare Workers
+      - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: website
-          command: deploy
+          command: pages deploy out/ --project-name superfermion-docs --commit-dirty=true
