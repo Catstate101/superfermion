@@ -1,0 +1,17 @@
+{
+  "title": "Superfermion",
+  "pages": [
+    "index",
+    "getting-started",
+    "manual",
+    "tutorials",
+    "backends",
+    "api-reference",
+    "cli",
+    "architecture",
+    "conventions",
+    "init",
+    "cloud-guide",
+    "faq"
+  ]
+}

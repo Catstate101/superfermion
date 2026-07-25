@@ -1,0 +1,167 @@
+---
+title: "Superfermion Backends Guide"
+description: "One physical API, many simulators & hardware providers. Pick the right"
+---
+
+# Superfermion Backends Guide
+
+> One physical API, many simulators & hardware providers. Pick the right
+> one for the job.
+
+Retrieve any backend with
+
+```python
+import superfermion as sf
+be = sf.get_backend("jax")        # or jax, mps, rust, cuda, …
+sf.list_backends()                # names already loaded
+```
+
+or from the CLI:
+
+```bash
+sf backends
+sf run circuit.json --backend=jax --shots=4096
+```
+
+`sf.get_backend(None)` auto-selects `cuda` if CuPy is importable, else
+`statevector`.
+
+---
+
+## Quick-pick table
+
+| Backend | Strength | Memory model | Max practical qubits | Notes |
+|---------|----------|-------------|---------------------|-------|
+| `statevector` / `simulator` | Reference, deterministic | Dense `2^n` | ~25 on laptop CPU | Fallback/default. |
+| `jax` | JIT + `jax.grad`, XLA fusion | Dense `2^n` | ~28 CPU / ~32 GPU | **Best for variational training.** |
+| `rust` | Fastest CPU shot-simulator | Dense `2^n` | ~26 | Native `_sf_core.pyd`. No gradients. |
+| `mps` | Pure tensor-network | Bond-dim `\chi` | **100+** (low-entanglement) | The only SF backend that scales past 24q reliably. |
+| `jax_mps` | JIT MPS | Bond-dim `\chi` | 40–50 | ⚠️ See caveats below. |
+| `cuda` | cuQuantum dense sim | Dense `2^n` on GPU | ~32 | Requires `cupy` + CUDA 12. |
+| `cuda_mps` | GPU MPS | Bond-dim `\chi` on GPU | 60+ | Requires `cupy`. |
+| `cupy` / `cupy_sim` | CuPy dense sim, no cuQuantum | Dense `2^n` on GPU | ~28 | Lightweight alternative to `cuda`. |
+| `cluster` | Sharded JAX across devices | Dense, sharded | 30+ on 4xGPU | JAX mesh-parallel. |
+| `singularity` / `god` | Adaptive multi-regime dispatcher | Picks MPS / dense / density-matrix | Depends on regime | Experimental. |
+| `density_matrix` | Open-system dynamics | Dense `4^n` | ~12 | Use with `sf.noise` channels. |
+| `dwave` | Annealer frontend | Problem-dependent | Hundreds | Qubo/Ising only. |
+| `supremacy` | Random-circuit sampler | Specialised | 50+ | For Google-style supremacy benchmarks. |
+
+Aliases accepted by `sf.get_backend(...)` but that route to `statevector`
+or the auto-selector: `ibm`, `ibm_eagle`, `trapped_ion`, `rigetti`, `aws`,
+`braket`, `auto`, `simulator`.
+
+---
+
+## Detailed notes
+
+### `statevector`
+Pure-NumPy reference simulator at
+[superfermion/backends/simulator.py](../superfermion/backends/simulator.py).
+Always registered. Used as the "truth" in cross-framework benchmarks.
+
+### `jax` (recommended default for ML)
+[superfermion/backends/jax_sim.py](../superfermion/backends/jax_sim.py).
+Exposes `sf.qml.circuit_to_jax`, is auto-differentiable via `jax.grad`,
+and JIT-compiles down to XLA. Every module that references
+"differentiable circuits" (VQE/QAOA/QML/QDL/QLLM) runs on top of this.
+
+### `rust`
+[superfermion/backends/rust_sim.py](../superfermion/backends/rust_sim.py)
+and the compiled `_sf_core.pyd`. Fastest on CPU for shot-based sampling.
+No gradient support — if you need gradients, use `jax`.
+
+**Gate coverage.** The Rust core parses
+`H, X, Y, Z, S, Sdg, T, Tdg, SX, SXdg, Id, CX/CNOT, CZ, CY, SWAP, ISWAP,
+ECR, RX, RY, RZ, R1/P, U, RZZ, RXX, RYY, CRX, CRZ, CCX/Toffoli, CSWAP`
+natively. `CP` (controlled-phase) is **not** in the Rust parser; instead
+every circuit is pre-processed by `decompose_for_rust()` in
+`superfermion.backends.turbo`, which rewrites each
+`CP(phi, c, t)` into the 5-gate sequence
+
+    RZ(phi/2, c); CX(c, t); RZ(-phi/2, t); CX(c, t); RZ(phi/2, t)
+
+This is equivalent to `diag(1, 1, 1, e^{iφ})` up to a global phase and
+uses only gates the Rust kernel accepts. The rewrite is skipped for
+circuits that don't contain `CP`, so it's a zero-cost hot path for the
+majority of workloads. Validated to machine precision (≤2.2e-16) on
+direct CP evaluation and to unit fidelity on a 16-qubit QFT.
+
+### `mps`
+Native matrix-product-state simulator. Scales to 100+ qubits when
+entanglement is bounded. In our 2026-04 sweep, `sf.mps` was the **only**
+SF backend that scaled past 24 qubits without OOM. Tune `bond_dim` when
+constructing for accuracy/memory tradeoff.
+
+### `jax_mps`
+JIT-compiled MPS. Known to silently lose precision on long-range
+entanglers; cross-check against `mps` or `statevector` for correctness.
+
+### `cuda`, `cuda_mps`, `cupy`
+GPU paths. Require a working `cupy` install and CUDA 12. `cuda` uses
+cuQuantum; `cupy` is a lighter-weight dense path; `cuda_mps` is the GPU
+equivalent of `mps`.
+
+### `cluster`
+[superfermion/backends/cluster.py](../superfermion/backends/cluster.py).
+Uses `jax.sharding.Mesh` to shard the statevector across multiple
+devices. One log line on startup (`ClusterManager: Initialized with …`)
+is emitted only the first time in a process.
+
+### `singularity` / `god`
+Adaptive dispatcher that picks MPS, dense, or density-matrix based on
+circuit properties. Experimental — cross-check results.
+
+### `density_matrix`
+Simulates the full density matrix `\rho`. Pair with `sf.noise` channels
+for open-system dynamics and error-mitigation experiments.
+
+### `dwave`
+[superfermion/backends/dwave.py](../superfermion/backends/dwave.py).
+Routes QUBO / Ising problems to D-Wave annealers. Requires `dwave-ocean`
+credentials.
+
+### `supremacy`
+Purpose-built random-circuit sampler for supremacy-style benchmarks.
+Not a general-purpose backend.
+
+---
+
+## Cloud QPU Backends
+
+Superfermion also supports real quantum hardware through the runtime/bridge
+layer. These are not traditional simulators but live QPU connections.
+
+| Provider | Access Via | Notes |
+|----------|-----------|-------|
+| **IBM Quantum** | `sf.runtime.connect('ibm', token=...)` | 127-qubit Eagle, auto-noise extraction |
+| **IonQ** | `sf.runtime.connect('ionq', api_key=...)` | 36-qubit Aria, JSON v0.3 bridge with auto-CNOT fix |
+| **Rigetti** | `sf.runtime.connect('openquantum', ...)` | 84-qubit Ankaa-3 via OpenQuantum |
+| **IQM** | `sf.runtime.connect('openquantum', ...)` | 20-qubit Garnet via OpenQuantum |
+| **AWS Braket** | `sf.bridge.to_braket(circuit)` | Multi-provider, Braket SDK |
+
+See [Cloud Guide](cloud_guide.md) for QPU execution details, including the
+IonQ bridge workaround for a known simulator CNOT bug. The bridge layer
+automatically handles provider-specific serialization and bit-ordering
+conventions.
+
+---
+
+## Endianness
+
+SuperFermion internally uses **little-endian** qubit indexing. The bridge
+layer (`sf.bridge.from_qasm` / `from_qiskit`) mirrors qubits silently so
+circuits imported from Qiskit or QASM match native SF circuits. **Do not
+double-reverse** — if you reverse before importing, you'll be off by one
+convention.
+
+---
+
+## Choosing a backend
+
+1. **Training a variational circuit or writing a hybrid model?** → `jax`
+2. **≥ 30 qubits with moderate entanglement?** → `mps`
+3. **Shot-based sampling, no gradients, small qubit count?** → `rust`
+4. **Open-system / noise studies?** → `density_matrix`
+5. **Multi-GPU cluster?** → `cluster`
+6. **Reference / debugging?** → `statevector`
+7. **Optimization problems?** → `dwave`

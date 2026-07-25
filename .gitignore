@@ -1,4 +1,12 @@
 # Build artifacts
+
+# docs website (Fumadocs)
+website/node_modules/
+website/.next/
+website/.source/
+website/out/
+website/.wrangler/
+website/.turbo/
 target/
 dist/
 build/
