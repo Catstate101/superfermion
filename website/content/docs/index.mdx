@@ -1,111 +1,25 @@
 ---
 title: "Superfermion Documentation"
-description: "One framework. Every qubit. Every gradient. Every model."
+description: "A high-performance quantum computing framework with a Python API and a Rust simulation core."
 ---
 
-# Superfermion Documentation
+Superfermion is a quantum computing framework that combines a Python-native API with a Rust acceleration core (Rayon multithreading + in-place statevector).
 
-> **One framework. Every qubit. Every gradient. Every model.**
+- **4 simulation methods** — statevector (CPU/GPU), MPS tensor network, stabilizer (Aaronson-Gottesman tableau), density matrix (Kraus channels)
+- **Adjoint differentiation** — 1 forward + 1 backward pass regardless of parameter count; up to 200x faster than parameter-shift for deep circuits
+- **MPS tensor networks** — Rust MPS with faer-based QR decomposition and lazy SWAP routing; scales to 200+ qubits for low-entanglement circuits
+- **Stabilizer simulator** — word-packed tableau; Clifford circuits at poly-time to ~1000 qubits
+- **Quantum Error Correction** — 10 codes (Repetition, Shor, Steane, Bacon-Shor, Surface, Toric, Color, Honeycomb, Hypercube, CSS) + 4 decoders (MWPM, Union-Find, BP+OSD, Neural)
+- **Multi-framework ML** — `QuantumLayer` (Flax), `TorchQuantumLayer` (PyTorch), `TFQuantumLayer` (TensorFlow)
+- **5 gradient methods** — adjoint, parameter-shift, SPSA, QNG, Riemannian
+- **Quantum algorithms** — VQE, QAOA, Grover, QPE, HHL, Amplitude Estimation
+- **Chemistry module** — Jordan-Wigner + Bravyi-Kitaev transformations, UCCSD ansatz, PySCF bridge, molecular Hamiltonian library
+- **Hardware compilation** — gate decomposition, rotation merging, SABRE qubit routing, Pauli twirling; targets IBM, Rigetti, IonQ, IQM
+- **QPU providers** — IBM Quantum, IonQ, AWS Braket, OpenQuantum
+- **Cross-framework bridges** — Qiskit, Cirq, PennyLane, OpenQASM 2/3
 
-Superfermion is a JAX-native quantum machine-learning framework built to make
-quantum circuits **differentiable, JIT-compiled, and trainable end-to-end** —
-then deployable to any quantum backend (IBM, IonQ, Rigetti, AWS, D-Wave) from
-the same Python module.
+## Start here
 
-This page is the canonical jumping-off point. Every other doc links back here.
-
----
-
-## New here? Start in this order
-
-1. **[Getting Started](getting_started.md)** — install, first Bell state, first
-   gradient.
-2. **[Tutorials](tutorials/)** — 8 runnable scripts from VQE to QuantumGPT to
-   QEC; each is guarded by pytest so they never silently rot.
-3. **[CLI Reference](cli.md)** — 26 top-level `sf …` commands that turn a
-   fresh install into a productive lab in one shell session.
-4. **[API Reference](api_reference.md)** — every public symbol: circuits,
-   algorithms, primitives, observables, QML layers, QLLM models, QEC codes.
-
----
-
-## Reference by topic
-
-### Core
-- [Architecture](architecture.md) — Rust IR, Python API, backend registry, QNSCore.
-- [Backends](backends.md) — all 13 registered backends: statevector, JAX, MPS,
-  CUDA, CuPy, supremacy tensor-network, D-Wave, cluster, density-matrix.
-- [Conventions](conventions.md) — qubit ordering, endianness, gate semantics.
-- [Init behaviour](init.md) — what `import superfermion as sf` actually loads.
-
-### Algorithms
-- `superfermion.algorithms.vqe` — parameter-shift and JAX-grad VQE.
-- `superfermion.algorithms.qaoa` — MaxCut / Ising QAOA (scipy and JAX).
-- `superfermion.algorithms.qsvm` — fidelity and amplitude-embedding kernels.
-- `superfermion.algorithms.qrl` — Quantum REINFORCE agents.
-- `superfermion.algorithms.qbm` — Quantum Boltzmann Machines.
-- CLI shortcuts: `sf vqe`, `sf qaoa`, `sf chemistry` — see [cli.md](cli.md).
-
-### Quantum ML stack
-- `superfermion.qml` — differentiable layers, measurement helpers, JAX bridges.
-- `superfermion.qdl` — QResNet, QuantumSelfAttention, QGAN, QVAE.
-- `superfermion.qllm` — QuantumGPT, QuantumTransformer, token-level training.
-- `superfermion.classical` — JAX-backed SVM / regression for hybrid pipelines.
-
-### Error Correction
-- `superfermion.qec` — Steane, Surface, Hypercube, bivariate-bicycle codes;
-  MWPM decoder; full logical-qubit lifecycle and fault-tolerance audit.
-- CLI: `sf qec --code steane --error X` (or `--audit` for FT workflow).
-
-### Chemistry
-- `superfermion.chemistry` — molecular Hamiltonians (H2, LiH, BeH2), UCCSD
-  ansatz, Jordan-Wigner / Bravyi-Kitaev mappers.
-- CLI: `sf chemistry H2 --vqe`.
-
-### Primitives API (Qiskit v2 compatible)
-- `superfermion.primitives.SFEstimator` — expectation values with backend
-  selection and shot-noise sampling.
-- `superfermion.primitives.SFSampler` — measurement distribution sampler.
-
-### Infrastructure
-- [Intelligence bus](intelligence.md) — `EntangledBus` /
-  `QuantumIntelligenceBus` — internal pub/sub plumbing for QNSCore (DEPRECATED).
-- [Cloud guide](cloud_guide.md) — running on real hardware, CloudScheduler
-  with priority queues, batch submission, and dependency chains.
-
-### Noise & Mitigation
-- `superfermion.noise` — `NoiseModel` with depolarizing, amplitude/phase
-  damping, readout error; preset `ibm_eagle_noise()` and `ideal_noise()`.
-- `superfermion.mitigation` — `zne()` (circuit folding + Richardson
-  extrapolation), `zne_with_calibration()` (device-driven ZNE from
-  `CalibrationSet`), `readout_correction()`, and
-  `calibration_based_noise_model()`.
-- `superfermion.pulse` — `CalibrationSet.extract_noise_params()` and
-  `.to_noise_model()` bridge gate fidelities directly into noise models.
-
----
-
-## Test & release status (2026-06-02)
-
-| Suite                                | Result           |
-|--------------------------------------|------------------|
-| Full pytest regression               | 552 / 552 PASS   |
-| Tutorial guardrail (CI)              |   8 /   8 PASS   |
-| ZNE-Calibration + Scheduler tests    |  14 /  14 PASS   |
-| CLI `sf validate` (9 checks)         |   9 /   9 PASS   |
-| De facto CLI tests                   |  26 /  26 PASS   |
-| **Grand total**                      | **609 / 609 PASS** |
-
-See [CHANGELOG.md](../CHANGELOG.md) for a dated summary of every shipped change.
-
----
-
-## Got stuck?
-
-- Read the specific module's docstring — Superfermion's public API is
-  exhaustively self-documenting (`help(sf.algorithms.qaoa.QAOA)` etc.).
-- Skim the relevant [tutorial](tutorials/) — they are curated to be the
-  minimum complete example, not toy snippets.
-- Run `sf validate` to confirm your install is intact.
-- Run `sf info` to print your backend table.
-- File an issue on GitHub with the full output of `sf version`.
+1. **[Getting Started](/docs/getting-started)** — install, build the Rust extension, run your first circuit.
+2. **[Usage Guide](/docs/usage-guide)** — the canonical reference for the implemented API surface: circuits, execution, compilation, observables, gradients, VQE, experiment tracking, QPU providers, ML integration.
+3. **[Architecture](/docs/architecture)** — the Hexagonal Architecture (Ports & Adapters) design, Python/Rust boundary, and how adapters plug in.

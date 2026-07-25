@@ -1,186 +1,290 @@
 ---
-title: "Superfermion Architecture Guide"
-description: "Complete map of every module, file, and layer in the Superfermion framework."
+title: "Superfermion Architecture"
+description: "Superfermion is built on a single architectural axiom:"
 ---
 
-# Superfermion Architecture Guide
+# Superfermion Architecture
 
-> Complete map of every module, file, and layer in the Superfermion framework.
+## Design Philosophy: Hexagonal Architecture (Ports & Adapters)
 
----
+Superfermion is built on a single architectural axiom:
 
-## High-Level Architecture
+> **The domain core defines the contracts; the outside world conforms to them — never the reverse.**
+
+This is **Hexagonal Architecture** (Ports & Adapters), coined by Alistair Cockburn. The core is sovereign — nothing in it imports, references, or depends on any external vendor, framework, or cloud provider. All external integrations plug in through well-defined protocols. The result is a kernel architecture: a small, stable, self-contained core surrounded by a growing ecosystem of adapters.
+
+### The Three Reinforcing Principles
+
+**1. Dependency Inversion (the "D" in SOLID)**
+
+High-level policy (`sf.run`, `sf.compile`) never imports low-level detail (IBM API calls, IonQ REST endpoints, Qiskit internals). Both depend on abstract Protocols. Dependencies always point **inward** toward `sf.State`.
 
 ```
-                         USER CODE
-                             |
-                      import superfermion as sf
-                             |
-                +------------+------------+-----------------------+
-                |                         |                       |
-          sf.Circuit()              sf.run() / sf.compile()   sf.intelligence
-                |                         |                       |
-     +----------+---------+     +---------+---------+     +--------+--------+
-     |                    |     |                   |     |                 |
-  Parameters         Gate DAG  |            Compiler Pipeline    Superpositional
-  (sf.param)         (GateRecord) |          (PassManager)           Agent (QNS)
-                          |     |                   |                 |
-                     JAX Layer   |          Runtime / Arbiter    Entangled Bus
-                (circuit_to_jax) |      (Job & Scaling Logic)         |
-                          |     |             |                 QNS Core
-                     Differentiable     Backend Registry              |
-                     Primitive       +---+---+---+---+---+      Cloud & REST
-                          |          |   |   |   |   |   |       (sf-serve)
-                     Flax Integration  sim jax cuda mps cluster hardware
-                    (QuantumLayer)
-                          |
-              +------------+------------+
-              |            |            |
-           QML Layer    QDL Layer    QLLM Layer
-         (GAN,VAE,NLP)  (QResNet)   (QuantumGPT)
-              |            |
-       Classical AI    QEC Layer
-       (GNN,CNN,ML)   (LDPCCode)
+Applications → Runner → Circuit → Rust IR → sf.State
+     ↑              ↑          ↑
+  Adapters       Adapters   Adapters
+(algorithms)  (providers)  (bridges)
 ```
+
+**2. Open/Closed Principle**
+
+Superfermion is *open for extension* (add a new provider, simulation backend, bridge, or ML layer) but *closed for modification* (the core never changes when you add a new vendor). Adding `GoogleDevice` means writing one adapter file — zero lines touched in core.
+
+**3. Strategy Pattern at the Architecture Level**
+
+Every major subsystem is a family of interchangeable strategies behind a stable interface:
+
+| Subsystem | Interface | Strategies |
+|---|---|---|
+| Simulation | `QuantumStateImpl` trait | statevector, MPS, stabilizer, density_matrix, GPU |
+| Devices | `DeviceExecutor` protocol | RustDevice, IBMDevice, IonQDevice, BraketDevice |
+| Providers | `Provider` protocol | IBM, IonQ, Braket, OpenQuantum, Catstate |
+| Compilation | `CompilerPass` base | SwapDecomp, GateCancel, RotMerge, SABRE, ... |
+| ML bridges | framework-native gradient | JAX custom_vjp, PyTorch autograd, TF custom_gradient |
+| Tracking | `TrackerProtocol` | LocalTracker, CatstateTracker |
+
+### Ports (Abstractions SF Owns)
+
+These are the contracts that define the boundary between core and outside world:
+
+| Port | Purpose |
+|---|---|
+| `DeviceExecutor` | Anything that can execute a circuit |
+| `Provider` | Anything that can submit a job to hardware |
+| `TrackerProtocol` | Anything that can observe experiment lifecycle |
+| `HardwareSpec` | Anything that describes a target topology and basis gate set |
+| `NoiseModel` | Anything that describes quantum channel noise |
+| `QuantumStateImpl` | Rust trait — anything that is a quantum state |
+
+### Adapters (Implementations That Plug In)
+
+Adapters conform to SF's ports — SF never conforms to them:
+
+| Adapter | Port it implements |
+|---|---|
+| `IBMDevice`, `IonQDevice`, `BraketDevice` | `DeviceExecutor` / `Provider` |
+| `from_qiskit()`, `from_cirq()`, `from_pennylane()` | Bridge adapters translating foreign circuits into SF IR |
+| `TorchQuantumLayer`, `TFQuantumLayer`, `QuantumLayer` | ML framework adapters around `sf.State.grad()` |
+| `LocalTracker`, `CatstateTracker` | `TrackerProtocol` |
+| `RustDevice` (statevector, MPS, stabilizer, DM, GPU) | `DeviceExecutor` + `QuantumStateImpl` |
+
+### The Kernel Analogy
+
+| System | Kernel | Adapters |
+|---|---|---|
+| **Linux** | kernel syscall ABI | device drivers |
+| **PyTorch** | Tensor + autograd | backends (CPU, CUDA, XLA, MPS) |
+| **Kubernetes** | API server + scheduler | CNI, CSI, CRI plugins |
+| **Superfermion** | sf.State + sf-ir + Circuit + compile + run | providers, bridges, ML layers |
 
 ---
 
-## Directory Structure
+## Design Principle: Python is the API, Rust Does the Work
+
+Superfermion follows a strict two-layer architecture. Python owns the user-facing API surface — circuit construction, configuration, experiment tracking, ML framework bridges. Rust owns all performance-critical computation — statevector simulation, gate application, sampling, gradients, tensor operations.
+
+JAX is reserved for a single purpose: thin custom-gradient bridges in `superfermion.nn` that connect `sf.State.grad()` to framework-native autograd (JAX `custom_vjp`, PyTorch `autograd.Function`, TF `custom_gradient`). It is never used for simulation, linear algebra, or observable computation.
+
+---
+
+## Core Concepts
+
+### `sf.Circuit`
+
+The fluent circuit builder. Immutable after construction; returns new circuit on each gate call.
+
+```python
+qc = sf.Circuit(2).h(0).cx(0, 1)
+```
+
+### `sf.State`
+
+A Rust-native quantum state handle exposed via PyO3. This is the first-class object for all post-simulation operations:
+
+| Method | Description |
+|---|---|
+| `state.expectation(obs)` | Pauli expectation value |
+| `state.grad(obs, dag, params)` | Parameter-shift gradient |
+| `state.sample(shots)` | Measurement sampling |
+| `state.numpy()` | Export as NumPy array |
+| `state.entropy()` | Von Neumann entropy |
+| `state.purity()` | State purity |
+| `state.fidelity(other)` | Fidelity with another state |
+| `state.partial_trace(qubits)` | Partial trace |
+| `state.qfim(dag, params)` | Quantum Fisher Information Matrix |
+
+All methods dispatch to Rust. Python never touches raw state data.
+
+### `sf.run()` and `sf.simulate()`
+
+Two entry points for circuit execution:
+
+```python
+result = sf.run(circuit, device="cpu", method="statevector", shots=1024)
+# result.counts, result.state, result.metadata
+
+state = sf.simulate(circuit, device="cpu", method="statevector")
+# Returns sf.State directly (shots=0 implied)
+```
+
+`sf.run()` returns a `RunResult` with counts, state, and metadata. `sf.simulate()` is shorthand for zero-shot execution that returns the `sf.State` directly.
+
+---
+
+## Module Map
 
 ```
 superfermion/
-|
-|-- crates/                          # Rust core (Layer 0-1)
-|   |-- sf-ir/                       # Quantum IR: gate enums, DAG, passes
-|   |   |-- src/
-|   |       |-- lib.rs               # QuantumGate, QuantumDAG, QuantumOp
-|   |       |-- dag.rs               # DAG implementation
-|   |       |-- passes.rs            # Optimization passes (gate cancel, etc.)
-|   |
-|   |-- sf-compiler/                 # Compilation pipeline
-|   |   |-- src/
-|   |       |-- lib.rs               # PassManager, Pass trait
-|   |       |-- decompose/           # Gate decomposition rules
-|   |
-|   |-- sf-router/                   # Qubit routing (SABRE)
-|   |   |-- src/lib.rs               # SABRE router implementation
-|   |
-|   |-- sf-bindings/                 # PyO3 Python bindings
-|       |-- src/lib.rs               # _sf_core module
-|
-|-- superfermion/                    # Python framework (Layer 2-10)
-|   |-- __init__.py                  # Top-level API: Circuit, run, param
-|   |-- circuit.py                   # Circuit class (549 lines, 30+ gates)
-|   |-- parameters.py                # SymbolicParameter, sf.param()
-|   |-- runner.py                    # sf.run() orchestrator
-|   |-- results.py                   # ExecutionResult dataclass
-|   |
-|   |-- backends/                    # Layer 6: Backend registry
-|   |   |-- __init__.py              # list_backends(), get_backend()
-|   |   |-- base.py                  # Abstract Backend base class
-|   |   |-- registry.py              # Auto-discovery & selection
-|   |   |-- jax_sim.py               # JAX-native backend (596x faster)
-|   |   |-- cluster.py               # GPU Cluster Orchestrator (sharding)
-|   |
-|   |-- runtime/                     # Layer 8: Cloud & Hardware
-|   |   |-- __init__.py              # Job, Runtime, LocalJob
-|   |   |-- specs.py                 # HardwareSpec (IBM, AWS, IonQ)
-|   |   |-- arbiter.py               # Resource routing & scaling logic
-|   |   |-- providers/
-|   |       |-- ibm.py               # IBM Quantum Cloud interface
-|   |       |-- aws.py               # AWS Braket / IonQ / Rigetti
-|   |
-|   |-- intelligence/                # Layer 9: Autonomous AI (DEPRECATED)
-|   |   |-- __init__.py              # SuperpositionalAgent, EntangledBus, QNSCore
-|   |   |-- bus.py                   # EntangledBus (High-speed thoughts)
-|   |   |-- singularity.py           # QNS Core (Architectural Evolution)
-|   |
-|   |-- serve/                       # Layer 10: Cloud API
-|   |   |-- app.py                   # FastAPI Gateway (sf-serve)
-|   |   |-- auth.py                  # API Keys, Quotas, Multi-tenancy
-|   |
-|   |-- compiler/                    # Layer 5: Compiler pipeline
-|   |   |-- manager.py               # sf.compile(), PassManager
-|   |   |-- passes.py                # BasisTranslation, Routing, SABRE
-|   |
-|   |   |-- quantum_ai.py           # QNN, QGNN, QGAN, QVAE, QNLP
-|   |   |-- measurements.py         # Purity, Entropy, Fidelity, Adv. metrics
-|   |   |-- ansatz/
-|   |   |   |-- hardware_efficient.py # Standard HE ansatz template
-|   |
-|   |-- classical/                  # Layer 7.5: JAX-Accelerated Classical AI
-|   |   |-- math.py                 # PDE Solvers, Heat Equation
-|   |   |-- ml.py                   # SVM, K-Means, Regression
-|   |   |-- nn.py                   # CNN, RNN (LSTM), ResNet
-|   |   |-- gnn.py                  # Graph Neural Networks (GCN)
-|   |   |-- sv.py                   # State Vector Dynamical Systems
-|   |
-|   |-- nn/                          # Layer 4: Neural network module
-|   |   |-- quantum_layer.py         # QuantumLayer (Flax nn.Module)
-|   |
-|   |-- observables/                 # Layer 7: Measurement operators
-|   |   |-- core.py                  # Observable, PauliString, Hamiltonian
-|   |
-|   |-- algorithms/                  # Layer 7: Variational algorithms
-|   |   |-- vqe.py                   # Variational Quantum Eigensolver
-|   |   |-- qaoa.py                  # Quantum Approximate Optimization
-|   |   |-- qsvm.py                  # Quantum SVM Classifier
-|   |
-|   |-- qdl/                         # Layer 7: Quantum Deep Learning
-|   |   |-- resnet.py                # Quantum residual block
-|   |
-|   |-- qllm/                        # Layer 7: Quantum LLMs
-|   |   |-- transformer.py           # Quantum Transformer + GPT
-|   |
-|   |-- qec/                         # Layer 7.5: Fault-Tolerant Engine
-|   |   |-- manager.py               # QECManager (Orchestrator)
-|   |   |-- decoders/                # MWPM, Union-Find, BP+OSD
-|   |   |-- codes/                   # Surface, Toric, LDPC, 4D Hypercube
-|   |
-|   |-- utils/                       # Layer 2: Utilities
-|       |-- logging.py               # Rich-based colorful logging
-|       |-- exceptions.py            # Superfermion-specific error types
-|
-|-- docs/                            # Documentation
-|   |-- getting_started.md           # Quick start guide
-|   |-- architecture.md              # This file
-|   |-- conventions.md               # Coding conventions
-|   |-- intelligence.md              # Autonomous AI Guide (Singularity)
-|   |-- cloud_guide.md               # REST API & Cluster Scaling
-|
-|-- test_*.py                        # Test suite (120+ tests)
+├── __init__.py          Circuit, run, simulate, State, MethodError, ...
+├── circuit.py           Circuit builder, parameter binding
+├── runner.py            sf.run() / sf.simulate() dispatch
+├── results.py           RunResult dataclass
+├── parameters.py        param() symbolic parameter factory
+├── _sf_core             Rust PyO3 extension (State, QuantumDAG, ...)
+│
+├── devices/
+│   ├── rust_device.py   RustDevice — routes to Rust simulation methods
+│   ├── ibm.py           IBM Quantum provider adapter
+│   ├── ionq.py          IonQ provider adapter
+│   ├── braket.py        AWS Braket provider adapter
+│   └── openquantum.py   OpenQuantum provider adapter
+│
+├── observables/
+│   └── core.py          PauliString, SparsePauliOp, Hamiltonian, expval
+│
+├── noise/
+│   └── __init__.py      NoiseModel, noise channels (depolarizing, damping, ...)
+│
+├── nn/
+│   ├── quantum_layer.py Flax QuantumLayer (jax.custom_vjp → sf.State.grad)
+│   ├── torch_layer.py   TorchQuantumLayer (autograd.Function → sf.State.grad)
+│   └── tf_layer.py      TFQuantumLayer (tf.custom_gradient → sf.State.grad)
+│
+├── qml/
+│   ├── gradient/
+│   │   ├── adjoint.py       Adjoint differentiation
+│   │   ├── parameter_shift.py Parameter-shift rule
+│   │   ├── spsa.py          SPSA stochastic gradient
+│   │   ├── qng.py           Quantum Natural Gradient
+│   │   ├── riemannian.py    Riemannian gradient (natural gradient via QFIM)
+│   │   └── stochastic_reconfig.py  Stochastic Reconfiguration
+│   └── encoding/        Angle, amplitude, IQP encoding
+│
+├── algorithms/
+│   ├── vqe.py           Variational Quantum Eigensolver
+│   ├── qaoa.py          QAOA
+│   ├── qsvm.py          Quantum SVM
+│   ├── qrl.py           Quantum Reinforcement Learning
+│   └── qbm.py           Quantum Boltzmann Machine
+│
+├── chemistry/           JW/BK transforms, UCCSD, PySCF bridge
+├── qec/                 10 codes + 4 decoders
+├── compiler/            Gate decomposition, rotation merge, SABRE routing
+├── bridge/              Qiskit, Cirq, PennyLane, QASM interop
+├── mitigation/          ZNE, readout error mitigation
+├── pulse/               Waveforms, schedules, gate calibration
+├── viz/                 Circuit drawing, Bloch sphere, histograms
+└── experiment/          Experiment tracking protocols
 ```
 
 ---
 
-## Layer Architecture
+## Rust Workspace
 
-### Layer 0-1: Rust Core (`crates/`)
-The high-performance substrate. Handles Intermediate Representation (IR) and low-level compilation (SABRE routing, gate cancellation).
+```
+crates/
+├── sf-ir/           QuantumDAG, QuantumStateImpl trait, simulation engines
+│                    (statevector, MPS, stabilizer, density matrix)
+├── sf-compiler/     Pass manager, gate cancellation, rotation merge, twirl
+├── sf-router/       SABRE routing, hardware topology
+├── sf-pulse/        Waveforms, schedules
+├── sf-qec/          Stabilizer codes, MWPM/UnionFind decoders
+├── sf-gpu/          CUDA statevector simulation (cudarc, sm_75+)
+└── sf-bindings/     PyO3 FFI — exposes State, QuantumDAG, compile, etc.
+```
 
-### Layer 2-3: JAX Differentiable Layer (`superfermion/qml/`)
-Custom JAX primitive that enables the "Holy Grail": end-to-end differentiation of quantum circuits using JIT, vmap, and autograd.
+### `QuantumStateImpl` Trait
 
-### Layer 5-6: Advanced Backends (`superfermion/backends/`)
-Modular execution engines. The **JAX Backend** is 596x faster than NumPy, and the **Cluster Backend** enables distributed scaling across many GPUs.
+The Rust trait that all simulation methods implement:
 
-### Layer 8: Runtime & Arbiter (`superfermion/runtime/`)
-The "System" logic. Automatically routes jobs between local simulators, GPU clusters, or hardware targets based on resource requirements.
+```rust
+pub trait QuantumStateImpl {
+    fn expectation(&self, observable: &[(Vec<u8>, f64, f64)]) -> (f64, f64);
+    fn sample(&self, shots: usize) -> Vec<u64>;
+    fn numpy(&self) -> Vec<Complex64>;
+    fn entropy(&self) -> f64;
+    fn purity(&self) -> f64;
+    fn fidelity(&self, other: &Self) -> f64;
+    fn partial_trace(&self, qubits: &[usize]) -> Vec<Complex64>;
+}
+```
 
-### Layer 9: Superpositional Intelligence (`superfermion/intelligence/`) — DEPRECATED
-The autonomous AI layer (deprecated). Contains the **Quantum Neural Singularity (QNS)** proof-of-concept — will be removed in a future version.
-
-### Layer 10: Cloud Gateway (`superfermion/serve/`)
-The public-facing portal. Provides a secured REST/WebSocket API with API Keys and usage quotas for global enterprise access.
+The Python `sf.State` wraps whichever `QuantumStateImpl` the simulation produced, dispatching method calls to the Rust implementation.
 
 ---
 
-## Key Design Principles
+## Execution Flow
 
-| Principle | Implementation |
-|-----------|----------------|
-| **Hardware-Agnostic** | Define logic once, run on JAX, CUDA, IBM, or AWS Braket seamlessly. |
-| **Differentiable-First** | Entire framework is built on JAX for seamless gradient flow. |
-| **Autonomous Scaling** | Arbiter handles the transition from laptop to GPU-cluster to QPU. |
-| **Recursive Improvement** | QNS allows the AI to improve its own circuit topology. |
-| **Enterprise-Grade** | Secured API with multi-tenancy, logging, and extensive testing. |
+```
+sf.run(circuit, device="cpu", method="statevector", shots=1024)
+    │
+    ▼
+runner.py — resolve device, bind parameters, optional compile
+    │
+    ▼
+RustDevice.execute(dag, method, shots, **kwargs)
+    │
+    ├── statevector  → dag.simulate()           [Rust, Rayon-parallel]
+    ├── mps          → dag.simulate_mps()       [Rust, faer QR/SVD]
+    ├── stabilizer   → dag.simulate_stabilizer() [Rust, word-packed tableau]
+    ├── density_matrix → dag.simulate_dm_noisy() [Rust, Kraus channels]
+    └── gpu          → dag.simulate_gpu()       [CUDA via cudarc]
+    │
+    ▼
+sf.State (Rust-native handle)
+    │
+    ▼
+RunResult(counts, state, metadata)
+```
+
+---
+
+## Simulation Methods
+
+| Method | Engine | Max Qubits | Best For |
+|---|---|---|---|
+| `statevector` | Rust (Rayon) | ~25 CPU, ~30 GPU | Exact sim, gradients, QML |
+| `mps` | Rust (faer) | 200+ | Low-entanglement circuits |
+| `stabilizer` | Rust (word-packed) | ~1000 | Clifford circuits, QEC |
+| `density_matrix` | Rust (Kraus) | ~12 | Noisy simulation |
+
+---
+
+## ML Framework Integration
+
+Each ML layer is ~20 lines wrapping `sf.State.grad()` with the framework's custom gradient mechanism:
+
+| Framework | Layer | Mechanism |
+|---|---|---|
+| Flax (JAX) | `QuantumLayer` | `jax.custom_vjp` |
+| PyTorch | `TorchQuantumLayer` | `torch.autograd.Function` |
+| TensorFlow | `TFQuantumLayer` | `tf.custom_gradient` |
+
+All three call `sf.State.grad()` (Rust parameter-shift) in the backward pass.
+
+---
+
+## Provider / Device Model
+
+Superfermion defines protocols; platform layers implement them:
+
+| Protocol | Purpose |
+|---|---|
+| `DeviceExecutor` | Anything that can execute a circuit |
+| `DeviceCapabilities` | What a device supports (methods, max qubits) |
+| `Provider` | Supplies devices (IBM, IonQ, Catstate, ...) |
+| `Job` | Async result handle for QPU execution |
+| `Algorithm` | Configurable algorithm (VQE, QAOA, ...) |
+| `AlgorithmResult` | Algorithm output |
+
+Local simulation uses `RustDevice` (implements `DeviceExecutor`). Cloud providers implement the same protocol.
