@@ -9,18 +9,20 @@
 //! - Layout management (trivial, noise-aware)
 //! - Token swapping for permutation routing
 
-pub mod topology;
+#![allow(clippy::needless_range_loop)]
+
 pub mod layout;
 pub mod sabre;
 pub mod token_swap;
+pub mod topology;
 
 use sf_ir::{QuantumDAG, QubitMapping};
 use thiserror::Error;
 
-pub use topology::{CouplingMap, HardwareTopology};
-pub use layout::{LayoutStrategy, TrivialLayout, NoiseAwareLayout};
+pub use layout::{LayoutStrategy, NoiseAwareLayout, TrivialLayout};
 pub use sabre::SabreRouter;
 pub use token_swap::token_swap_route;
+pub use topology::{CouplingMap, HardwareTopology};
 
 #[derive(Error, Debug)]
 pub enum RouterError {
@@ -107,9 +109,12 @@ mod tests {
 
         let (routed, _mapping) = sabre.route(&dag, &layout).unwrap();
         // With identity layout on linear(4), CNOT(0,3) needs SWAPs
-        assert!(routed.count_ops_of_type("SWAP") > 0,
+        assert!(
+            routed.count_ops_of_type("SWAP") > 0,
             "Expected SWAPs, got {} gates, {} SWAPs",
-            routed.gate_count(), routed.count_ops_of_type("SWAP"));
+            routed.gate_count(),
+            routed.count_ops_of_type("SWAP")
+        );
     }
 
     #[test]

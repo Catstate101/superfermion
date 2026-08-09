@@ -1,7 +1,7 @@
 //! Layout strategies — initial mapping of logical to physical qubits.
 
-use sf_ir::QubitMapping;
 use crate::topology::CouplingMap;
+use sf_ir::QubitMapping;
 
 /// Trait for layout strategies.
 pub trait LayoutStrategy {
@@ -57,7 +57,10 @@ impl NoiseAwareLayout {
         // Sort physical qubits by degree (descending)
         let mut physical_order: Vec<usize> = (0..n_physical).collect();
         physical_order.sort_by(|a, b| {
-            coupling.neighbors(*b).len().cmp(&coupling.neighbors(*a).len())
+            coupling
+                .neighbors(*b)
+                .len()
+                .cmp(&coupling.neighbors(*a).len())
         });
 
         // Greedy assignment

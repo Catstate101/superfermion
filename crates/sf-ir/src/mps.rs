@@ -1,17 +1,17 @@
-use crate::dag::{QuantumDAG};
-use crate::ops::{OpType};
-use num_complex::Complex64;
+use crate::dag::QuantumDAG;
+use crate::ops::OpType;
 use nalgebra::{DMatrix, DVector};
+use num_complex::Complex64;
 
 // faer is used for both the heavy matmul AND QR factorisation in
 // apply_2q_gate.  At bond dimension D=64 nalgebra runs ~1 GFLOPS (no
 // SIMD) while faer reaches ~8 GFLOPS via cache-blocked AVX-2 microkernels.
 // We pay an O(D^2) conversion cost which is amortised over the O(D^3)
 // matmul + QR.
+use faer::linalg::matmul::matmul as faer_matmul;
 use faer::linalg::solvers::Qr as FaerQr;
 use faer::Mat as FaerMat;
-use faer::{Parallelism};
-use faer::linalg::matmul::matmul as faer_matmul;
+use faer::Parallelism;
 
 /// Fast nalgebra→faer conversion exploiting shared column-major layout.
 fn na_to_faer(m: &DMatrix<Complex64>) -> FaerMat<Complex64> {
@@ -64,7 +64,7 @@ fn swap_matrix() -> DMatrix<Complex64> {
 /// Single-qubit Pauli enum used for expectation-value calls from Python.
 /// Stored as one byte per site so Python can pass a raw &[u8].
 ///   0 = I, 1 = X, 2 = Y, 3 = Z
-
+///
 /// Matrix Product State (MPS) core for high-efficiency simulation.
 pub struct MPSState {
     pub n_qubits: usize,
@@ -78,9 +78,8 @@ pub struct MPSState {
     pub perm_inv: Vec<usize>,
 }
 
-
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 impl MPSState {
     pub fn new(n_qubits: usize, bond_dim: usize) -> Self {
@@ -174,8 +173,7 @@ impl MPSState {
             let q_t = qr.q(); // (2*D_R, min(2*D_R, D_L))
             let r_t = qr.r(); // (min(2*D_R, D_L), D_L)
 
-            let k = std::cmp::min(self.bond_dim,
-                        std::cmp::min(2 * d_r, d_l));
+            let k = std::cmp::min(self.bond_dim, std::cmp::min(2 * d_r, d_l));
 
             // Q_lq = first-k-cols(Q_t)^T → shape (k, 2*D_R)
             // Reshape back to packed (2*k, D_R).
@@ -210,7 +208,7 @@ impl MPSState {
             let prev = &self.tensors[i - 1];
             let d_l_prev = prev.shape().0 / 2;
 
-            let prev_0 = prev.rows(0, d_l_prev).into_owned();       // (D_prev, D_L)
+            let prev_0 = prev.rows(0, d_l_prev).into_owned(); // (D_prev, D_L)
             let prev_1 = prev.rows(d_l_prev, d_l_prev).into_owned(); // (D_prev, D_L)
 
             let new_0 = &prev_0 * &l_matrix; // (D_prev, k)
@@ -223,15 +221,20 @@ impl MPSState {
         }
     }
 
-    pub fn apply_1q_gate_static(t: &mut nalgebra::DMatrix<Complex64>, gate: &nalgebra::DMatrix<Complex64>) {
+    pub fn apply_1q_gate_static(
+        t: &mut nalgebra::DMatrix<Complex64>,
+        gate: &nalgebra::DMatrix<Complex64>,
+    ) {
         let (rows, cols) = t.shape(); // rows = D_L * 2
         let d_l = rows / 2;
-        
+
         let mut new_t = nalgebra::DMatrix::zeros(rows, cols);
-        
+
         // Cache gate elements
-        let g00 = gate[(0, 0)]; let g01 = gate[(0, 1)];
-        let g10 = gate[(1, 0)]; let g11 = gate[(1, 1)];
+        let g00 = gate[(0, 0)];
+        let g01 = gate[(0, 1)];
+        let g10 = gate[(1, 0)];
+        let g11 = gate[(1, 1)];
 
         for c in 0..cols {
             for l in 0..d_l {
@@ -264,7 +267,9 @@ impl MPSState {
     pub fn apply_gate_lazy_routed(&mut self, v1: usize, v2: usize, gate: &DMatrix<Complex64>) {
         let p1 = self.perm[v1];
         let p2 = self.perm[v2];
-        if p1 == p2 { return; }
+        if p1 == p2 {
+            return;
+        }
         if (p1 as isize - p2 as isize).abs() == 1 {
             self.apply_2q_gate(p1, p2, gate);
             return;
@@ -285,8 +290,10 @@ impl MPSState {
     /// qubits, route via SWAP chain so the gate ends up acting on adjacent
     /// sites, then SWAP back.
     pub fn apply_2q_gate_routed(&mut self, q1: usize, q2: usize, gate: &DMatrix<Complex64>) {
-        let dist = (q1 as isize - q2 as isize).abs() as usize;
-        if dist == 0 { return; }
+        let dist = (q1 as isize - q2 as isize).unsigned_abs();
+        if dist == 0 {
+            return;
+        }
         if dist == 1 {
             self.apply_2q_gate(q1, q2, gate);
             return;
@@ -309,7 +316,8 @@ impl MPSState {
         for k in (lo..(hi - 1)).rev() {
             self.apply_2q_gate(k, k + 1, &swap_gate);
         }
-    }    pub fn apply_2q_gate(&mut self, q1: usize, q2: usize, gate: &nalgebra::DMatrix<Complex64>) {
+    }
+    pub fn apply_2q_gate(&mut self, q1: usize, q2: usize, gate: &nalgebra::DMatrix<Complex64>) {
         // This is safe because we check q1 != q2 and only access those two.
         // For borrow checker we have to do some dancing if they are adjacent.
         if q1 < q2 {
@@ -322,14 +330,16 @@ impl MPSState {
     }
 
     pub fn apply_2q_gate_static(
-        t1: &mut nalgebra::DMatrix<Complex64>, 
+        t1: &mut nalgebra::DMatrix<Complex64>,
         t2: &mut nalgebra::DMatrix<Complex64>,
         q1: usize,
         q2: usize,
         gate: &nalgebra::DMatrix<Complex64>,
-        bond_dim: usize
+        bond_dim: usize,
     ) {
-        if (q1 as isize - q2 as isize).abs() != 1 { return; }
+        if (q1 as isize - q2 as isize).abs() != 1 {
+            return;
+        }
         let (idx1, idx2, gate_eff) = if q1 < q2 {
             (q1, q2, gate.clone())
         } else {
@@ -341,9 +351,9 @@ impl MPSState {
         let d_m = t1.shape().1;
         let d_r2 = t2.shape().1;
 
-        let t1_a = t1.rows(0,    d_l1).into_owned();
+        let t1_a = t1.rows(0, d_l1).into_owned();
         let t1_b = t1.rows(d_l1, d_l1).into_owned();
-        let t2_a = t2.rows(0,   d_m).into_owned();
+        let t2_a = t2.rows(0, d_m).into_owned();
         let t2_b = t2.rows(d_m, d_m).into_owned();
 
         let use_faer_matmul = d_l1 >= 16 && d_m >= 16 && d_r2 >= 16;
@@ -358,18 +368,55 @@ impl MPSState {
             let alpha = Complex64::new(1.0, 0.0);
             // Use Rayon parallelism for large bond dimensions (D >= 64) where
             // the O(D^3) matmul cost justifies thread-pool overhead.
-            let par = if d_m >= 64 { Parallelism::Rayon(0) } else { Parallelism::None };
+            let par = if d_m >= 64 {
+                Parallelism::Rayon(0)
+            } else {
+                Parallelism::None
+            };
             let mut t00_f: FaerMat<Complex64> = FaerMat::zeros(d_l1, d_r2);
             let mut t01_f: FaerMat<Complex64> = FaerMat::zeros(d_l1, d_r2);
             let mut t10_f: FaerMat<Complex64> = FaerMat::zeros(d_l1, d_r2);
             let mut t11_f: FaerMat<Complex64> = FaerMat::zeros(d_l1, d_r2);
 
-            faer_matmul(t00_f.as_mut(), t1a_f.as_ref(), t2a_f.as_ref(), None, alpha, par);
-            faer_matmul(t01_f.as_mut(), t1a_f.as_ref(), t2b_f.as_ref(), None, alpha, par);
-            faer_matmul(t10_f.as_mut(), t1b_f.as_ref(), t2a_f.as_ref(), None, alpha, par);
-            faer_matmul(t11_f.as_mut(), t1b_f.as_ref(), t2b_f.as_ref(), None, alpha, par);
+            faer_matmul(
+                t00_f.as_mut(),
+                t1a_f.as_ref(),
+                t2a_f.as_ref(),
+                None,
+                alpha,
+                par,
+            );
+            faer_matmul(
+                t01_f.as_mut(),
+                t1a_f.as_ref(),
+                t2b_f.as_ref(),
+                None,
+                alpha,
+                par,
+            );
+            faer_matmul(
+                t10_f.as_mut(),
+                t1b_f.as_ref(),
+                t2a_f.as_ref(),
+                None,
+                alpha,
+                par,
+            );
+            faer_matmul(
+                t11_f.as_mut(),
+                t1b_f.as_ref(),
+                t2b_f.as_ref(),
+                None,
+                alpha,
+                par,
+            );
 
-            (faer_to_na(&t00_f), faer_to_na(&t01_f), faer_to_na(&t10_f), faer_to_na(&t11_f))
+            (
+                faer_to_na(&t00_f),
+                faer_to_na(&t01_f),
+                faer_to_na(&t10_f),
+                faer_to_na(&t11_f),
+            )
         } else {
             (&t1_a * &t2_a, &t1_a * &t2_b, &t1_b * &t2_a, &t1_b * &t2_b)
         };
@@ -398,95 +445,97 @@ impl MPSState {
         // QR factorisation is numerically exact for unitary matrices and preserves
         // norm to machine precision. We use faer for large matrices (AVX-2 optimized)
         // and fall back to nalgebra for small matrices.
-        let (q_out, r_matrix): (nalgebra::DMatrix<Complex64>, nalgebra::DMatrix<Complex64>) = if use_faer_qr {
-            let m_faer: FaerMat<Complex64> = FaerMat::from_fn(nrows, ncols, |i, j| m_matrix[(i, j)]);
-            let qr = FaerQr::new(m_faer.as_ref());
+        let (q_out, r_matrix): (nalgebra::DMatrix<Complex64>, nalgebra::DMatrix<Complex64>) =
+            if use_faer_qr {
+                let m_faer: FaerMat<Complex64> =
+                    FaerMat::from_fn(nrows, ncols, |i, j| m_matrix[(i, j)]);
+                let qr = FaerQr::new(m_faer.as_ref());
 
-            let q_full = qr.compute_q();
-            let r_full = qr.compute_r();
+                let q_full = qr.compute_q();
+                let r_full = qr.compute_r();
 
-            // Rank-revealing via R row-norms.
-            //
-            // For phantom-bond removal (e.g. BV product states), we need to
-            // drop trailing rows of R whose entire row-norm is ~machine eps.
-            // Using R[i,i] alone is unreliable since unpivoted Householder QR
-            // does not sort the diagonal. Instead use the FULL row norm
-            // sqrt(sum_j |R[i,j]|^2) (only j>=i are nonzero since R is upper
-            // triangular). A row with all entries below ~1e-12 carries no
-            // signal and can be safely dropped.
-            //
-            // We also use the Frobenius norm of R as a global scale reference,
-            // so the threshold scales with the matrix magnitude (handles both
-            // normalized and unnormalized MPS states).
-            let k_max = std::cmp::min(bond_dim, std::cmp::min(nrows, ncols));
-            // Compute ||R||_F (full Frobenius norm; cheap O(k_max * ncols)).
-            let mut frob_sq = 0.0_f64;
-            for i in 0..k_max {
-                for j in i..ncols {
-                    frob_sq += r_full.read(i, j).norm_sqr();
+                // Rank-revealing via R row-norms.
+                //
+                // For phantom-bond removal (e.g. BV product states), we need to
+                // drop trailing rows of R whose entire row-norm is ~machine eps.
+                // Using R[i,i] alone is unreliable since unpivoted Householder QR
+                // does not sort the diagonal. Instead use the FULL row norm
+                // sqrt(sum_j |R[i,j]|^2) (only j>=i are nonzero since R is upper
+                // triangular). A row with all entries below ~1e-12 carries no
+                // signal and can be safely dropped.
+                //
+                // We also use the Frobenius norm of R as a global scale reference,
+                // so the threshold scales with the matrix magnitude (handles both
+                // normalized and unnormalized MPS states).
+                let k_max = std::cmp::min(bond_dim, std::cmp::min(nrows, ncols));
+                // Compute ||R||_F (full Frobenius norm; cheap O(k_max * ncols)).
+                let mut frob_sq = 0.0_f64;
+                for i in 0..k_max {
+                    for j in i..ncols {
+                        frob_sq += r_full.read(i, j).norm_sqr();
+                    }
                 }
-            }
-            let frob = frob_sq.sqrt().max(1e-300_f64);
-            // Threshold per row: drop row if ||R[i, i:]||_2 < eps * ||R||_F.
-            // eps = 1e-12 is well above QR roundoff (~1e-14 for double) but
-            // below any singular value we'd want to keep (~1e-10 in practice).
-            let row_eps_sq = (1e-12_f64 * frob).powi(2);
-            // Find k_final = (last row index with significant norm) + 1.
-            let mut k_final = 1usize;
-            for i in 0..k_max {
-                let mut row_norm_sq = 0.0_f64;
-                for j in i..ncols {
-                    row_norm_sq += r_full.read(i, j).norm_sqr();
+                let frob = frob_sq.sqrt().max(1e-300_f64);
+                // Threshold per row: drop row if ||R[i, i:]||_2 < eps * ||R||_F.
+                // eps = 1e-12 is well above QR roundoff (~1e-14 for double) but
+                // below any singular value we'd want to keep (~1e-10 in practice).
+                let row_eps_sq = (1e-12_f64 * frob).powi(2);
+                // Find k_final = (last row index with significant norm) + 1.
+                let mut k_final = 1usize;
+                for i in 0..k_max {
+                    let mut row_norm_sq = 0.0_f64;
+                    for j in i..ncols {
+                        row_norm_sq += r_full.read(i, j).norm_sqr();
+                    }
+                    if row_norm_sq > row_eps_sq {
+                        k_final = i + 1;
+                    }
                 }
-                if row_norm_sq > row_eps_sq {
-                    k_final = i + 1;
-                }
-            }
 
-            let mut q_dst = nalgebra::DMatrix::<Complex64>::zeros(nrows, k_final);
-            let mut r_dst = nalgebra::DMatrix::<Complex64>::zeros(k_final, ncols);
+                let mut q_dst = nalgebra::DMatrix::<Complex64>::zeros(nrows, k_final);
+                let mut r_dst = nalgebra::DMatrix::<Complex64>::zeros(k_final, ncols);
 
-            for j in 0..k_final {
-                for i in 0..nrows {
-                    q_dst[(i, j)] = q_full.read(i, j);
+                for j in 0..k_final {
+                    for i in 0..nrows {
+                        q_dst[(i, j)] = q_full.read(i, j);
+                    }
                 }
-            }
-            for j in 0..ncols {
-                for i in 0..k_final {
-                    r_dst[(i, j)] = r_full.read(i, j);
+                for j in 0..ncols {
+                    for i in 0..k_final {
+                        r_dst[(i, j)] = r_full.read(i, j);
+                    }
                 }
-            }
-            (q_dst, r_dst)
-        } else {
-            let qr = m_matrix.qr();
-            let q_full = qr.q();
-            let r_full = qr.r();
+                (q_dst, r_dst)
+            } else {
+                let qr = m_matrix.qr();
+                let q_full = qr.q();
+                let r_full = qr.r();
 
-            // Rank-revealing via R row-norms (see faer-path comment above).
-            let k_max = std::cmp::min(bond_dim, std::cmp::min(nrows, ncols));
-            let mut frob_sq = 0.0_f64;
-            for i in 0..k_max {
-                for j in i..ncols {
-                    frob_sq += r_full[(i, j)].norm_sqr();
+                // Rank-revealing via R row-norms (see faer-path comment above).
+                let k_max = std::cmp::min(bond_dim, std::cmp::min(nrows, ncols));
+                let mut frob_sq = 0.0_f64;
+                for i in 0..k_max {
+                    for j in i..ncols {
+                        frob_sq += r_full[(i, j)].norm_sqr();
+                    }
                 }
-            }
-            let frob = frob_sq.sqrt().max(1e-300_f64);
-            let row_eps_sq = (1e-12_f64 * frob).powi(2);
-            let mut k_final = 1usize;
-            for i in 0..k_max {
-                let mut row_norm_sq = 0.0_f64;
-                for j in i..ncols {
-                    row_norm_sq += r_full[(i, j)].norm_sqr();
+                let frob = frob_sq.sqrt().max(1e-300_f64);
+                let row_eps_sq = (1e-12_f64 * frob).powi(2);
+                let mut k_final = 1usize;
+                for i in 0..k_max {
+                    let mut row_norm_sq = 0.0_f64;
+                    for j in i..ncols {
+                        row_norm_sq += r_full[(i, j)].norm_sqr();
+                    }
+                    if row_norm_sq > row_eps_sq {
+                        k_final = i + 1;
+                    }
                 }
-                if row_norm_sq > row_eps_sq {
-                    k_final = i + 1;
-                }
-            }
 
-            let q_dst: nalgebra::DMatrix<Complex64> = q_full.columns(0, k_final).into_owned();
-            let r_dst: nalgebra::DMatrix<Complex64> = r_full.rows(0, k_final).into_owned();
-            (q_dst, r_dst)
-        };
+                let q_dst: nalgebra::DMatrix<Complex64> = q_full.columns(0, k_final).into_owned();
+                let r_dst: nalgebra::DMatrix<Complex64> = r_full.rows(0, k_final).into_owned();
+                (q_dst, r_dst)
+            };
 
         *t1 = q_out;
         let k_final = r_matrix.shape().0;
@@ -507,7 +556,7 @@ impl MPSState {
         let dim = 1 << self.n_qubits;
         let mut state = vec![Complex64::new(0.0, 0.0); dim];
         state[0] = Complex64::new(1.0, 0.0);
-        
+
         // Final statevector reconstruction by contracting tensors correctly
         // This is O(2^N * D^2), only for testing small circuits!
         for i in 0..dim {
@@ -517,7 +566,7 @@ impl MPSState {
                 let (d_l_rows, d_r) = t.shape();
                 let d_l = d_l_rows / 2;
                 let bit = (i >> (self.n_qubits - 1 - idx)) & 1;
-                
+
                 let mut next_vec = nalgebra::DVector::zeros(d_r);
                 for r in 0..d_r {
                     let mut sum = Complex64::new(0.0, 0.0);
@@ -530,31 +579,33 @@ impl MPSState {
             }
             state[i] = left_vec[0];
         }
-        
+
         state
     }
 
     /// Direct bit-by-bit sampling from MPS: O(N * D^2 * shots)
     pub fn sample(&self, shots: usize, _seed: u64) -> std::collections::HashMap<String, usize> {
         let mut counts = std::collections::HashMap::new();
-        if self.n_qubits == 0 { return counts; }
-        
+        if self.n_qubits == 0 {
+            return counts;
+        }
+
         // Final measurement simulation (linear bit-by-bit)
         // For performance, we pre-calculate bond-bond contractions
         let _master_rng = StdRng::seed_from_u64(_seed);
-        
+
         for shot_idx in 0..shots {
             let mut bitstring = String::with_capacity(self.n_qubits);
             let mut left_vec = DVector::from_vec(vec![Complex64::new(1.0, 0.0)]); // D_L1 = 1
-            
+
             // Unique seed for this shot to ensure diversity
             let mut rng = StdRng::seed_from_u64(_seed.wrapping_add(shot_idx as u64));
-            
+
             for i in 0..self.n_qubits {
                 let t = &self.tensors[i];
                 let d_l = t.shape().0 / 2;
                 let d_r = t.shape().1;
-                
+
                 // Compute unnormalized P(0) and P(1) for this qubit
                 let mut prob0 = 0.0_f64;
                 for r in 0..d_r {
@@ -580,7 +631,7 @@ impl MPSState {
                 let random_val: f64 = rng.gen();
                 let b = if random_val < p0_normalized { '0' } else { '1' };
                 bitstring.push(b);
-                
+
                 // Update left_vec (projection)
                 let p_idx = if b == '0' { 0 } else { 1 };
                 let mut next_vec = DVector::zeros(d_r);
@@ -593,7 +644,7 @@ impl MPSState {
                 }
                 // Normalize to avoid underflow
                 let norm = next_vec.norm();
-                if norm > 1e-12_f64 { 
+                if norm > 1e-12_f64 {
                     let inv_norm = 1.0 / norm;
                     for elem in next_vec.iter_mut() {
                         *elem *= inv_norm;
@@ -623,7 +674,7 @@ impl MPSState {
         let mut left: DMatrix<Complex64> = DMatrix::from_element(1, 1, Complex64::new(1.0, 0.0));
 
         for i in 0..self.n_qubits {
-            let t = &self.tensors[i];   // shape (d_l*2, d_r)
+            let t = &self.tensors[i]; // shape (d_l*2, d_r)
             let (rows, _d_r) = t.shape();
             let d_l = rows / 2;
             // Split t into top (physical=0) and bottom (physical=1) halves.
@@ -637,10 +688,13 @@ impl MPSState {
             // Pauli Y:  out_top = -i*bot; out_bot = i*top
             // Pauli Z:  out_top = top   ; out_bot = -bot
             let (a, b) = match pauli[i] {
-                0 => (top.clone(), bot.clone()),                                          // I
-                1 => (bot.clone(), top.clone()),                                          // X
-                2 => (bot.clone() * Complex64::new(0.0, -1.0), top.clone() * Complex64::new(0.0, 1.0)), // Y
-                3 => (top.clone(), -bot.clone()),                                          // Z
+                0 => (top.clone(), bot.clone()), // I
+                1 => (bot.clone(), top.clone()), // X
+                2 => (
+                    bot.clone() * Complex64::new(0.0, -1.0),
+                    top.clone() * Complex64::new(0.0, 1.0),
+                ), // Y
+                3 => (top.clone(), -bot.clone()), // Z
                 _ => (top.clone(), bot.clone()),
             };
 
@@ -655,23 +709,23 @@ impl MPSState {
             // physical s sectors.
             //
             // We use:  L_new = bra_top.adjoint() * L * a + bra_bot.adjoint() * L * b
-            let bra_top_adj = top.adjoint();   // (d_r, d_l)
-            let bra_bot_adj = bot.adjoint();   // (d_r, d_l)
-            let l_a = &left * &a;              // (D_top, d_r)  — wait, dims off
-            // Actually we need: L is (d_l_bra_prev, d_l_ket_prev). After site i,
-            // new L should be (d_r_bra, d_r_ket).
-            // Standard formula:
-            //   L_new[r_bra, r_ket] = sum_{s, l_bra, l_ket}
-            //       conj(bra_t_s[l_bra, r_bra]) * L[l_bra, l_ket] * a_or_b_s[l_ket, r_ket]
-            // where bra_t_s is the bra tensor at this site for physical s, and
-            // a_or_b_s is the ket tensor with the Pauli applied (here `a` is s=0
-            // contribution, `b` is s=1 contribution).
-            //
-            // We can compute as: L_new = bra_top.adjoint() * L * a + bra_bot.adjoint() * L * b
-            // bra_top: (d_l, d_r), so bra_top.adjoint(): (d_r, d_l)
-            // L: (d_l_bra, d_l_ket)  --> after first site it's (1,1), generally (d_l, d_l)
-            // a: (d_l_ket, d_r_ket) -- shape (d_l, d_r) since we sliced from t
-            // (d_r, d_l) * (d_l, d_l) * (d_l, d_r) = (d_r, d_r). Correct.
+            let bra_top_adj = top.adjoint(); // (d_r, d_l)
+            let bra_bot_adj = bot.adjoint(); // (d_r, d_l)
+            let l_a = &left * &a; // (D_top, d_r)  — wait, dims off
+                                  // Actually we need: L is (d_l_bra_prev, d_l_ket_prev). After site i,
+                                  // new L should be (d_r_bra, d_r_ket).
+                                  // Standard formula:
+                                  //   L_new[r_bra, r_ket] = sum_{s, l_bra, l_ket}
+                                  //       conj(bra_t_s[l_bra, r_bra]) * L[l_bra, l_ket] * a_or_b_s[l_ket, r_ket]
+                                  // where bra_t_s is the bra tensor at this site for physical s, and
+                                  // a_or_b_s is the ket tensor with the Pauli applied (here `a` is s=0
+                                  // contribution, `b` is s=1 contribution).
+                                  //
+                                  // We can compute as: L_new = bra_top.adjoint() * L * a + bra_bot.adjoint() * L * b
+                                  // bra_top: (d_l, d_r), so bra_top.adjoint(): (d_r, d_l)
+                                  // L: (d_l_bra, d_l_ket)  --> after first site it's (1,1), generally (d_l, d_l)
+                                  // a: (d_l_ket, d_r_ket) -- shape (d_l, d_r) since we sliced from t
+                                  // (d_r, d_l) * (d_l, d_l) * (d_l, d_r) = (d_r, d_r). Correct.
             let _ = l_a; // silence warning; we'll redo below cleanly
             let term0 = &bra_top_adj * &left * &a;
             let term1 = &bra_bot_adj * &left * &b;
@@ -753,7 +807,8 @@ impl QuantumDAG {
         // Detect any non-adjacent 2q gate — if present, use lazy-SWAP routing
         let has_long_range = self.graph().node_indices().any(|n| {
             let op = &self.graph()[n];
-            !op.op_type.is_boundary() && op.qubits.len() == 2
+            !op.op_type.is_boundary()
+                && op.qubits.len() == 2
                 && (op.qubits[0] as isize - op.qubits[1] as isize).abs() > 1
         });
         if has_long_range {
@@ -769,7 +824,7 @@ impl QuantumDAG {
             // Group gates by whether they are routed (expensive, potentially
             // touching many qubits) or local/adjacent (fast, easy to parallelize).
             // For Heisenberg/QFT almost all gates are adjacent or near-adjacent.
-            
+
             // To safely use Rayon on the tensors Vec, we use unsafe raw pointers
             // because we know that gates in a DAG layer are qubit-disjoint.
             let tensors_ptr = state.tensors.as_mut_ptr() as usize;
@@ -783,7 +838,7 @@ impl QuantumDAG {
                     return;
                 }
                 let gate_u = op.op_type.to_matrix();
-                
+
                 unsafe {
                     let ptr = tensors_ptr as *mut nalgebra::DMatrix<Complex64>;
                     match op.qubits.len() {
@@ -803,7 +858,7 @@ impl QuantumDAG {
                                 MPSState::apply_2q_gate_static(t1, t2, q1, q2, &gate_u, bond_dim);
                             } else {
                                 // For non-adjacent routed gates, parallelization is trickier
-                                // because they touch a range of qubits. 
+                                // because they touch a range of qubits.
                                 // For now, we fallback to a sequential path for routed gates
                                 // or just accept the risk if the DAG says they are disjoint.
                                 // Actually, a routed gate acts on many qubits, so it should
@@ -819,11 +874,12 @@ impl QuantumDAG {
                     }
                 }
             });
-            
+
             // Handle routed gates sequentially for now (rare in optimized Heisenberg/QFT)
             for &node_id in &layer {
                 let op = &self.graph()[node_id];
-                if op.qubits.len() == 2 && (op.qubits[0] as isize - op.qubits[1] as isize).abs() > 1 {
+                if op.qubits.len() == 2 && (op.qubits[0] as isize - op.qubits[1] as isize).abs() > 1
+                {
                     let gate_u = op.op_type.to_matrix();
                     state.apply_2q_gate_routed(op.qubits[0], op.qubits[1], &gate_u);
                 }
@@ -860,11 +916,7 @@ mod tests {
     use approx::assert_relative_eq;
 
     fn mps_norm_sq(state: &MPSState) -> f64 {
-        state
-            .to_statevector()
-            .iter()
-            .map(|c| c.norm_sqr())
-            .sum()
+        state.to_statevector().iter().map(|c| c.norm_sqr()).sum()
     }
 
     #[test]
@@ -918,4 +970,3 @@ mod tests {
         assert!(sv[3].norm() < 1e-10);
     }
 }
-

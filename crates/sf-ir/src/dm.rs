@@ -1,5 +1,5 @@
-use num_complex::Complex64;
 use nalgebra::DMatrix;
+use num_complex::Complex64;
 use rayon::prelude::*;
 pub struct DensityMatrixState {
     pub data: Vec<Complex64>,
@@ -45,30 +45,36 @@ impl DensityMatrixState {
         let n_total = 2 * self.n_qubits;
         let dim = 1 << n_total;
         let dist = 1 << q;
-        
-        let u00r = u[(0, 0)].re; let u00i = u[(0, 0)].im;
-        let u01r = u[(0, 1)].re; let u01i = u[(0, 1)].im;
-        let u10r = u[(1, 0)].re; let u10i = u[(1, 0)].im;
-        let u11r = u[(1, 1)].re; let u11i = u[(1, 1)].im;
+
+        let u00r = u[(0, 0)].re;
+        let u00i = u[(0, 0)].im;
+        let u01r = u[(0, 1)].re;
+        let u01i = u[(0, 1)].im;
+        let u10r = u[(1, 0)].re;
+        let u10i = u[(1, 0)].im;
+        let u11r = u[(1, 1)].re;
+        let u11i = u[(1, 1)].im;
 
         let mut next_data = vec![Complex64::new(0.0, 0.0); dim];
-        
+
         // Chunked parallel execution (same as statevector)
         let chunk_size = std::cmp::max(1, dist);
         let _n_chunks = dim / (2 * chunk_size);
 
-        next_data.par_chunks_mut(2 * chunk_size).enumerate().for_each(|(c, chunk)| {
-            let (lo, hi) = chunk.split_at_mut(chunk_size);
-            let src_offset = c * 2 * chunk_size;
-            let src_lo = &self.data[src_offset..src_offset + chunk_size];
-            let src_hi = &self.data[src_offset + chunk_size..src_offset + 2 * chunk_size];
-            
-            crate::dag::apply_2x2_kernel_f64(
-                src_lo, src_hi, lo, hi,
-                u00r, u00i, u01r, u01i, u10r, u10i, u11r, u11i
-            );
-        });
-        
+        next_data
+            .par_chunks_mut(2 * chunk_size)
+            .enumerate()
+            .for_each(|(c, chunk)| {
+                let (lo, hi) = chunk.split_at_mut(chunk_size);
+                let src_offset = c * 2 * chunk_size;
+                let src_lo = &self.data[src_offset..src_offset + chunk_size];
+                let src_hi = &self.data[src_offset + chunk_size..src_offset + 2 * chunk_size];
+
+                crate::dag::apply_2x2_kernel_f64(
+                    src_lo, src_hi, lo, hi, u00r, u00i, u01r, u01i, u10r, u10i, u11r, u11i,
+                );
+            });
+
         self.data = next_data;
     }
 
@@ -81,20 +87,23 @@ impl DensityMatrixState {
         let dim = 1 << n_total;
         let mut next_data = vec![Complex64::new(0.0, 0.0); dim];
 
-        next_data.par_iter_mut().enumerate().for_each(|(i, target)| {
-            let bit0 = (i >> q0) & 1;  // control bit
-            let bit1 = (i >> q1) & 1;  // target bit
-            let i_base = i & !(1 << q0) & !(1 << q1);
-            let row = bit0 * 2 + bit1;  // Matches statevector: control*2 + target
-            let mut acc = Complex64::new(0.0, 0.0);
-            for col in 0..4 {
-                let b0 = (col >> 1) & 1;  // control bit for column
-                let b1 = col & 1;         // target bit for column
-                let idx = i_base | (b0 << q0) | (b1 << q1);
-                acc += u[(row, col)] * self.data[idx];
-            }
-            *target = acc;
-        });
+        next_data
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, target)| {
+                let bit0 = (i >> q0) & 1; // control bit
+                let bit1 = (i >> q1) & 1; // target bit
+                let i_base = i & !(1 << q0) & !(1 << q1);
+                let row = bit0 * 2 + bit1; // Matches statevector: control*2 + target
+                let mut acc = Complex64::new(0.0, 0.0);
+                for col in 0..4 {
+                    let b0 = (col >> 1) & 1; // control bit for column
+                    let b1 = col & 1; // target bit for column
+                    let idx = i_base | (b0 << q0) | (b1 << q1);
+                    acc += u[(row, col)] * self.data[idx];
+                }
+                *target = acc;
+            });
         self.data = next_data;
     }
 
@@ -109,7 +118,7 @@ impl DensityMatrixState {
             self.apply_1q_gate_to_vec(&mut current_k, k, qubit);
             let k_star = k.map(|c| c.conj());
             self.apply_1q_gate_to_vec(&mut current_k, &k_star, self.n_qubits + qubit);
-            
+
             for (i, val) in current_k.iter().enumerate() {
                 total_next[i] += val;
             }
@@ -121,25 +130,31 @@ impl DensityMatrixState {
         let n_total = 2 * self.n_qubits;
         let dim = 1 << n_total;
         let dist = 1 << q;
-        
-        let u00r = u[(0, 0)].re; let u00i = u[(0, 0)].im;
-        let u01r = u[(0, 1)].re; let u01i = u[(0, 1)].im;
-        let u10r = u[(1, 0)].re; let u10i = u[(1, 0)].im;
-        let u11r = u[(1, 1)].re; let u11i = u[(1, 1)].im;
+
+        let u00r = u[(0, 0)].re;
+        let u00i = u[(0, 0)].im;
+        let u01r = u[(0, 1)].re;
+        let u01i = u[(0, 1)].im;
+        let u10r = u[(1, 0)].re;
+        let u10i = u[(1, 0)].im;
+        let u11r = u[(1, 1)].re;
+        let u11i = u[(1, 1)].im;
 
         let mut next_data = vec![Complex64::new(0.0, 0.0); dim];
         let chunk_size = std::cmp::max(1, dist);
-        
-        next_data.par_chunks_mut(2 * chunk_size).enumerate().for_each(|(c, chunk)| {
-            let (lo, hi) = chunk.split_at_mut(chunk_size);
-            let src_offset = c * 2 * chunk_size;
-            let src_lo = &data[src_offset..src_offset + chunk_size];
-            let src_hi = &data[src_offset + chunk_size..src_offset + 2 * chunk_size];
-            crate::dag::apply_2x2_kernel_f64(
-                src_lo, src_hi, lo, hi,
-                u00r, u00i, u01r, u01i, u10r, u10i, u11r, u11i
-            );
-        });
+
+        next_data
+            .par_chunks_mut(2 * chunk_size)
+            .enumerate()
+            .for_each(|(c, chunk)| {
+                let (lo, hi) = chunk.split_at_mut(chunk_size);
+                let src_offset = c * 2 * chunk_size;
+                let src_lo = &data[src_offset..src_offset + chunk_size];
+                let src_hi = &data[src_offset + chunk_size..src_offset + 2 * chunk_size];
+                crate::dag::apply_2x2_kernel_f64(
+                    src_lo, src_hi, lo, hi, u00r, u00i, u01r, u01i, u10r, u10i, u11r, u11i,
+                );
+            });
         *data = next_data;
     }
 }

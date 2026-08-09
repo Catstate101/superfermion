@@ -4,10 +4,10 @@
 //! Decomposes arbitrary single-qubit gates into Rz-SX sequences and
 //! multi-qubit gates into CX-based circuits.
 
-use sf_ir::{OpType, QuantumDAG, QuantumOp, WireType};
-use crate::{Pass, CompilerError};
-use petgraph::Direction;
+use crate::{CompilerError, Pass};
 use petgraph::visit::EdgeRef;
+use petgraph::Direction;
+use sf_ir::{OpType, QuantumDAG, QuantumOp, WireType};
 use std::f64::consts::PI;
 
 /// Decomposes gates to IBM native basis: {Rz, SX, X, CX}
@@ -209,13 +209,10 @@ pub fn replace_node_with_gates(
     // Insert new gates
     let mut current_preds = preds;
     for (new_op, qs) in gates {
-        let new_node = dag
-            .graph_mut()
-            .add_node(QuantumOp::new(new_op.clone(), qs));
+        let new_node = dag.graph_mut().add_node(QuantumOp::new(new_op.clone(), qs));
         for &q in qs {
             if let Some(&p) = current_preds.get(&q) {
-                dag.graph_mut()
-                    .add_edge(p, new_node, WireType::Qubit(q));
+                dag.graph_mut().add_edge(p, new_node, WireType::Qubit(q));
             }
             current_preds.insert(q, new_node);
         }

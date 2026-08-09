@@ -8,10 +8,10 @@
 //! after routing inserts `CX CX CX` for each SWAP, the middle CX may commute
 //! past a 1Q gate to cancel with an adjacent CX from a neighboring SWAP.
 
-use sf_ir::{OpType, QuantumDAG, commutation};
-use crate::{Pass, CompilerError};
+use crate::{CompilerError, Pass};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
+use sf_ir::{commutation, OpType, QuantumDAG};
 
 pub struct CommutativeCancellationPass;
 
@@ -50,7 +50,8 @@ impl Pass for CommutativeCancellationPass {
                 // Look ahead for a matching inverse gate that can be reached
                 // by commuting through intermediate gates.
                 for &candidate_id in topo[idx + 1..].iter() {
-                    if cancelled.contains(&candidate_id) || !dag.graph().contains_node(candidate_id) {
+                    if cancelled.contains(&candidate_id) || !dag.graph().contains_node(candidate_id)
+                    {
                         continue;
                     }
 
@@ -65,7 +66,15 @@ impl Pass for CommutativeCancellationPass {
                     // Check if op1 and op2 are inverse pairs
                     if is_inverse_pair(&op1, &qubits1, &op2, &qubits2) {
                         // Check if op1 can commute through all gates between them on shared qubits
-                        if can_commute_through(dag, &topo[idx + 1..], node_id, candidate_id, &op1, &qubits1, &cancelled) {
+                        if can_commute_through(
+                            dag,
+                            &topo[idx + 1..],
+                            node_id,
+                            candidate_id,
+                            &op1,
+                            &qubits1,
+                            &cancelled,
+                        ) {
                             cancelled.insert(node_id);
                             cancelled.insert(candidate_id);
                             changed = true;
@@ -169,12 +178,14 @@ fn remove_node_and_rewire(dag: &mut QuantumDAG, node_id: petgraph::prelude::Node
     let qubits: Vec<usize> = dag.graph()[node_id].qubits.to_vec();
 
     for q in qubits {
-        let pred = dag.graph()
+        let pred = dag
+            .graph()
             .edges_directed(node_id, Direction::Incoming)
             .find(|e| *e.weight() == sf_ir::WireType::Qubit(q))
             .map(|e| e.source());
 
-        let succ = dag.graph()
+        let succ = dag
+            .graph()
             .edges_directed(node_id, Direction::Outgoing)
             .find(|e| *e.weight() == sf_ir::WireType::Qubit(q))
             .map(|e| e.target());
@@ -272,7 +283,11 @@ mod tests {
         dag.add_op(OpType::CNOT, &[0, 1]);
 
         CommutativeCancellationPass::new().run(&mut dag).unwrap();
-        assert!(dag.gate_count() < 6, "Should cancel at least one pair, got {}", dag.gate_count());
+        assert!(
+            dag.gate_count() < 6,
+            "Should cancel at least one pair, got {}",
+            dag.gate_count()
+        );
     }
 
     #[test]

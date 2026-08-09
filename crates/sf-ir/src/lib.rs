@@ -19,29 +19,36 @@
 //! Backend → executes → Results
 //! ```
 
-pub mod dag;
-pub mod ops;
-pub mod qubits;
-pub mod classical;
-pub mod serialize;
-pub mod mps;
-pub mod dm;
-pub mod qasm;
-pub mod stabilizer;
-pub mod gate_list;
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::match_like_matches_macro)]
+
 pub mod adjoint;
+pub mod classical;
 pub mod commutation;
+pub mod dag;
+pub mod dm;
+pub mod gate_list;
+pub mod mps;
+pub mod ops;
+pub mod qasm;
+pub mod qubits;
+pub mod serialize;
+pub mod stabilizer;
 pub mod state;
 
 // Re-export core types at crate root for convenience
-pub use dag::{QuantumDAG, QuantumOp, WireType, CircuitMetadata, NodeId, QubitId};
-pub use ops::{OpType, Parameter, ParameterExpr};
-pub use qubits::{LogicalQubit, PhysicalQubit, QubitMapping, QubitAllocator};
-pub use classical::{ClassicalRegister, ClassicalRegFile};
-pub use serialize::SerializedCircuit;
-pub use mps::MPSState;
 pub use adjoint::{adjoint_grad, AdjointGradResult, PauliTerm};
-pub use state::{QuantumStateImpl, MethodError, StatevectorState, DensityMatrixStateWrapper, MPSStateWrapper, StabilizerStateWrapper};
+pub use classical::{ClassicalRegFile, ClassicalRegister};
+pub use dag::{CircuitMetadata, NodeId, QuantumDAG, QuantumOp, QubitId, WireType};
+pub use mps::MPSState;
+pub use ops::{OpType, Parameter, ParameterExpr};
+pub use qubits::{LogicalQubit, PhysicalQubit, QubitAllocator, QubitMapping};
+pub use serialize::SerializedCircuit;
+pub use state::{
+    DensityMatrixStateWrapper, MPSStateWrapper, MethodError, QuantumStateImpl,
+    StabilizerStateWrapper, StatevectorState,
+};
 
 /// Diagnostic: returns a human-readable reason why GPU init failed (or "ok").
 #[cfg(feature = "gpu")]

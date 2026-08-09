@@ -161,7 +161,8 @@ impl QuantumDAG {
             assert!(
                 q < self.n_qubits,
                 "Qubit {} out of range (circuit has {} qubits)",
-                q, self.n_qubits
+                q,
+                self.n_qubits
             );
         }
         // Guard against duplicate qubits which would create a self-loop
@@ -170,20 +171,21 @@ impl QuantumDAG {
                 assert!(
                     qubits[i] != qubits[j],
                     "Duplicate qubit index {} in gate {:?}",
-                    qubits[i], op_type
+                    qubits[i],
+                    op_type
                 );
             }
         }
 
         // Register any new parameters and track their locations
         let node_id_to_be = self.graph.add_node(QuantumOp::new(op_type.clone(), qubits));
-        
+
         for param in op_type.parameters() {
             if let Parameter::Variable { ref name, id } = param {
                 self.parameters.entry(name.clone()).or_insert(*id);
                 self.param_locations
                     .entry(name.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(node_id_to_be);
             }
         }
@@ -209,8 +211,10 @@ impl QuantumDAG {
             self.graph.remove_edge(edge_id);
 
             // Add new wires: pred → new_node → output
-            self.graph.add_edge(pred_node, new_node, WireType::Qubit(qubit));
-            self.graph.add_edge(new_node, output_node, WireType::Qubit(qubit));
+            self.graph
+                .add_edge(pred_node, new_node, WireType::Qubit(qubit));
+            self.graph
+                .add_edge(new_node, output_node, WireType::Qubit(qubit));
         }
 
         new_node
@@ -219,7 +223,7 @@ impl QuantumDAG {
     /// In-place update of symbolic parameters.
     /// This avoids rebuilding the entire DAG and IR for variational loops.
     pub fn update_parameters(&mut self, values: &HashMap<String, f64>) {
-        for (name, _) in values {
+        for name in values.keys() {
             if let Some(nodes) = self.param_locations.get(name) {
                 for &node_id in nodes {
                     let op = &mut self.graph[node_id];
@@ -248,8 +252,10 @@ impl QuantumDAG {
         let pred_node = pred_edge.source();
         let edge_id = pred_edge.id();
         self.graph.remove_edge(edge_id);
-        self.graph.add_edge(pred_node, new_node, WireType::Qubit(qubit));
-        self.graph.add_edge(new_node, output_node, WireType::Qubit(qubit));
+        self.graph
+            .add_edge(pred_node, new_node, WireType::Qubit(qubit));
+        self.graph
+            .add_edge(new_node, output_node, WireType::Qubit(qubit));
 
         new_node
     }
@@ -280,27 +286,33 @@ impl QuantumDAG {
         }
         records
     }
-    
+
     /// Returns the DAG nodes grouped into parallel layers (qubit-disjoint rounds).
     /// All gates in a single layer can be executed in parallel.
     pub fn parallel_layers(&self) -> Vec<Vec<NodeId>> {
         let topo = self.topological_order();
-        if topo.is_empty() { return vec![]; }
-        
+        if topo.is_empty() {
+            return vec![];
+        }
+
         let mut dist: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
         let mut max_depth = 0;
-        
+
         for &node in &topo {
-            let pred_max = self.graph.neighbors_directed(node, petgraph::Incoming)
+            let pred_max = self
+                .graph
+                .neighbors_directed(node, petgraph::Incoming)
                 .filter(|n| !self.is_boundary_node(*n))
                 .map(|n| dist.get(&n).copied().unwrap_or(0))
                 .max()
                 .unwrap_or(0);
             let d = pred_max + 1;
             dist.insert(node, d);
-            if d > max_depth { max_depth = d; }
+            if d > max_depth {
+                max_depth = d;
+            }
         }
-        
+
         let mut layers = vec![vec![]; max_depth];
         for (node, depth) in dist {
             layers[depth - 1].push(node);
@@ -384,39 +396,45 @@ impl QuantumDAG {
         let n = self.n_qubits;
         let dim = 1 << n;
 
-        paulis.iter().map(|p| {
-            let mut expval = 0.0;
-            // P = P0 \otimes P1 ...
-            // We can compute this in one pass over the statevector
-            for i in 0..dim {
-                let mut phase = num_complex::Complex64::new(1.0, 0.0);
-                let mut target_idx = i;
-                
-                for (q, &pauli_op) in p.iter().enumerate() {
-                    match pauli_op {
-                        1 => { // X
-                            target_idx ^= 1 << q;
-                        }
-                        2 => { // Y
-                            target_idx ^= 1 << q;
-                            if (i >> q) & 1 == 0 {
-                                phase *= num_complex::Complex64::i();
-                            } else {
-                                phase *= -num_complex::Complex64::i();
+        paulis
+            .iter()
+            .map(|p| {
+                let mut expval = 0.0;
+                // P = P0 \otimes P1 ...
+                // We can compute this in one pass over the statevector
+                for i in 0..dim {
+                    let mut phase = num_complex::Complex64::new(1.0, 0.0);
+                    let mut target_idx = i;
+
+                    for (q, &pauli_op) in p.iter().enumerate() {
+                        match pauli_op {
+                            1 => {
+                                // X
+                                target_idx ^= 1 << q;
                             }
-                        }
-                        3 => { // Z
-                            if (i >> q) & 1 == 1 {
-                                phase *= -1.0;
+                            2 => {
+                                // Y
+                                target_idx ^= 1 << q;
+                                if (i >> q) & 1 == 0 {
+                                    phase *= num_complex::Complex64::i();
+                                } else {
+                                    phase *= -num_complex::Complex64::i();
+                                }
                             }
+                            3 => {
+                                // Z
+                                if (i >> q) & 1 == 1 {
+                                    phase *= -1.0;
+                                }
+                            }
+                            _ => {} // I
                         }
-                        _ => {} // I
                     }
+                    expval += (sv[i].conj() * phase * sv[target_idx]).re;
                 }
-                expval += (sv[i].conj() * phase * sv[target_idx]).re;
-            }
-            expval
-        }).collect()
+                expval
+            })
+            .collect()
     }
 
     /// Convert to a linear instruction list (topological order).
@@ -428,7 +446,12 @@ impl QuantumDAG {
     }
 
     /// High-performance MPS simulation and sampling.
-    pub fn sample_mps(&self, bond_dim: usize, shots: usize, seed: u64) -> std::collections::HashMap<String, usize> {
+    pub fn sample_mps(
+        &self,
+        bond_dim: usize,
+        shots: usize,
+        seed: u64,
+    ) -> std::collections::HashMap<String, usize> {
         let mut state = crate::mps::MPSState::new(self.n_qubits, bond_dim);
         self._evolve_into(&mut state);
         state.canonicalize_right();
@@ -537,7 +560,10 @@ impl QuantumDAG {
                 OpType::CNOT => format!("cx {}, {};", qubits_str[0], qubits_str[1]),
                 OpType::CZ => format!("cz {}, {};", qubits_str[0], qubits_str[1]),
                 OpType::SWAP => format!("swap {}, {};", qubits_str[0], qubits_str[1]),
-                OpType::CCX => format!("ccx {}, {}, {};", qubits_str[0], qubits_str[1], qubits_str[2]),
+                OpType::CCX => format!(
+                    "ccx {}, {}, {};",
+                    qubits_str[0], qubits_str[1], qubits_str[2]
+                ),
                 OpType::Measure => {
                     if let Some(&cbit) = op.classical_bits.first() {
                         format!("c[{cbit}] = measure {};", qubits_str[0])
@@ -558,10 +584,10 @@ impl QuantumDAG {
     }
 
     /// Convert the DAG to a full unitary matrix.
-    /// 
+    ///
     /// WARNING: This scales exponentially (2^n x 2^n). Avoid for n > 12.
     /// Convert the DAG to a full unitary matrix.
-    /// 
+    ///
     /// WARNING: This scales exponentially (2^n x 2^n). Avoid for n > 12.
     pub fn to_unitary(&self) -> nalgebra::DMatrix<num_complex::Complex64> {
         use nalgebra::DMatrix;
@@ -573,13 +599,17 @@ impl QuantumDAG {
         let order = self.topological_order();
         for &node_id in &order {
             let op = &self.graph[node_id];
-            if op.op_type.is_boundary() || op.op_type == OpType::Barrier { continue; }
-            
+            if op.op_type.is_boundary() || op.op_type == OpType::Barrier {
+                continue;
+            }
+
             let n_op = op.qubits.len();
-            if n_op == 0 { continue; }
+            if n_op == 0 {
+                continue;
+            }
 
             let gate_u = op.op_type.to_matrix();
-            
+
             // Optimization: build full unitary only if necessary
             let mut current_u = DMatrix::identity(dim, dim);
             if n_op == 1 {
@@ -641,12 +671,16 @@ impl QuantumDAG {
         let order = self.topological_order();
 
         // Pre-compute gate matrices and fuse consecutive 1q gates on the same qubit
-        let raw_ops: Vec<_> = order.iter()
+        let raw_ops: Vec<_> = order
+            .iter()
             .filter_map(|&node_id| {
-            let op = &self.graph[node_id];
-            if op.op_type.is_boundary() || op.op_type == OpType::Barrier || op.op_type.is_measurement() {
+                let op = &self.graph[node_id];
+                if op.op_type.is_boundary()
+                    || op.op_type == OpType::Barrier
+                    || op.op_type.is_measurement()
+                {
                     None
-            } else {
+                } else {
                     Some((op, op.op_type.to_matrix()))
                 }
             })
@@ -686,13 +720,16 @@ impl QuantumDAG {
                 let b = u11;
                 if use_par {
                     let chunk = (dim / 16).max(1024);
-                    state.par_chunks_mut(chunk).enumerate().for_each(|(c, chunk_s)| {
-                        let off = c * chunk;
-                        for (k, amp) in chunk_s.iter_mut().enumerate() {
-                            let coef = if ((off + k) & stride) == 0 { a } else { b };
-                            *amp = coef * *amp;
-                        }
-                    });
+                    state
+                        .par_chunks_mut(chunk)
+                        .enumerate()
+                        .for_each(|(c, chunk_s)| {
+                            let off = c * chunk;
+                            for (k, amp) in chunk_s.iter_mut().enumerate() {
+                                let coef = if ((off + k) & stride) == 0 { a } else { b };
+                                *amp = coef * *amp;
+                            }
+                        });
                 } else {
                     for i in 0..dim {
                         let coef = if (i & stride) == 0 { a } else { b };
@@ -703,7 +740,8 @@ impl QuantumDAG {
             }
 
             // X gate: swap pairs in-place (only if matrix is actually X)
-            let is_x = u00.norm() < 1e-14 && u11.norm() < 1e-14
+            let is_x = u00.norm() < 1e-14
+                && u11.norm() < 1e-14
                 && (u01 - num_complex::Complex64::new(1.0, 0.0)).norm() < 1e-14
                 && (u10 - num_complex::Complex64::new(1.0, 0.0)).norm() < 1e-14;
             if is_x {
@@ -712,13 +750,18 @@ impl QuantumDAG {
             }
 
             // General 1q gate: transform pairs (state[i], state[i+stride]) in-place
-            let u00r = u00.re; let u00i = u00.im;
-            let u01r = u01.re; let u01i = u01.im;
-            let u10r = u10.re; let u10i = u10.im;
-            let u11r = u11.re; let u11i = u11.im;
+            let u00r = u00.re;
+            let u00i = u00.im;
+            let u01r = u01.re;
+            let u01i = u01.im;
+            let u10r = u10.re;
+            let u10i = u10.im;
+            let u11r = u11.re;
+            let u11i = u11.im;
 
-            inplace_1q_general(state, stride, u00r, u00i, u01r, u01i, u10r, u10i, u11r, u11i, use_par);
-
+            inplace_1q_general(
+                state, stride, u00r, u00i, u01r, u01i, u10r, u10i, u11r, u11i, use_par,
+            );
         } else if op.qubits.len() == 2 {
             let q1 = op.qubits[0];
             let q2 = op.qubits[1];
@@ -740,26 +783,29 @@ impl QuantumDAG {
                 let g33 = gate_u[(3, 3)];
                 if use_par {
                     let chunk = (dim / 16).max(1024);
-                    state.par_chunks_mut(chunk).enumerate().for_each(|(c, chunk_s)| {
-                        let off = c * chunk;
-                        for (k, amp) in chunk_s.iter_mut().enumerate() {
-                            let i = off + k;
-                            let coef = match ((i & mq1) != 0, (i & mq2) != 0) {
-                                (false, false) => g00,
-                                (false, true)  => g11,
-                                (true,  false) => g22,
-                                (true,  true)  => g33,
-                            };
-                            *amp = coef * *amp;
-                        }
-                    });
+                    state
+                        .par_chunks_mut(chunk)
+                        .enumerate()
+                        .for_each(|(c, chunk_s)| {
+                            let off = c * chunk;
+                            for (k, amp) in chunk_s.iter_mut().enumerate() {
+                                let i = off + k;
+                                let coef = match ((i & mq1) != 0, (i & mq2) != 0) {
+                                    (false, false) => g00,
+                                    (false, true) => g11,
+                                    (true, false) => g22,
+                                    (true, true) => g33,
+                                };
+                                *amp = coef * *amp;
+                            }
+                        });
                 } else {
                     for i in 0..dim {
                         let coef = match ((i & mq1) != 0, (i & mq2) != 0) {
                             (false, false) => g00,
-                            (false, true)  => g11,
-                            (true,  false) => g22,
-                            (true,  true)  => g33,
+                            (false, true) => g11,
+                            (true, false) => g22,
+                            (true, true) => g33,
                         };
                         state[i] = coef * state[i];
                     }
@@ -768,19 +814,27 @@ impl QuantumDAG {
             }
 
             // General 2q gate: transform groups of 4 amplitudes in-place
-            let g00 = gate_u[(0, 0)]; let g01 = gate_u[(0, 1)];
-            let g02 = gate_u[(0, 2)]; let g03 = gate_u[(0, 3)];
-            let g10 = gate_u[(1, 0)]; let g11 = gate_u[(1, 1)];
-            let g12 = gate_u[(1, 2)]; let g13 = gate_u[(1, 3)];
-            let g20 = gate_u[(2, 0)]; let g21 = gate_u[(2, 1)];
-            let g22 = gate_u[(2, 2)]; let g23 = gate_u[(2, 3)];
-            let g30 = gate_u[(3, 0)]; let g31 = gate_u[(3, 1)];
-            let g32 = gate_u[(3, 2)]; let g33 = gate_u[(3, 3)];
+            let g00 = gate_u[(0, 0)];
+            let g01 = gate_u[(0, 1)];
+            let g02 = gate_u[(0, 2)];
+            let g03 = gate_u[(0, 3)];
+            let g10 = gate_u[(1, 0)];
+            let g11 = gate_u[(1, 1)];
+            let g12 = gate_u[(1, 2)];
+            let g13 = gate_u[(1, 3)];
+            let g20 = gate_u[(2, 0)];
+            let g21 = gate_u[(2, 1)];
+            let g22 = gate_u[(2, 2)];
+            let g23 = gate_u[(2, 3)];
+            let g30 = gate_u[(3, 0)];
+            let g31 = gate_u[(3, 1)];
+            let g32 = gate_u[(3, 2)];
+            let g33 = gate_u[(3, 3)];
 
-            inplace_2q_general(state, q1, q2, mq1, mq2,
-                g00, g01, g02, g03, g10, g11, g12, g13,
-                g20, g21, g22, g23, g30, g31, g32, g33, use_par);
-
+            inplace_2q_general(
+                state, q1, q2, mq1, mq2, g00, g01, g02, g03, g10, g11, g12, g13, g20, g21, g22,
+                g23, g30, g31, g32, g33, use_par,
+            );
         } else if op.qubits.len() == 3 {
             // CCX and CSWAP: swap pairs in-place where condition is met
             match op.op_type {
@@ -798,19 +852,27 @@ impl QuantumDAG {
                 }
                 _ => {
                     // General 3q: iterate over independent groups of 8
-                    let q1 = op.qubits[0]; let q2 = op.qubits[1]; let q3 = op.qubits[2];
+                    let q1 = op.qubits[0];
+                    let q2 = op.qubits[1];
+                    let q3 = op.qubits[2];
                     let qs = sorted_3(q1, q2, q3);
-                    let m0 = 1usize << qs[0]; let m1 = 1usize << qs[1]; let m2 = 1usize << qs[2];
+                    let m0 = 1usize << qs[0];
+                    let m1 = 1usize << qs[1];
+                    let m2 = 1usize << qs[2];
                     let n_groups = dim >> 3;
                     for g in 0..n_groups {
                         let base = deposit_bits_3(g, m0, m1, m2);
                         let mut vals = [num_complex::Complex64::new(0.0, 0.0); 8];
                         for col in 0..8usize {
-                            let b1 = (col >> 2) & 1; let b2 = (col >> 1) & 1; let b3 = col & 1;
+                            let b1 = (col >> 2) & 1;
+                            let b2 = (col >> 1) & 1;
+                            let b3 = col & 1;
                             vals[col] = state[base | (b1 << q1) | (b2 << q2) | (b3 << q3)];
                         }
                         for row in 0..8usize {
-                            let b1 = (row >> 2) & 1; let b2 = (row >> 1) & 1; let b3 = row & 1;
+                            let b1 = (row >> 2) & 1;
+                            let b2 = (row >> 1) & 1;
+                            let b3 = row & 1;
                             let idx = base | (b1 << q1) | (b2 << q2) | (b3 << q3);
                             let mut acc = num_complex::Complex64::new(0.0, 0.0);
                             for col in 0..8usize {
@@ -833,30 +895,52 @@ impl QuantumDAG {
     ) {
         let gate_u = op.op_type.to_matrix();
         if op.qubits.len() == 2 {
-                    let q1 = op.qubits[0];
-                    let q2 = op.qubits[1];
+            let q1 = op.qubits[0];
+            let q2 = op.qubits[1];
             let mq1 = 1usize << q1;
             let mq2 = 1usize << q2;
             let dim = src.len();
             for i in 0..dim {
-                        let bit1 = (i >> q1) & 1;
-                        let bit2 = (i >> q2) & 1;
+                let bit1 = (i >> q1) & 1;
+                let bit2 = (i >> q2) & 1;
                 let i00 = i & !mq1 & !mq2;
                 let i01 = i00 | mq2;
                 let i10 = i00 | mq1;
                 let i11 = i00 | mq1 | mq2;
                 dst[i] = match bit1 * 2 + bit2 {
-                    0 => gate_u[(0, 0)] * src[i00] + gate_u[(0, 1)] * src[i01] + gate_u[(0, 2)] * src[i10] + gate_u[(0, 3)] * src[i11],
-                    1 => gate_u[(1, 0)] * src[i00] + gate_u[(1, 1)] * src[i01] + gate_u[(1, 2)] * src[i10] + gate_u[(1, 3)] * src[i11],
-                    2 => gate_u[(2, 0)] * src[i00] + gate_u[(2, 1)] * src[i01] + gate_u[(2, 2)] * src[i10] + gate_u[(2, 3)] * src[i11],
-                    _ => gate_u[(3, 0)] * src[i00] + gate_u[(3, 1)] * src[i01] + gate_u[(3, 2)] * src[i10] + gate_u[(3, 3)] * src[i11],
+                    0 => {
+                        gate_u[(0, 0)] * src[i00]
+                            + gate_u[(0, 1)] * src[i01]
+                            + gate_u[(0, 2)] * src[i10]
+                            + gate_u[(0, 3)] * src[i11]
+                    }
+                    1 => {
+                        gate_u[(1, 0)] * src[i00]
+                            + gate_u[(1, 1)] * src[i01]
+                            + gate_u[(1, 2)] * src[i10]
+                            + gate_u[(1, 3)] * src[i11]
+                    }
+                    2 => {
+                        gate_u[(2, 0)] * src[i00]
+                            + gate_u[(2, 1)] * src[i01]
+                            + gate_u[(2, 2)] * src[i10]
+                            + gate_u[(2, 3)] * src[i11]
+                    }
+                    _ => {
+                        gate_u[(3, 0)] * src[i00]
+                            + gate_u[(3, 1)] * src[i01]
+                            + gate_u[(3, 2)] * src[i10]
+                            + gate_u[(3, 3)] * src[i11]
+                    }
                 };
             }
         } else if op.qubits.len() == 1 {
             let t = op.qubits[0];
             let stride = 1usize << t;
-            let u00 = gate_u[(0, 0)]; let u01 = gate_u[(0, 1)];
-            let u10 = gate_u[(1, 0)]; let u11 = gate_u[(1, 1)];
+            let u00 = gate_u[(0, 0)];
+            let u01 = gate_u[(0, 1)];
+            let u10 = gate_u[(1, 0)];
+            let u11 = gate_u[(1, 1)];
             for i in 0..src.len() {
                 let partner = i ^ stride;
                 if (i & stride) == 0 {
@@ -888,10 +972,7 @@ impl QuantumDAG {
                     Err("GPU support not compiled. Rebuild with --features gpu".to_string())
                 }
             }
-            other => Err(format!(
-                "Unknown device '{}'. Use 'cpu' or 'gpu'.",
-                other
-            )),
+            other => Err(format!("Unknown device '{}'. Use 'cpu' or 'gpu'.", other)),
         }
     }
 
@@ -916,9 +997,8 @@ impl QuantumDAG {
             let qubits: Vec<usize> = op.qubits.iter().map(|&q| q).collect();
             let n = mat.nrows();
 
-            let is_diagonal = n == 2 && {
-                mat[(0, 1)].norm() < 1e-15 && mat[(1, 0)].norm() < 1e-15
-            };
+            let is_diagonal =
+                n == 2 && { mat[(0, 1)].norm() < 1e-15 && mat[(1, 0)].norm() < 1e-15 };
 
             let (matrix_re, matrix_im) = if is_diagonal && n == 2 {
                 (
@@ -947,9 +1027,7 @@ impl QuantumDAG {
         }
 
         sf_gpu::simulate_statevector(self.n_qubits, &gates).map_err(|e| match e {
-            GpuError::NotAvailable => {
-                "No CUDA GPU detected. Use device='cpu'.".to_string()
-            }
+            GpuError::NotAvailable => "No CUDA GPU detected. Use device='cpu'.".to_string(),
             GpuError::InsufficientVram {
                 n_qubits,
                 required_mb,
@@ -990,7 +1068,7 @@ unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
 impl SendPtr {
-#[inline(always)]
+    #[inline(always)]
     unsafe fn get(&self, idx: usize) -> num_complex::Complex64 {
         *self.0.add(idx)
     }
@@ -1013,15 +1091,21 @@ pub fn apply_2x2_kernel_f64(
     hi_src: &[num_complex::Complex64],
     lo_dst: &mut [num_complex::Complex64],
     hi_dst: &mut [num_complex::Complex64],
-    u00r: f64, u00i: f64,
-    u01r: f64, u01i: f64,
-    u10r: f64, u10i: f64,
-    u11r: f64, u11i: f64,
+    u00r: f64,
+    u00i: f64,
+    u01r: f64,
+    u01i: f64,
+    u10r: f64,
+    u10i: f64,
+    u11r: f64,
+    u11i: f64,
 ) {
     let n = lo_src.len();
     for i in 0..n {
-        let ar = lo_src[i].re; let ai = lo_src[i].im;
-        let br = hi_src[i].re; let bi = hi_src[i].im;
+        let ar = lo_src[i].re;
+        let ai = lo_src[i].im;
+        let br = hi_src[i].re;
+        let bi = hi_src[i].im;
         lo_dst[i] = num_complex::Complex64::new(
             u00r * ar - u00i * ai + u01r * br - u01i * bi,
             u00r * ai + u00i * ar + u01r * bi + u01i * br,
@@ -1044,7 +1128,9 @@ fn inplace_swap_pairs(state: &mut [num_complex::Complex64], stride: usize, use_p
         (0..n_groups).into_par_iter().for_each(|g| {
             let base = g * block;
             for k in 0..stride {
-                unsafe { sp.swap(base + k, base + k + stride); }
+                unsafe {
+                    sp.swap(base + k, base + k + stride);
+                }
             }
         });
     } else {
@@ -1067,7 +1153,9 @@ fn inplace_cnot(state: &mut [num_complex::Complex64], ctrl: usize, tgt: usize, u
         let sp = SendPtr(state.as_mut_ptr());
         (0..dim).into_par_iter().for_each(|i| {
             if (i & mc) != 0 && (i & mt) == 0 {
-                unsafe { sp.swap(i, i | mt); }
+                unsafe {
+                    sp.swap(i, i | mt);
+                }
             }
         });
     } else {
@@ -1083,8 +1171,14 @@ fn inplace_cnot(state: &mut [num_complex::Complex64], ctrl: usize, tgt: usize, u
 fn inplace_1q_general(
     state: &mut [num_complex::Complex64],
     stride: usize,
-    u00r: f64, u00i: f64, u01r: f64, u01i: f64,
-    u10r: f64, u10i: f64, u11r: f64, u11i: f64,
+    u00r: f64,
+    u00i: f64,
+    u01r: f64,
+    u01i: f64,
+    u10r: f64,
+    u10i: f64,
+    u11r: f64,
+    u11i: f64,
     use_par: bool,
 ) {
     let dim = state.len();
@@ -1101,16 +1195,24 @@ fn inplace_1q_general(
                 unsafe {
                     let lo = sp.get(lo_idx);
                     let hi = sp.get(hi_idx);
-                    let ar = lo.re; let ai = lo.im;
-                    let br = hi.re; let bi = hi.im;
-                    sp.set(lo_idx, num_complex::Complex64::new(
-                        u00r * ar - u00i * ai + u01r * br - u01i * bi,
-                        u00r * ai + u00i * ar + u01r * bi + u01i * br,
-                    ));
-                    sp.set(hi_idx, num_complex::Complex64::new(
-                        u10r * ar - u10i * ai + u11r * br - u11i * bi,
-                        u10r * ai + u10i * ar + u11r * bi + u11i * br,
-                    ));
+                    let ar = lo.re;
+                    let ai = lo.im;
+                    let br = hi.re;
+                    let bi = hi.im;
+                    sp.set(
+                        lo_idx,
+                        num_complex::Complex64::new(
+                            u00r * ar - u00i * ai + u01r * br - u01i * bi,
+                            u00r * ai + u00i * ar + u01r * bi + u01i * br,
+                        ),
+                    );
+                    sp.set(
+                        hi_idx,
+                        num_complex::Complex64::new(
+                            u10r * ar - u10i * ai + u11r * br - u11i * bi,
+                            u10r * ai + u10i * ar + u11r * bi + u11i * br,
+                        ),
+                    );
                 }
             }
         });
@@ -1122,8 +1224,10 @@ fn inplace_1q_general(
                 let hi_idx = lo_idx + stride;
                 let lo = state[lo_idx];
                 let hi = state[hi_idx];
-                let ar = lo.re; let ai = lo.im;
-                let br = hi.re; let bi = hi.im;
+                let ar = lo.re;
+                let ai = lo.im;
+                let br = hi.re;
+                let bi = hi.im;
 
                 state[lo_idx] = num_complex::Complex64::new(
                     u00r * ar - u00i * ai + u01r * br - u01i * bi,
@@ -1142,15 +1246,26 @@ fn inplace_1q_general(
 #[allow(clippy::too_many_arguments)]
 fn inplace_2q_general(
     state: &mut [num_complex::Complex64],
-    q1: usize, q2: usize, mq1: usize, mq2: usize,
-    g00: num_complex::Complex64, g01: num_complex::Complex64,
-    g02: num_complex::Complex64, g03: num_complex::Complex64,
-    g10: num_complex::Complex64, g11: num_complex::Complex64,
-    g12: num_complex::Complex64, g13: num_complex::Complex64,
-    g20: num_complex::Complex64, g21: num_complex::Complex64,
-    g22: num_complex::Complex64, g23: num_complex::Complex64,
-    g30: num_complex::Complex64, g31: num_complex::Complex64,
-    g32: num_complex::Complex64, g33: num_complex::Complex64,
+    q1: usize,
+    q2: usize,
+    mq1: usize,
+    mq2: usize,
+    g00: num_complex::Complex64,
+    g01: num_complex::Complex64,
+    g02: num_complex::Complex64,
+    g03: num_complex::Complex64,
+    g10: num_complex::Complex64,
+    g11: num_complex::Complex64,
+    g12: num_complex::Complex64,
+    g13: num_complex::Complex64,
+    g20: num_complex::Complex64,
+    g21: num_complex::Complex64,
+    g22: num_complex::Complex64,
+    g23: num_complex::Complex64,
+    g30: num_complex::Complex64,
+    g31: num_complex::Complex64,
+    g32: num_complex::Complex64,
+    g33: num_complex::Complex64,
     use_par: bool,
 ) {
     let dim = state.len();
@@ -1199,13 +1314,21 @@ fn inplace_2q_general(
 }
 
 /// CCX (Toffoli) in-place: swap state[i] and state[i|mt] where both controls set and target=0.
-fn inplace_ccx(state: &mut [num_complex::Complex64], mc1: usize, mc2: usize, mt: usize, use_par: bool) {
+fn inplace_ccx(
+    state: &mut [num_complex::Complex64],
+    mc1: usize,
+    mc2: usize,
+    mt: usize,
+    use_par: bool,
+) {
     let dim = state.len();
     if use_par {
         let sp = SendPtr(state.as_mut_ptr());
         (0..dim).into_par_iter().for_each(|i| {
             if (i & mc1) != 0 && (i & mc2) != 0 && (i & mt) == 0 {
-                unsafe { sp.swap(i, i | mt); }
+                unsafe {
+                    sp.swap(i, i | mt);
+                }
             }
         });
     } else {
@@ -1218,13 +1341,21 @@ fn inplace_ccx(state: &mut [num_complex::Complex64], mc1: usize, mc2: usize, mt:
 }
 
 /// CSWAP in-place: swap target bits when control is set.
-fn inplace_cswap(state: &mut [num_complex::Complex64], mc: usize, mt1: usize, mt2: usize, use_par: bool) {
+fn inplace_cswap(
+    state: &mut [num_complex::Complex64],
+    mc: usize,
+    mt1: usize,
+    mt2: usize,
+    use_par: bool,
+) {
     let dim = state.len();
     if use_par {
         let sp = SendPtr(state.as_mut_ptr());
         (0..dim).into_par_iter().for_each(|i| {
             if (i & mc) != 0 && (i & mt1) != 0 && (i & mt2) == 0 {
-                unsafe { sp.swap(i, (i ^ mt1) | mt2); }
+                unsafe {
+                    sp.swap(i, (i ^ mt1) | mt2);
+                }
             }
         });
     } else {
@@ -1261,15 +1392,23 @@ fn deposit_bits_2(g: usize, m_lo: usize, m_hi: usize) -> usize {
 /// This reduces gate count by 30-50% on typical variational circuits
 /// (H-Rz-CNOT-Rz patterns) without rebuilding the DAG.
 fn fuse_1q_sequence<'a>(
-    ops: &[(&'a crate::dag::QuantumOp, nalgebra::DMatrix<num_complex::Complex64>)],
+    ops: &[(
+        &'a crate::dag::QuantumOp,
+        nalgebra::DMatrix<num_complex::Complex64>,
+    )],
     n_qubits: usize,
-) -> Vec<(&'a crate::dag::QuantumOp, nalgebra::DMatrix<num_complex::Complex64>)> {
+) -> Vec<(
+    &'a crate::dag::QuantumOp,
+    nalgebra::DMatrix<num_complex::Complex64>,
+)> {
     use nalgebra::DMatrix;
     use num_complex::Complex64;
 
     // Per-qubit accumulator: Option<(first_op_ref, fused_2x2_matrix)>
-    let mut accum: Vec<Option<(&'a crate::dag::QuantumOp, DMatrix<Complex64>)>> = vec![None; n_qubits];
-    let mut result: Vec<(&'a crate::dag::QuantumOp, DMatrix<Complex64>)> = Vec::with_capacity(ops.len());
+    let mut accum: Vec<Option<(&'a crate::dag::QuantumOp, DMatrix<Complex64>)>> =
+        vec![None; n_qubits];
+    let mut result: Vec<(&'a crate::dag::QuantumOp, DMatrix<Complex64>)> =
+        Vec::with_capacity(ops.len());
 
     let is_identity_2x2 = |m: &DMatrix<Complex64>| -> bool {
         let d00 = (m[(0, 0)] - Complex64::new(1.0, 0.0)).norm();
@@ -1334,14 +1473,14 @@ fn deposit_bits_3(g: usize, m0: usize, m1: usize, m2: usize) -> usize {
     (y & mask2) | ((y & !mask2) << 1)
 }
 
-
 fn kronecker(
     a: &nalgebra::DMatrix<num_complex::Complex64>,
     b: &nalgebra::DMatrix<num_complex::Complex64>,
 ) -> nalgebra::DMatrix<num_complex::Complex64> {
     let (ra, ca) = a.shape();
     let (rb, cb) = b.shape();
-    let mut res = nalgebra::DMatrix::from_element(ra * rb, ca * cb, num_complex::Complex64::new(0.0, 0.0));
+    let mut res =
+        nalgebra::DMatrix::from_element(ra * rb, ca * cb, num_complex::Complex64::new(0.0, 0.0));
 
     for i in 0..ra {
         for j in 0..ca {
@@ -1461,7 +1600,10 @@ mod tests {
     fn test_parameterized_circuit() {
         let mut dag = QuantumDAG::new(1, 0);
         dag.add_op(
-            OpType::Rx(Parameter::Variable { name: "theta".into(), id: 0 }),
+            OpType::Rx(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
             &[0],
         );
         assert_eq!(dag.n_parameters(), 1);
@@ -1472,7 +1614,10 @@ mod tests {
     fn test_bind_parameters() {
         let mut dag = QuantumDAG::new(1, 0);
         dag.add_op(
-            OpType::Rx(Parameter::Variable { name: "theta".into(), id: 0 }),
+            OpType::Rx(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
             &[0],
         );
 
@@ -1506,9 +1651,9 @@ mod tests {
     fn test_complex_circuit_depth() {
         // Build: H(0), H(1), CNOT(0,1), Rx(0), Ry(1)
         let mut dag = QuantumDAG::new(2, 0);
-        dag.add_op(OpType::H, &[0]);           // depth 1 on q0
-        dag.add_op(OpType::H, &[1]);           // depth 1 on q1 (parallel)
-        dag.add_op(OpType::CNOT, &[0, 1]);     // depth 2 (depends on both H's)
+        dag.add_op(OpType::H, &[0]); // depth 1 on q0
+        dag.add_op(OpType::H, &[1]); // depth 1 on q1 (parallel)
+        dag.add_op(OpType::CNOT, &[0, 1]); // depth 2 (depends on both H's)
         dag.add_op(OpType::Rx(Parameter::Const(0.5)), &[0]); // depth 3
         dag.add_op(OpType::Ry(Parameter::Const(0.7)), &[1]); // depth 3 (parallel with Rx)
 
@@ -1592,7 +1737,10 @@ mod tests {
         let mut dag = QuantumDAG::new(3, 0);
         dag.add_op(OpType::H, &[0]);
         dag.add_op(OpType::H, &[1]);
-        dag.add_op(OpType::Rz(Parameter::Const(std::f64::consts::PI / 4.0)), &[0]);
+        dag.add_op(
+            OpType::Rz(Parameter::Const(std::f64::consts::PI / 4.0)),
+            &[0],
+        );
         dag.add_op(OpType::CZ, &[0, 1]);
         dag.add_op(OpType::S, &[2]);
 

@@ -66,7 +66,7 @@ impl CouplingMap {
         // For a basic heavy-hex, create a grid with extra connector qubits
         // This is a simplified approximation
         let cols = (n_qubits as f64).sqrt().ceil() as usize;
-        let rows = (n_qubits + cols - 1) / cols;
+        let rows = n_qubits.div_ceil(cols);
         let _actual_n = rows * cols;
         let mut edges = Vec::new();
 

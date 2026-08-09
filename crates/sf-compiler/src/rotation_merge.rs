@@ -4,10 +4,10 @@
 //! Rx(α) · Rx(β) → Rx(α+β)
 //! If merged angle is 0 (mod 2π), the gate is eliminated entirely.
 
-use sf_ir::{OpType, QuantumDAG, WireType};
-use crate::{Pass, CompilerError};
-use petgraph::Direction;
+use crate::{CompilerError, Pass};
 use petgraph::visit::EdgeRef;
+use petgraph::Direction;
+use sf_ir::{OpType, QuantumDAG, WireType};
 use std::f64::consts::PI;
 
 pub struct RotationMergingPass;
@@ -143,11 +143,13 @@ impl Pass for RotationMergingPass {
                                 .map(|e| e.target())
                                 .unwrap();
 
-                            let new_node = dag.graph_mut().add_node(
-                                sf_ir::QuantumOp::new(merged, &[qubit]),
-                            );
-                            dag.graph_mut().add_edge(pred, new_node, WireType::Qubit(qubit));
-                            dag.graph_mut().add_edge(new_node, succ, WireType::Qubit(qubit));
+                            let new_node = dag
+                                .graph_mut()
+                                .add_node(sf_ir::QuantumOp::new(merged, &[qubit]));
+                            dag.graph_mut()
+                                .add_edge(pred, new_node, WireType::Qubit(qubit));
+                            dag.graph_mut()
+                                .add_edge(new_node, succ, WireType::Qubit(qubit));
 
                             dag.graph_mut().remove_node(node_id);
                             dag.graph_mut().remove_node(next);

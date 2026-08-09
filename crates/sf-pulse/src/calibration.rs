@@ -1,7 +1,7 @@
 //! Gate calibration — mapping quantum gates to calibrated pulse schedules.
 
+use crate::schedule::{ChannelId, PulseSchedule};
 use crate::waveforms::PulseEnvelope;
-use crate::schedule::{PulseSchedule, ChannelId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

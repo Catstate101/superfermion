@@ -21,7 +21,12 @@ impl ClassicalRegister {
     }
 
     pub fn get(&self, index: usize) -> u8 {
-        assert!(index < self.size, "Classical bit index {} out of range (size {})", index, self.size);
+        assert!(
+            index < self.size,
+            "Classical bit index {} out of range (size {})",
+            index,
+            self.size
+        );
         self.values[index]
     }
 
@@ -92,7 +97,10 @@ impl ClassicalRegFile {
 
     /// Read an entire register by name.
     pub fn read_register(&self, name: &str) -> Option<u64> {
-        self.registers.iter().find(|r| r.name == name).map(|r| r.read_int())
+        self.registers
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.read_int())
     }
 }
 

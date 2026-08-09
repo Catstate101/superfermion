@@ -1,7 +1,7 @@
-use sf_ir::{OpType, QuantumDAG};
-use crate::{Pass, CompilerError};
+use crate::{CompilerError, Pass};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
+use sf_ir::{OpType, QuantumDAG};
 
 /// Cancels adjacent pairs of self-inverse gates on the same qubits.
 ///
@@ -50,7 +50,8 @@ impl GateCancellationPass {
     ) -> bool {
         let qubits = &dag.graph()[n1].qubits;
         for &q in qubits.iter() {
-            let succ_on_q = dag.graph()
+            let succ_on_q = dag
+                .graph()
                 .edges_directed(n1, Direction::Outgoing)
                 .find(|e| *e.weight() == sf_ir::WireType::Qubit(q))
                 .map(|e| e.target());
@@ -96,7 +97,9 @@ impl Pass for GateCancellationPass {
 
                         if self.can_cancel(&op1, op2, &qubits1, &qubits2) {
                             // For multi-qubit gates, verify adjacency on ALL qubits
-                            if qubits1.len() > 1 && !self.are_adjacent_on_all_qubits(dag, node_id, next_node) {
+                            if qubits1.len() > 1
+                                && !self.are_adjacent_on_all_qubits(dag, node_id, next_node)
+                            {
                                 continue;
                             }
 
@@ -118,19 +121,31 @@ impl Pass for GateCancellationPass {
 }
 
 impl GateCancellationPass {
-    fn remove_pair(&self, dag: &mut QuantumDAG, n1: petgraph::prelude::NodeIndex, n2: petgraph::prelude::NodeIndex) {
+    fn remove_pair(
+        &self,
+        dag: &mut QuantumDAG,
+        n1: petgraph::prelude::NodeIndex,
+        n2: petgraph::prelude::NodeIndex,
+    ) {
         let qubits: Vec<usize> = dag.graph()[n1].qubits.to_vec();
 
         for q in qubits {
-            let pred = dag.graph().edges_directed(n1, Direction::Incoming)
+            let pred = dag
+                .graph()
+                .edges_directed(n1, Direction::Incoming)
                 .find(|e| *e.weight() == sf_ir::WireType::Qubit(q))
-                .unwrap().source();
+                .unwrap()
+                .source();
 
-            let succ = dag.graph().edges_directed(n2, Direction::Outgoing)
+            let succ = dag
+                .graph()
+                .edges_directed(n2, Direction::Outgoing)
                 .find(|e| *e.weight() == sf_ir::WireType::Qubit(q))
-                .unwrap().target();
+                .unwrap()
+                .target();
 
-            dag.graph_mut().add_edge(pred, succ, sf_ir::WireType::Qubit(q));
+            dag.graph_mut()
+                .add_edge(pred, succ, sf_ir::WireType::Qubit(q));
         }
 
         dag.graph_mut().remove_node(n1);
@@ -231,7 +246,11 @@ mod tests {
         dag.add_op(OpType::CNOT, &[0, 1]);
 
         GateCancellationPass::new().run(&mut dag).unwrap();
-        assert_eq!(dag.gate_count(), 3, "Intervening H should prevent cancellation");
+        assert_eq!(
+            dag.gate_count(),
+            3,
+            "Intervening H should prevent cancellation"
+        );
     }
 
     #[test]

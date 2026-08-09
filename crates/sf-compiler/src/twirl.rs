@@ -7,13 +7,13 @@
 //! The twirl condition: P_after · G = G · P_before
 //! For CNOT/CZ gates, there are 16 valid Pauli pairs (P_before, P_after).
 
-use sf_ir::{OpType, QuantumDAG, QuantumOp, WireType};
-use crate::{Pass, CompilerError};
-use petgraph::Direction;
+use crate::{CompilerError, Pass};
 use petgraph::visit::EdgeRef;
+use petgraph::Direction;
 use rand::rngs::StdRng;
-use rand::SeedableRng;
 use rand::Rng;
+use rand::SeedableRng;
+use sf_ir::{OpType, QuantumDAG, QuantumOp, WireType};
 use std::cell::RefCell;
 
 /// 14 valid CNOT twirl pairs: (P1_before, P2_before, P1_after, P2_after)
@@ -190,13 +190,10 @@ fn replace_node_with_gates(
     // Insert new gates
     let mut current_preds = preds;
     for (new_op, qs) in gates {
-        let new_node = dag
-            .graph_mut()
-            .add_node(QuantumOp::new(new_op.clone(), qs));
+        let new_node = dag.graph_mut().add_node(QuantumOp::new(new_op.clone(), qs));
         for &q in qs {
             if let Some(&p) = current_preds.get(&q) {
-                dag.graph_mut()
-                    .add_edge(p, new_node, WireType::Qubit(q));
+                dag.graph_mut().add_edge(p, new_node, WireType::Qubit(q));
             }
             current_preds.insert(q, new_node);
         }

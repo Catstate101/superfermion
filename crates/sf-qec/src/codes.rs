@@ -5,14 +5,17 @@ use serde::{Deserialize, Serialize};
 /// Pauli operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pauli {
-    I, X, Y, Z,
+    I,
+    X,
+    Y,
+    Z,
 }
 
 /// A stabilizer generator: product of Paulis on data qubits.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stabilizer {
     pub paulis: Vec<(usize, Pauli)>, // (qubit_index, pauli)
-    pub ancilla: usize,               // ancilla qubit used for measurement
+    pub ancilla: usize,              // ancilla qubit used for measurement
 }
 
 /// Trait for stabilizer codes.
@@ -48,14 +51,30 @@ impl RepetitionCode {
 }
 
 impl StabilizerCode for RepetitionCode {
-    fn name(&self) -> &str { "RepetitionCode" }
-    fn n_data(&self) -> usize { self.n }
-    fn n_ancilla(&self) -> usize { self.n - 1 }
-    fn n_logical(&self) -> usize { 1 }
-    fn distance(&self) -> usize { self.n }
-    fn stabilizers(&self) -> &[Stabilizer] { &self.stabilizers }
-    fn x_stabilizers(&self) -> Vec<&Stabilizer> { vec![] }
-    fn z_stabilizers(&self) -> Vec<&Stabilizer> { self.stabilizers.iter().collect() }
+    fn name(&self) -> &str {
+        "RepetitionCode"
+    }
+    fn n_data(&self) -> usize {
+        self.n
+    }
+    fn n_ancilla(&self) -> usize {
+        self.n - 1
+    }
+    fn n_logical(&self) -> usize {
+        1
+    }
+    fn distance(&self) -> usize {
+        self.n
+    }
+    fn stabilizers(&self) -> &[Stabilizer] {
+        &self.stabilizers
+    }
+    fn x_stabilizers(&self) -> Vec<&Stabilizer> {
+        vec![]
+    }
+    fn z_stabilizers(&self) -> Vec<&Stabilizer> {
+        self.stabilizers.iter().collect()
+    }
 }
 
 /// Steane code [[7, 1, 3]] — smallest CSS code.
@@ -69,11 +88,7 @@ impl SteaneCode {
         // [[7,1,3]] stabilizers
         // X stabilizers: X on qubits {0,1,2,3}, {0,1,4,5}, {0,2,4,6}
         // Z stabilizers: Z on same sets
-        let x_sets = vec![
-            vec![0, 1, 2, 3],
-            vec![0, 1, 4, 5],
-            vec![0, 2, 4, 6],
-        ];
+        let x_sets = vec![vec![0, 1, 2, 3], vec![0, 1, 4, 5], vec![0, 2, 4, 6]];
         let z_sets = x_sets.clone();
 
         let mut stabilizers = Vec::new();
@@ -95,12 +110,24 @@ impl SteaneCode {
 }
 
 impl StabilizerCode for SteaneCode {
-    fn name(&self) -> &str { "SteaneCode" }
-    fn n_data(&self) -> usize { 7 }
-    fn n_ancilla(&self) -> usize { 6 }
-    fn n_logical(&self) -> usize { 1 }
-    fn distance(&self) -> usize { 3 }
-    fn stabilizers(&self) -> &[Stabilizer] { &self.stabilizers }
+    fn name(&self) -> &str {
+        "SteaneCode"
+    }
+    fn n_data(&self) -> usize {
+        7
+    }
+    fn n_ancilla(&self) -> usize {
+        6
+    }
+    fn n_logical(&self) -> usize {
+        1
+    }
+    fn distance(&self) -> usize {
+        3
+    }
+    fn stabilizers(&self) -> &[Stabilizer] {
+        &self.stabilizers
+    }
     fn x_stabilizers(&self) -> Vec<&Stabilizer> {
         self.stabilizers[..3].iter().collect()
     }
@@ -123,7 +150,10 @@ pub struct SurfaceCode {
 
 impl SurfaceCode {
     pub fn new(distance: usize) -> Self {
-        assert!(distance >= 3 && distance % 2 == 1, "Distance must be odd >= 3");
+        assert!(
+            distance >= 3 && distance % 2 == 1,
+            "Distance must be odd >= 3"
+        );
 
         let d = distance;
         let n_data = d * d;
@@ -184,10 +214,7 @@ impl SurfaceCode {
         // Bottom boundary
         for c in (1..d - 1).step_by(2) {
             stabilizers.push(Stabilizer {
-                paulis: vec![
-                    ((d - 1) * d + c, Pauli::Z),
-                    ((d - 1) * d + c + 1, Pauli::Z),
-                ],
+                paulis: vec![((d - 1) * d + c, Pauli::Z), ((d - 1) * d + c + 1, Pauli::Z)],
                 ancilla: ancilla_idx,
             });
             ancilla_idx += 1;
@@ -203,12 +230,24 @@ impl SurfaceCode {
 }
 
 impl StabilizerCode for SurfaceCode {
-    fn name(&self) -> &str { "SurfaceCode" }
-    fn n_data(&self) -> usize { self.n_data }
-    fn n_ancilla(&self) -> usize { self.n_ancilla }
-    fn n_logical(&self) -> usize { 1 }
-    fn distance(&self) -> usize { self.distance }
-    fn stabilizers(&self) -> &[Stabilizer] { &self.stabilizers }
+    fn name(&self) -> &str {
+        "SurfaceCode"
+    }
+    fn n_data(&self) -> usize {
+        self.n_data
+    }
+    fn n_ancilla(&self) -> usize {
+        self.n_ancilla
+    }
+    fn n_logical(&self) -> usize {
+        1
+    }
+    fn distance(&self) -> usize {
+        self.distance
+    }
+    fn stabilizers(&self) -> &[Stabilizer] {
+        &self.stabilizers
+    }
     fn x_stabilizers(&self) -> Vec<&Stabilizer> {
         self.stabilizers
             .iter()
@@ -262,4 +301,5 @@ mod tests {
         assert_eq!(code.distance(), 5);
     }
 }
-pub mod ldpc; pub mod bivariate;
+pub mod bivariate;
+pub mod ldpc;

@@ -22,14 +22,30 @@ impl LDPCCode {
 }
 
 impl StabilizerCode for LDPCCode {
-    fn name(&self) -> &str { &self.name }
-    fn n_data(&self) -> usize { self.n }
-    fn n_ancilla(&self) -> usize { self.n - self.k }
-    fn n_logical(&self) -> usize { self.k }
-    fn distance(&self) -> usize { self.d }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn n_data(&self) -> usize {
+        self.n
+    }
+    fn n_ancilla(&self) -> usize {
+        self.n - self.k
+    }
+    fn n_logical(&self) -> usize {
+        self.k
+    }
+    fn distance(&self) -> usize {
+        self.d
+    }
     // TODO: Populate stabilizers from Tanner graph. Currently returns empty —
     // LDPC code construction from parity-check matrix is not yet implemented.
-    fn stabilizers(&self) -> &[crate::codes::Stabilizer] { &self.stabilizers }
-    fn x_stabilizers(&self) -> Vec<&crate::codes::Stabilizer> { vec![] }
-    fn z_stabilizers(&self) -> Vec<&crate::codes::Stabilizer> { vec![] }
+    fn stabilizers(&self) -> &[crate::codes::Stabilizer] {
+        &self.stabilizers
+    }
+    fn x_stabilizers(&self) -> Vec<&crate::codes::Stabilizer> {
+        vec![]
+    }
+    fn z_stabilizers(&self) -> Vec<&crate::codes::Stabilizer> {
+        vec![]
+    }
 }

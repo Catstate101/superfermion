@@ -55,13 +55,20 @@ fn get_param_name(op: &OpType) -> Option<String> {
 
 // ─── In-place gate application (no allocation) ─────────────────────────
 
-fn apply_1q_inplace(state: &mut [Complex64], u: [[Complex64; 2]; 2], target: usize, n_qubits: usize) {
+fn apply_1q_inplace(
+    state: &mut [Complex64],
+    u: [[Complex64; 2]; 2],
+    target: usize,
+    n_qubits: usize,
+) {
     let half = 1usize << target;
     let block = half * 2;
     let dim = 1usize << n_qubits;
     let n_blocks = dim / block;
-    let u00 = u[0][0]; let u01 = u[0][1];
-    let u10 = u[1][0]; let u11 = u[1][1];
+    let u00 = u[0][0];
+    let u01 = u[0][1];
+    let u10 = u[1][0];
+    let u11 = u[1][1];
 
     for b in 0..n_blocks {
         let off = b * block;
@@ -74,7 +81,13 @@ fn apply_1q_inplace(state: &mut [Complex64], u: [[Complex64; 2]; 2], target: usi
     }
 }
 
-fn apply_2q_inplace(state: &mut [Complex64], gate: [[Complex64; 4]; 4], q1: usize, q2: usize, n_qubits: usize) {
+fn apply_2q_inplace(
+    state: &mut [Complex64],
+    gate: [[Complex64; 4]; 4],
+    q1: usize,
+    q2: usize,
+    n_qubits: usize,
+) {
     let dim = 1usize << n_qubits;
     let mq1 = 1usize << q1;
     let mq2 = 1usize << q2;
@@ -91,10 +104,10 @@ fn apply_2q_inplace(state: &mut [Complex64], gate: [[Complex64; 4]; 4], q1: usiz
         let i11 = i00 | mq1 | mq2;
 
         let s = [state[i00], state[i01], state[i10], state[i11]];
-        state[i00] = gate[0][0]*s[0] + gate[0][1]*s[1] + gate[0][2]*s[2] + gate[0][3]*s[3];
-        state[i01] = gate[1][0]*s[0] + gate[1][1]*s[1] + gate[1][2]*s[2] + gate[1][3]*s[3];
-        state[i10] = gate[2][0]*s[0] + gate[2][1]*s[1] + gate[2][2]*s[2] + gate[2][3]*s[3];
-        state[i11] = gate[3][0]*s[0] + gate[3][1]*s[1] + gate[3][2]*s[2] + gate[3][3]*s[3];
+        state[i00] = gate[0][0] * s[0] + gate[0][1] * s[1] + gate[0][2] * s[2] + gate[0][3] * s[3];
+        state[i01] = gate[1][0] * s[0] + gate[1][1] * s[1] + gate[1][2] * s[2] + gate[1][3] * s[3];
+        state[i10] = gate[2][0] * s[0] + gate[2][1] * s[1] + gate[2][2] * s[2] + gate[2][3] * s[3];
+        state[i11] = gate[3][0] * s[0] + gate[3][1] * s[1] + gate[3][2] * s[2] + gate[3][3] * s[3];
     }
 }
 
@@ -143,34 +156,56 @@ struct GateOp {
 impl GateOp {
     fn unitary_2x2(&self) -> [[Complex64; 2]; 2] {
         let m = self.op_type.to_matrix();
-        [[m[(0,0)], m[(0,1)]], [m[(1,0)], m[(1,1)]]]
+        [[m[(0, 0)], m[(0, 1)]], [m[(1, 0)], m[(1, 1)]]]
     }
 
     fn unitary_4x4(&self) -> [[Complex64; 4]; 4] {
         let m = self.op_type.to_matrix();
         [
-            [m[(0,0)], m[(0,1)], m[(0,2)], m[(0,3)]],
-            [m[(1,0)], m[(1,1)], m[(1,2)], m[(1,3)]],
-            [m[(2,0)], m[(2,1)], m[(2,2)], m[(2,3)]],
-            [m[(3,0)], m[(3,1)], m[(3,2)], m[(3,3)]],
+            [m[(0, 0)], m[(0, 1)], m[(0, 2)], m[(0, 3)]],
+            [m[(1, 0)], m[(1, 1)], m[(1, 2)], m[(1, 3)]],
+            [m[(2, 0)], m[(2, 1)], m[(2, 2)], m[(2, 3)]],
+            [m[(3, 0)], m[(3, 1)], m[(3, 2)], m[(3, 3)]],
         ]
     }
 
     fn dagger_2x2(&self) -> [[Complex64; 2]; 2] {
         let u = self.unitary_2x2();
-        [[u[0][0].conj(), u[1][0].conj()], [u[0][1].conj(), u[1][1].conj()]]
+        [
+            [u[0][0].conj(), u[1][0].conj()],
+            [u[0][1].conj(), u[1][1].conj()],
+        ]
     }
 
     fn dagger_4x4(&self) -> [[Complex64; 4]; 4] {
         let u = self.unitary_4x4();
         [
-            [u[0][0].conj(), u[1][0].conj(), u[2][0].conj(), u[3][0].conj()],
-            [u[0][1].conj(), u[1][1].conj(), u[2][1].conj(), u[3][1].conj()],
-            [u[0][2].conj(), u[1][2].conj(), u[2][2].conj(), u[3][2].conj()],
-            [u[0][3].conj(), u[1][3].conj(), u[2][3].conj(), u[3][3].conj()],
+            [
+                u[0][0].conj(),
+                u[1][0].conj(),
+                u[2][0].conj(),
+                u[3][0].conj(),
+            ],
+            [
+                u[0][1].conj(),
+                u[1][1].conj(),
+                u[2][1].conj(),
+                u[3][1].conj(),
+            ],
+            [
+                u[0][2].conj(),
+                u[1][2].conj(),
+                u[2][2].conj(),
+                u[3][2].conj(),
+            ],
+            [
+                u[0][3].conj(),
+                u[1][3].conj(),
+                u[2][3].conj(),
+                u[3][3].conj(),
+            ],
         ]
     }
-
 }
 
 /// Compute the adjoint gradient for a parameterised circuit.
@@ -188,43 +223,87 @@ pub fn adjoint_grad(
     let bound_dag = dag.bind(param_values);
 
     let order = bound_dag.topological_order();
-    let ops: Vec<GateOp> = order.iter().filter_map(|&node_id| {
-        let op = &bound_dag.graph()[node_id];
-        if op.op_type.is_boundary() || op.op_type == OpType::Barrier || op.op_type.is_measurement() {
-            return None;
-        }
-        Some(GateOp { op_type: op.op_type.clone(), qubits: op.qubits.to_vec() })
-    }).collect();
+    let ops: Vec<GateOp> = order
+        .iter()
+        .filter_map(|&node_id| {
+            let op = &bound_dag.graph()[node_id];
+            if op.op_type.is_boundary()
+                || op.op_type == OpType::Barrier
+                || op.op_type.is_measurement()
+            {
+                return None;
+            }
+            Some(GateOp {
+                op_type: op.op_type.clone(),
+                qubits: op.qubits.to_vec(),
+            })
+        })
+        .collect();
 
     let orig_order = dag.topological_order();
-    let orig_ops: Vec<&QuantumOp> = orig_order.iter().filter_map(|&node_id| {
-        let op = &dag.graph()[node_id];
-        if op.op_type.is_boundary() || op.op_type == OpType::Barrier || op.op_type.is_measurement() {
-            return None;
-        }
-        Some(op)
-    }).collect();
+    let orig_ops: Vec<&QuantumOp> = orig_order
+        .iter()
+        .filter_map(|&node_id| {
+            let op = &dag.graph()[node_id];
+            if op.op_type.is_boundary()
+                || op.op_type == OpType::Barrier
+                || op.op_type.is_measurement()
+            {
+                return None;
+            }
+            Some(op)
+        })
+        .collect();
 
     let param_names: Vec<String> = dag.parameter_names();
-    let param_idx: std::collections::HashMap<&str, usize> = param_names.iter()
+    let param_idx: std::collections::HashMap<&str, usize> = param_names
+        .iter()
         .enumerate()
         .map(|(i, n)| (n.as_str(), i))
         .collect();
     let n_params = param_names.len();
 
     // Pre-compute all gate matrices (avoid recomputing during backward pass)
-    let fwd_matrices_1q: Vec<Option<[[Complex64; 2]; 2]>> = ops.iter().map(|g| {
-        if g.qubits.len() == 1 { Some(g.unitary_2x2()) } else { None }
-    }).collect();
-    let fwd_matrices_2q: Vec<Option<[[Complex64; 4]; 4]>> = ops.iter().map(|g| {
-        if g.qubits.len() == 2 { Some(g.unitary_4x4()) } else { None }
-    }).collect();
-    let dag_matrices_1q: Vec<Option<[[Complex64; 2]; 2]>> = ops.iter().map(|g| {
-        if g.qubits.len() == 1 { Some(g.dagger_2x2()) } else { None }
-    }).collect();
-    let dag_matrices_2q: Vec<Option<[[Complex64; 4]; 4]>> = ops.iter().map(|g| {
-        if g.qubits.len() == 2 { Some(g.dagger_4x4()) } else { None }
-    }).collect();
+    let fwd_matrices_1q: Vec<Option<[[Complex64; 2]; 2]>> = ops
+        .iter()
+        .map(|g| {
+            if g.qubits.len() == 1 {
+                Some(g.unitary_2x2())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let fwd_matrices_2q: Vec<Option<[[Complex64; 4]; 4]>> = ops
+        .iter()
+        .map(|g| {
+            if g.qubits.len() == 2 {
+                Some(g.unitary_4x4())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let dag_matrices_1q: Vec<Option<[[Complex64; 2]; 2]>> = ops
+        .iter()
+        .map(|g| {
+            if g.qubits.len() == 1 {
+                Some(g.dagger_2x2())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let dag_matrices_2q: Vec<Option<[[Complex64; 4]; 4]>> = ops
+        .iter()
+        .map(|g| {
+            if g.qubits.len() == 2 {
+                Some(g.dagger_4x4())
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // Forward pass: evolve |0> → |psi_final> (in-place, no caching)
     let mut psi = vec![Complex64::new(0.0, 0.0); dim];
@@ -232,8 +311,19 @@ pub fn adjoint_grad(
 
     for (k, gate_op) in ops.iter().enumerate() {
         match gate_op.qubits.len() {
-            1 => apply_1q_inplace(&mut psi, fwd_matrices_1q[k].unwrap(), gate_op.qubits[0], n_qubits),
-            2 => apply_2q_inplace(&mut psi, fwd_matrices_2q[k].unwrap(), gate_op.qubits[0], gate_op.qubits[1], n_qubits),
+            1 => apply_1q_inplace(
+                &mut psi,
+                fwd_matrices_1q[k].unwrap(),
+                gate_op.qubits[0],
+                n_qubits,
+            ),
+            2 => apply_2q_inplace(
+                &mut psi,
+                fwd_matrices_2q[k].unwrap(),
+                gate_op.qubits[0],
+                gate_op.qubits[1],
+                n_qubits,
+            ),
             _ => {}
         }
     }
@@ -266,8 +356,19 @@ pub fn adjoint_grad(
 
         // Un-apply gate k from psi to get psi_k (state before gate k)
         match gate_op.qubits.len() {
-            1 => apply_1q_inplace(&mut psi, dag_matrices_1q[k].unwrap(), gate_op.qubits[0], n_qubits),
-            2 => apply_2q_inplace(&mut psi, dag_matrices_2q[k].unwrap(), gate_op.qubits[0], gate_op.qubits[1], n_qubits),
+            1 => apply_1q_inplace(
+                &mut psi,
+                dag_matrices_1q[k].unwrap(),
+                gate_op.qubits[0],
+                n_qubits,
+            ),
+            2 => apply_2q_inplace(
+                &mut psi,
+                dag_matrices_2q[k].unwrap(),
+                gate_op.qubits[0],
+                gate_op.qubits[1],
+                n_qubits,
+            ),
             _ => {}
         }
         // psi now holds psi_k (state BEFORE gate k was applied)
@@ -289,8 +390,19 @@ pub fn adjoint_grad(
                 let mut g_psi = psi.clone();
                 // Re-apply gate k to get psi_after_k
                 match gate_op.qubits.len() {
-                    1 => apply_1q_inplace(&mut g_psi, fwd_matrices_1q[k].unwrap(), gate_op.qubits[0], n_qubits),
-                    2 => apply_2q_inplace(&mut g_psi, fwd_matrices_2q[k].unwrap(), gate_op.qubits[0], gate_op.qubits[1], n_qubits),
+                    1 => apply_1q_inplace(
+                        &mut g_psi,
+                        fwd_matrices_1q[k].unwrap(),
+                        gate_op.qubits[0],
+                        n_qubits,
+                    ),
+                    2 => apply_2q_inplace(
+                        &mut g_psi,
+                        fwd_matrices_2q[k].unwrap(),
+                        gate_op.qubits[0],
+                        gate_op.qubits[1],
+                        n_qubits,
+                    ),
                     _ => {}
                 }
                 // Apply generator
@@ -299,7 +411,9 @@ pub fn adjoint_grad(
                     apply_pauli_1q_inplace(&mut g_psi, pauli_id, qubit, n_qubits);
                 }
 
-                let ip: Complex64 = phi.iter().zip(g_psi.iter())
+                let ip: Complex64 = phi
+                    .iter()
+                    .zip(g_psi.iter())
                     .map(|(a, b)| a.conj() * b)
                     .sum();
                 grad[idx] += 2.0 * alpha * ip.im;
@@ -308,13 +422,27 @@ pub fn adjoint_grad(
 
         // Back-walk phi
         match gate_op.qubits.len() {
-            1 => apply_1q_inplace(&mut phi, dag_matrices_1q[k].unwrap(), gate_op.qubits[0], n_qubits),
-            2 => apply_2q_inplace(&mut phi, dag_matrices_2q[k].unwrap(), gate_op.qubits[0], gate_op.qubits[1], n_qubits),
+            1 => apply_1q_inplace(
+                &mut phi,
+                dag_matrices_1q[k].unwrap(),
+                gate_op.qubits[0],
+                n_qubits,
+            ),
+            2 => apply_2q_inplace(
+                &mut phi,
+                dag_matrices_2q[k].unwrap(),
+                gate_op.qubits[0],
+                gate_op.qubits[1],
+                n_qubits,
+            ),
             _ => {}
         }
     }
 
-    AdjointGradResult { param_names, gradients: grad }
+    AdjointGradResult {
+        param_names,
+        gradients: grad,
+    }
 }
 
 #[cfg(test)]
@@ -327,22 +455,44 @@ mod tests {
     fn test_rx_gradient() {
         let theta = 0.7;
         let mut dag = QuantumDAG::new(1, 0);
-        dag.add_op(OpType::Rx(Parameter::Variable { name: "theta".into(), id: 0 }), &[0]);
-        let obs = vec![PauliTerm { paulis: vec![3], coef: Complex64::new(1.0, 0.0) }];
+        dag.add_op(
+            OpType::Rx(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+        let obs = vec![PauliTerm {
+            paulis: vec![3],
+            coef: Complex64::new(1.0, 0.0),
+        }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
         let result = adjoint_grad(&dag, &obs, &params);
         let expected = -theta.sin();
-        assert!((result.gradients[0] - expected).abs() < 1e-10,
-            "Got {}, expected {}", result.gradients[0], expected);
+        assert!(
+            (result.gradients[0] - expected).abs() < 1e-10,
+            "Got {}, expected {}",
+            result.gradients[0],
+            expected
+        );
     }
 
     #[test]
     fn test_ry_gradient() {
         let theta = 1.2;
         let mut dag = QuantumDAG::new(1, 0);
-        dag.add_op(OpType::Ry(Parameter::Variable { name: "theta".into(), id: 0 }), &[0]);
-        let obs = vec![PauliTerm { paulis: vec![3], coef: Complex64::new(1.0, 0.0) }];
+        dag.add_op(
+            OpType::Ry(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+        let obs = vec![PauliTerm {
+            paulis: vec![3],
+            coef: Complex64::new(1.0, 0.0),
+        }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
         let result = adjoint_grad(&dag, &obs, &params);
@@ -355,8 +505,17 @@ mod tests {
         let theta = 0.6;
         let mut dag = QuantumDAG::new(1, 0);
         dag.add_op(OpType::H, &[0]);
-        dag.add_op(OpType::Rz(Parameter::Variable { name: "theta".into(), id: 0 }), &[0]);
-        let obs = vec![PauliTerm { paulis: vec![1], coef: Complex64::new(1.0, 0.0) }];
+        dag.add_op(
+            OpType::Rz(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+        let obs = vec![PauliTerm {
+            paulis: vec![1],
+            coef: Complex64::new(1.0, 0.0),
+        }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
         let result = adjoint_grad(&dag, &obs, &params);
@@ -369,9 +528,24 @@ mod tests {
         let t0 = 0.5;
         let t1 = 1.0;
         let mut dag = QuantumDAG::new(1, 0);
-        dag.add_op(OpType::Rx(Parameter::Variable { name: "t0".into(), id: 0 }), &[0]);
-        dag.add_op(OpType::Ry(Parameter::Variable { name: "t1".into(), id: 1 }), &[0]);
-        let obs = vec![PauliTerm { paulis: vec![3], coef: Complex64::new(1.0, 0.0) }];
+        dag.add_op(
+            OpType::Rx(Parameter::Variable {
+                name: "t0".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+        dag.add_op(
+            OpType::Ry(Parameter::Variable {
+                name: "t1".into(),
+                id: 1,
+            }),
+            &[0],
+        );
+        let obs = vec![PauliTerm {
+            paulis: vec![3],
+            coef: Complex64::new(1.0, 0.0),
+        }];
         let mut params = std::collections::HashMap::new();
         params.insert("t0".into(), t0);
         params.insert("t1".into(), t1);
@@ -387,8 +561,17 @@ mod tests {
         let mut dag = QuantumDAG::new(2, 0);
         dag.add_op(OpType::H, &[0]);
         dag.add_op(OpType::H, &[1]);
-        dag.add_op(OpType::Rzz(Parameter::Variable { name: "theta".into(), id: 0 }), &[0, 1]);
-        let obs = vec![PauliTerm { paulis: vec![1, 0], coef: Complex64::new(1.0, 0.0) }];
+        dag.add_op(
+            OpType::Rzz(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
+            &[0, 1],
+        );
+        let obs = vec![PauliTerm {
+            paulis: vec![1, 0],
+            coef: Complex64::new(1.0, 0.0),
+        }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
         let result = adjoint_grad(&dag, &obs, &params);
@@ -400,10 +583,22 @@ mod tests {
     fn test_multi_observable_terms() {
         let theta = 0.6;
         let mut dag = QuantumDAG::new(1, 0);
-        dag.add_op(OpType::Rx(Parameter::Variable { name: "theta".into(), id: 0 }), &[0]);
+        dag.add_op(
+            OpType::Rx(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
+            &[0],
+        );
         let obs = vec![
-            PauliTerm { paulis: vec![3], coef: Complex64::new(0.5, 0.0) },
-            PauliTerm { paulis: vec![1], coef: Complex64::new(0.3, 0.0) },
+            PauliTerm {
+                paulis: vec![3],
+                coef: Complex64::new(0.5, 0.0),
+            },
+            PauliTerm {
+                paulis: vec![1],
+                coef: Complex64::new(0.3, 0.0),
+            },
         ];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
@@ -416,9 +611,24 @@ mod tests {
     fn test_same_param_multiple_gates() {
         let theta = 0.7;
         let mut dag = QuantumDAG::new(2, 0);
-        dag.add_op(OpType::Rx(Parameter::Variable { name: "theta".into(), id: 0 }), &[0]);
-        dag.add_op(OpType::Rx(Parameter::Variable { name: "theta".into(), id: 0 }), &[1]);
-        let obs = vec![PauliTerm { paulis: vec![3, 0], coef: Complex64::new(1.0, 0.0) }];
+        dag.add_op(
+            OpType::Rx(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+        dag.add_op(
+            OpType::Rx(Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            }),
+            &[1],
+        );
+        let obs = vec![PauliTerm {
+            paulis: vec![3, 0],
+            coef: Complex64::new(1.0, 0.0),
+        }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
         let result = adjoint_grad(&dag, &obs, &params);

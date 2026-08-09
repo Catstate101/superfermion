@@ -1,5 +1,6 @@
-# Build the Rust core with native CPU features enabled (AVX-2 + FMA on
-# any x86_64 chip from 2013 onwards). LLVM auto-vectorizes the
-# statevector kernel inner loop into SIMD when AVX-2 + FMA is available.
+# Build the Rust core with x86-64-v2 as the portable baseline (SSE4.2 +
+# SSSE3 + SSE3, supported on all x86_64 CPUs since ~2009). LLVM still
+# auto-vectorizes the statevector kernel within this ISA subset, and the
+# resulting binary runs everywhere — critical for pre-built PyPI wheels.
 [build]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=x86-64-v2"]

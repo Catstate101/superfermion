@@ -39,7 +39,10 @@ pub trait QuantumStateImpl: Send + Sync {
     ) -> Result<Vec<Vec<f64>>, MethodError>;
     fn to_vec(&self) -> Result<Vec<Complex64>, MethodError>;
     fn probabilities(&self) -> Result<Vec<f64>, MethodError>;
-    fn partial_trace(&self, keep_qubits: &[usize]) -> Result<Box<dyn QuantumStateImpl>, MethodError>;
+    fn partial_trace(
+        &self,
+        keep_qubits: &[usize],
+    ) -> Result<Box<dyn QuantumStateImpl>, MethodError>;
     fn n_qubits(&self) -> usize;
     fn method_name(&self) -> &str;
     fn device_name(&self) -> &str;
@@ -117,10 +120,14 @@ impl QuantumStateImpl for StatevectorState {
         }
         let n = self.num_qubits;
         let dim = self.data.len();
-        let probs: Vec<f64> = self.data.iter().map(|c| c.re * c.re + c.im * c.im).collect();
+        let probs: Vec<f64> = self
+            .data
+            .iter()
+            .map(|c| c.re * c.re + c.im * c.im)
+            .collect();
 
-        use rand::SeedableRng;
         use rand::Rng;
+        use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut counts: HashMap<String, usize> = HashMap::new();
 
@@ -132,11 +139,16 @@ impl QuantumStateImpl for StatevectorState {
 
         for _ in 0..shots {
             let r: f64 = rng.gen::<f64>() * total;
-            let idx = match cumulative.binary_search_by(|v| v.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less)) {
+            let idx = match cumulative
+                .binary_search_by(|v| v.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less))
+            {
                 Ok(i) => i.min(dim - 1),
                 Err(i) => (i - 1).min(dim - 1),
             };
-            let bitstring: String = (0..n).rev().map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' }).collect();
+            let bitstring: String = (0..n)
+                .rev()
+                .map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' })
+                .collect();
             *counts.entry(bitstring).or_insert(0) += 1;
         }
         Ok(counts)
@@ -161,12 +173,21 @@ impl QuantumStateImpl for StatevectorState {
     }
 
     fn fidelity(&self, other: &dyn QuantumStateImpl) -> Result<f64, MethodError> {
-        let other_sv = other.as_any().downcast_ref::<StatevectorState>()
-            .ok_or_else(|| MethodError("fidelity() requires both states to be the same type".into()))?;
+        let other_sv = other
+            .as_any()
+            .downcast_ref::<StatevectorState>()
+            .ok_or_else(|| {
+                MethodError("fidelity() requires both states to be the same type".into())
+            })?;
         if self.num_qubits != other_sv.num_qubits {
-            return Err(MethodError("fidelity() requires same number of qubits".into()));
+            return Err(MethodError(
+                "fidelity() requires same number of qubits".into(),
+            ));
         }
-        let ip: Complex64 = self.data.iter().zip(other_sv.data.iter())
+        let ip: Complex64 = self
+            .data
+            .iter()
+            .zip(other_sv.data.iter())
             .map(|(a, b)| a.conj() * b)
             .sum();
         Ok(ip.re * ip.re + ip.im * ip.im) // |<ψ|φ>|²
@@ -187,8 +208,9 @@ impl QuantumStateImpl for StatevectorState {
         let mut d_psi: Vec<Vec<Complex64>> = Vec::with_capacity(n_params);
 
         for name in &param_names {
-            let orig_val = *param_values.get(name.as_str())
-                .ok_or_else(|| MethodError(format!("parameter '{}' not found in param_values", name)))?;
+            let orig_val = *param_values.get(name.as_str()).ok_or_else(|| {
+                MethodError(format!("parameter '{}' not found in param_values", name))
+            })?;
 
             let mut params_plus = param_values.clone();
             params_plus.insert(name.clone(), orig_val + eps);
@@ -200,7 +222,9 @@ impl QuantumStateImpl for StatevectorState {
             let dag_minus = dag.bind(&params_minus);
             let psi_minus = dag_minus.simulate();
 
-            let deriv: Vec<Complex64> = psi_plus.iter().zip(psi_minus.iter())
+            let deriv: Vec<Complex64> = psi_plus
+                .iter()
+                .zip(psi_minus.iter())
                 .map(|(p, m)| (*p - *m) / (2.0 * eps))
                 .collect();
             d_psi.push(deriv);
@@ -209,7 +233,9 @@ impl QuantumStateImpl for StatevectorState {
         let mut qfim = vec![vec![0.0f64; n_params]; n_params];
         for i in 0..n_params {
             for j in i..n_params {
-                let overlap: Complex64 = d_psi[i].iter().zip(d_psi[j].iter())
+                let overlap: Complex64 = d_psi[i]
+                    .iter()
+                    .zip(d_psi[j].iter())
                     .map(|(a, b)| a.conj() * b)
                     .sum();
                 let val = 4.0 * overlap.re;
@@ -225,10 +251,17 @@ impl QuantumStateImpl for StatevectorState {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>, MethodError> {
-        Ok(self.data.iter().map(|c| c.re * c.re + c.im * c.im).collect())
+        Ok(self
+            .data
+            .iter()
+            .map(|c| c.re * c.re + c.im * c.im)
+            .collect())
     }
 
-    fn partial_trace(&self, keep_qubits: &[usize]) -> Result<Box<dyn QuantumStateImpl>, MethodError> {
+    fn partial_trace(
+        &self,
+        keep_qubits: &[usize],
+    ) -> Result<Box<dyn QuantumStateImpl>, MethodError> {
         let n = self.num_qubits;
         let n_keep = keep_qubits.len();
         let dim_keep = 1usize << n_keep;
@@ -247,8 +280,12 @@ impl QuantumStateImpl for StatevectorState {
                     let mut idx_i = 0usize;
                     let mut idx_j = 0usize;
                     for (k, &q) in keep_qubits.iter().enumerate() {
-                        if (i_keep >> k) & 1 == 1 { idx_i |= 1 << q; }
-                        if (j_keep >> k) & 1 == 1 { idx_j |= 1 << q; }
+                        if (i_keep >> k) & 1 == 1 {
+                            idx_i |= 1 << q;
+                        }
+                        if (j_keep >> k) & 1 == 1 {
+                            idx_j |= 1 << q;
+                        }
                     }
                     for (k, &q) in traced.iter().enumerate() {
                         if (t >> k) & 1 == 1 {
@@ -275,10 +312,18 @@ impl QuantumStateImpl for StatevectorState {
         }))
     }
 
-    fn n_qubits(&self) -> usize { self.num_qubits }
-    fn method_name(&self) -> &str { "statevector" }
-    fn device_name(&self) -> &str { &self.device }
-    fn as_any(&self) -> &dyn Any { self }
+    fn n_qubits(&self) -> usize {
+        self.num_qubits
+    }
+    fn method_name(&self) -> &str {
+        "statevector"
+    }
+    fn device_name(&self) -> &str {
+        &self.device
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -292,7 +337,10 @@ pub struct DensityMatrixStateWrapper {
 
 impl DensityMatrixStateWrapper {
     pub fn new(dm: DensityMatrixState, device: &str) -> Self {
-        Self { inner: dm, device: device.to_string() }
+        Self {
+            inner: dm,
+            device: device.to_string(),
+        }
     }
 
     fn to_matrix(&self) -> Vec<Vec<Complex64>> {
@@ -323,7 +371,9 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
                 for (q, &pauli_op) in term.paulis.iter().enumerate() {
                     let bit_pos = if q < n { n - 1 - q } else { q };
                     match pauli_op {
-                        1 => { target_idx ^= 1 << bit_pos; }
+                        1 => {
+                            target_idx ^= 1 << bit_pos;
+                        }
                         2 => {
                             target_idx ^= 1 << bit_pos;
                             if (i >> bit_pos) & 1 == 0 {
@@ -333,7 +383,9 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
                             }
                         }
                         3 => {
-                            if (i >> bit_pos) & 1 == 1 { phase *= -1.0; }
+                            if (i >> bit_pos) & 1 == 1 {
+                                phase *= -1.0;
+                            }
                         }
                         _ => {}
                     }
@@ -345,13 +397,15 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
     }
 
     fn sample(&self, shots: usize, seed: u64) -> Result<HashMap<String, usize>, MethodError> {
-        if shots == 0 { return Ok(HashMap::new()); }
+        if shots == 0 {
+            return Ok(HashMap::new());
+        }
         let n = self.inner.n_qubits;
         let dim = 1 << n;
         let probs: Vec<f64> = (0..dim).map(|i| self.inner.data[i | (i << n)].re).collect();
 
-        use rand::SeedableRng;
         use rand::Rng;
+        use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut counts: HashMap<String, usize> = HashMap::new();
 
@@ -363,18 +417,30 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
 
         for _ in 0..shots {
             let r: f64 = rng.gen::<f64>() * total;
-            let idx = match cumulative.binary_search_by(|v| v.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less)) {
+            let idx = match cumulative
+                .binary_search_by(|v| v.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less))
+            {
                 Ok(i) => i.min(dim - 1),
                 Err(i) => (i - 1).min(dim - 1),
             };
-            let bitstring: String = (0..n).rev().map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' }).collect();
+            let bitstring: String = (0..n)
+                .rev()
+                .map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' })
+                .collect();
             *counts.entry(bitstring).or_insert(0) += 1;
         }
         Ok(counts)
     }
 
-    fn grad(&self, _observable: &[PauliTerm], _dag: &QuantumDAG, _param_values: &HashMap<String, f64>) -> Result<Vec<f64>, MethodError> {
-        Err(MethodError("grad() not supported for density_matrix method".into()))
+    fn grad(
+        &self,
+        _observable: &[PauliTerm],
+        _dag: &QuantumDAG,
+        _param_values: &HashMap<String, f64>,
+    ) -> Result<Vec<f64>, MethodError> {
+        Err(MethodError(
+            "grad() not supported for density_matrix method".into(),
+        ))
     }
 
     fn entropy(&self) -> Result<f64, MethodError> {
@@ -409,11 +475,20 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
     }
 
     fn fidelity(&self, other: &dyn QuantumStateImpl) -> Result<f64, MethodError> {
-        let other_dm = other.as_any().downcast_ref::<DensityMatrixStateWrapper>()
-            .ok_or_else(|| MethodError("fidelity() between density_matrix states requires both to be density_matrix".into()))?;
+        let other_dm = other
+            .as_any()
+            .downcast_ref::<DensityMatrixStateWrapper>()
+            .ok_or_else(|| {
+                MethodError(
+                    "fidelity() between density_matrix states requires both to be density_matrix"
+                        .into(),
+                )
+            })?;
         let n = self.inner.n_qubits;
         if n != other_dm.inner.n_qubits {
-            return Err(MethodError("fidelity() requires same number of qubits".into()));
+            return Err(MethodError(
+                "fidelity() requires same number of qubits".into(),
+            ));
         }
         let dim = 1 << n;
 
@@ -429,8 +504,14 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         Ok((&rho * &sigma).trace().re.abs())
     }
 
-    fn qfim(&self, _dag: &QuantumDAG, _param_values: &HashMap<String, f64>) -> Result<Vec<Vec<f64>>, MethodError> {
-        Err(MethodError("qfim() not supported for density_matrix method".into()))
+    fn qfim(
+        &self,
+        _dag: &QuantumDAG,
+        _param_values: &HashMap<String, f64>,
+    ) -> Result<Vec<Vec<f64>>, MethodError> {
+        Err(MethodError(
+            "qfim() not supported for density_matrix method".into(),
+        ))
     }
 
     fn to_vec(&self) -> Result<Vec<Complex64>, MethodError> {
@@ -448,10 +529,15 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
     fn probabilities(&self) -> Result<Vec<f64>, MethodError> {
         let n = self.inner.n_qubits;
         let dim = 1 << n;
-        Ok((0..dim).map(|i| self.inner.data[i | (i << n)].re.max(0.0)).collect())
+        Ok((0..dim)
+            .map(|i| self.inner.data[i | (i << n)].re.max(0.0))
+            .collect())
     }
 
-    fn partial_trace(&self, keep_qubits: &[usize]) -> Result<Box<dyn QuantumStateImpl>, MethodError> {
+    fn partial_trace(
+        &self,
+        keep_qubits: &[usize],
+    ) -> Result<Box<dyn QuantumStateImpl>, MethodError> {
         let n = self.inner.n_qubits;
         let n_keep = keep_qubits.len();
         let dim_keep = 1usize << n_keep;
@@ -470,8 +556,12 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
                     let mut idx_i = 0usize;
                     let mut idx_j = 0usize;
                     for (k, &q) in keep_qubits.iter().enumerate() {
-                        if (i_keep >> k) & 1 == 1 { idx_i |= 1 << q; }
-                        if (j_keep >> k) & 1 == 1 { idx_j |= 1 << q; }
+                        if (i_keep >> k) & 1 == 1 {
+                            idx_i |= 1 << q;
+                        }
+                        if (j_keep >> k) & 1 == 1 {
+                            idx_j |= 1 << q;
+                        }
                     }
                     for (k, &q) in traced.iter().enumerate() {
                         if (t >> k) & 1 == 1 {
@@ -498,10 +588,18 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         }))
     }
 
-    fn n_qubits(&self) -> usize { self.inner.n_qubits }
-    fn method_name(&self) -> &str { "density_matrix" }
-    fn device_name(&self) -> &str { &self.device }
-    fn as_any(&self) -> &dyn Any { self }
+    fn n_qubits(&self) -> usize {
+        self.inner.n_qubits
+    }
+    fn method_name(&self) -> &str {
+        "density_matrix"
+    }
+    fn device_name(&self) -> &str {
+        &self.device
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -515,7 +613,10 @@ pub struct MPSStateWrapper {
 
 impl MPSStateWrapper {
     pub fn new(mps: MPSState, device: &str) -> Self {
-        Self { inner: mps, device: device.to_string() }
+        Self {
+            inner: mps,
+            device: device.to_string(),
+        }
     }
 }
 
@@ -534,7 +635,12 @@ impl QuantumStateImpl for MPSStateWrapper {
         Ok(self.inner.sample(shots, seed))
     }
 
-    fn grad(&self, _observable: &[PauliTerm], _dag: &QuantumDAG, _param_values: &HashMap<String, f64>) -> Result<Vec<f64>, MethodError> {
+    fn grad(
+        &self,
+        _observable: &[PauliTerm],
+        _dag: &QuantumDAG,
+        _param_values: &HashMap<String, f64>,
+    ) -> Result<Vec<f64>, MethodError> {
         Err(MethodError("grad() not supported for mps method".into()))
     }
 
@@ -547,10 +653,16 @@ impl QuantumStateImpl for MPSStateWrapper {
     }
 
     fn fidelity(&self, _other: &dyn QuantumStateImpl) -> Result<f64, MethodError> {
-        Err(MethodError("fidelity() not supported for mps method".into()))
+        Err(MethodError(
+            "fidelity() not supported for mps method".into(),
+        ))
     }
 
-    fn qfim(&self, _dag: &QuantumDAG, _param_values: &HashMap<String, f64>) -> Result<Vec<Vec<f64>>, MethodError> {
+    fn qfim(
+        &self,
+        _dag: &QuantumDAG,
+        _param_values: &HashMap<String, f64>,
+    ) -> Result<Vec<Vec<f64>>, MethodError> {
         Err(MethodError("qfim() not supported for mps method".into()))
     }
 
@@ -559,17 +671,32 @@ impl QuantumStateImpl for MPSStateWrapper {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>, MethodError> {
-        Err(MethodError("probabilities() not supported for mps method".into()))
+        Err(MethodError(
+            "probabilities() not supported for mps method".into(),
+        ))
     }
 
-    fn partial_trace(&self, _keep_qubits: &[usize]) -> Result<Box<dyn QuantumStateImpl>, MethodError> {
-        Err(MethodError("partial_trace() not supported for mps method".into()))
+    fn partial_trace(
+        &self,
+        _keep_qubits: &[usize],
+    ) -> Result<Box<dyn QuantumStateImpl>, MethodError> {
+        Err(MethodError(
+            "partial_trace() not supported for mps method".into(),
+        ))
     }
 
-    fn n_qubits(&self) -> usize { self.inner.n_qubits }
-    fn method_name(&self) -> &str { "mps" }
-    fn device_name(&self) -> &str { &self.device }
-    fn as_any(&self) -> &dyn Any { self }
+    fn n_qubits(&self) -> usize {
+        self.inner.n_qubits
+    }
+    fn method_name(&self) -> &str {
+        "mps"
+    }
+    fn device_name(&self) -> &str {
+        &self.device
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -583,7 +710,10 @@ pub struct StabilizerStateWrapper {
 
 impl StabilizerStateWrapper {
     pub fn new(tab: StabilizerTableau, device: &str) -> Self {
-        Self { inner: tab, device: device.to_string() }
+        Self {
+            inner: tab,
+            device: device.to_string(),
+        }
     }
 }
 
@@ -595,12 +725,21 @@ impl QuantumStateImpl for StabilizerStateWrapper {
             let mut px = vec![0u8; n];
             let mut pz = vec![0u8; n];
             for (q, &p) in term.paulis.iter().enumerate() {
-                if q >= n { break; }
+                if q >= n {
+                    break;
+                }
                 let bit_pos = n - 1 - q;
                 match p {
-                    1 => { px[bit_pos] = 1; }       // X
-                    2 => { px[bit_pos] = 1; pz[bit_pos] = 1; } // Y = iXZ
-                    3 => { pz[bit_pos] = 1; }       // Z
+                    1 => {
+                        px[bit_pos] = 1;
+                    } // X
+                    2 => {
+                        px[bit_pos] = 1;
+                        pz[bit_pos] = 1;
+                    } // Y = iXZ
+                    3 => {
+                        pz[bit_pos] = 1;
+                    } // Z
                     _ => {}
                 }
             }
@@ -614,42 +753,78 @@ impl QuantumStateImpl for StabilizerStateWrapper {
         Ok(self.inner.sample(shots, Some(seed)))
     }
 
-    fn grad(&self, _observable: &[PauliTerm], _dag: &QuantumDAG, _param_values: &HashMap<String, f64>) -> Result<Vec<f64>, MethodError> {
-        Err(MethodError("grad() not supported for stabilizer method".into()))
+    fn grad(
+        &self,
+        _observable: &[PauliTerm],
+        _dag: &QuantumDAG,
+        _param_values: &HashMap<String, f64>,
+    ) -> Result<Vec<f64>, MethodError> {
+        Err(MethodError(
+            "grad() not supported for stabilizer method".into(),
+        ))
     }
 
     fn entropy(&self) -> Result<f64, MethodError> {
-        Err(MethodError("entropy() not supported for stabilizer method".into()))
+        Err(MethodError(
+            "entropy() not supported for stabilizer method".into(),
+        ))
     }
 
     fn purity(&self) -> Result<f64, MethodError> {
-        Err(MethodError("purity() not supported for stabilizer method".into()))
+        Err(MethodError(
+            "purity() not supported for stabilizer method".into(),
+        ))
     }
 
     fn fidelity(&self, _other: &dyn QuantumStateImpl) -> Result<f64, MethodError> {
-        Err(MethodError("fidelity() not supported for stabilizer method".into()))
+        Err(MethodError(
+            "fidelity() not supported for stabilizer method".into(),
+        ))
     }
 
-    fn qfim(&self, _dag: &QuantumDAG, _param_values: &HashMap<String, f64>) -> Result<Vec<Vec<f64>>, MethodError> {
-        Err(MethodError("qfim() not supported for stabilizer method".into()))
+    fn qfim(
+        &self,
+        _dag: &QuantumDAG,
+        _param_values: &HashMap<String, f64>,
+    ) -> Result<Vec<Vec<f64>>, MethodError> {
+        Err(MethodError(
+            "qfim() not supported for stabilizer method".into(),
+        ))
     }
 
     fn to_vec(&self) -> Result<Vec<Complex64>, MethodError> {
-        Err(MethodError("to_vec() not supported for stabilizer method (exponential memory)".into()))
+        Err(MethodError(
+            "to_vec() not supported for stabilizer method (exponential memory)".into(),
+        ))
     }
 
     fn probabilities(&self) -> Result<Vec<f64>, MethodError> {
-        Err(MethodError("probabilities() not supported for stabilizer method".into()))
+        Err(MethodError(
+            "probabilities() not supported for stabilizer method".into(),
+        ))
     }
 
-    fn partial_trace(&self, _keep_qubits: &[usize]) -> Result<Box<dyn QuantumStateImpl>, MethodError> {
-        Err(MethodError("partial_trace() not supported for stabilizer method".into()))
+    fn partial_trace(
+        &self,
+        _keep_qubits: &[usize],
+    ) -> Result<Box<dyn QuantumStateImpl>, MethodError> {
+        Err(MethodError(
+            "partial_trace() not supported for stabilizer method".into(),
+        ))
     }
 
-    fn n_qubits(&self) -> usize { self.inner.n }
-    fn method_name(&self) -> &str { "stabilizer" }
-    fn device_name(&self) -> &str { &self.device }
-    fn as_any(&self) -> &dyn Any { self }
+    fn n_qubits(&self) -> usize {
+        self.inner.n
+    }
+    fn method_name(&self) -> &str {
+        "stabilizer"
+    }
+    fn device_name(&self) -> &str {
+        &self.device
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -678,7 +853,11 @@ mod tests {
             coef: Complex64::new(1.0, 0.0),
         }];
         let ev = state.expectation(&obs).unwrap();
-        assert!((ev - 1.0).abs() < 1e-10, "ZZ on Bell state should be 1.0, got {}", ev);
+        assert!(
+            (ev - 1.0).abs() < 1e-10,
+            "ZZ on Bell state should be 1.0, got {}",
+            ev
+        );
     }
 
     #[test]
@@ -708,7 +887,11 @@ mod tests {
     fn test_sv_fidelity_self() {
         let state = bell_sv();
         let fid = state.fidelity(&state).unwrap();
-        assert!((fid - 1.0).abs() < 1e-10, "self-fidelity should be 1.0, got {}", fid);
+        assert!(
+            (fid - 1.0).abs() < 1e-10,
+            "self-fidelity should be 1.0, got {}",
+            fid
+        );
     }
 
     #[test]
@@ -735,14 +918,20 @@ mod tests {
         assert_eq!(reduced.n_qubits(), 1);
         assert_eq!(reduced.method_name(), "density_matrix");
         let purity = reduced.purity().unwrap();
-        assert!((purity - 0.5).abs() < 1e-10, "partial trace of Bell state should give mixed state with purity 0.5, got {}", purity);
+        assert!(
+            (purity - 0.5).abs() < 1e-10,
+            "partial trace of Bell state should give mixed state with purity 0.5, got {}",
+            purity
+        );
     }
 
     #[test]
     fn test_stabilizer_method_errors() {
         let tab = StabilizerTableau::new(2);
         let state = StabilizerStateWrapper::new(tab, "cpu");
-        assert!(state.grad(&[], &QuantumDAG::new(2, 0), &HashMap::new()).is_err());
+        assert!(state
+            .grad(&[], &QuantumDAG::new(2, 0), &HashMap::new())
+            .is_err());
         assert!(state.entropy().is_err());
         assert!(state.purity().is_err());
         assert!(state.qfim(&QuantumDAG::new(2, 0), &HashMap::new()).is_err());

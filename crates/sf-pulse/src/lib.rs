@@ -3,13 +3,13 @@
 //! Provides high-performance waveform generation, schedule construction,
 //! and gate calibration for pulse-level programming.
 
-pub mod waveforms;
-pub mod schedule;
 pub mod calibration;
+pub mod schedule;
+pub mod waveforms;
 
-pub use waveforms::{Waveform, WaveformType, PulseEnvelope};
-pub use schedule::{PulseSchedule, PulseInstruction, ChannelId, ChannelType};
-pub use calibration::{GateCalibration, CalibrationDatabase};
+pub use calibration::{CalibrationDatabase, GateCalibration};
+pub use schedule::{ChannelId, ChannelType, PulseInstruction, PulseSchedule};
+pub use waveforms::{PulseEnvelope, Waveform, WaveformType};
 
 #[cfg(test)]
 mod tests {

@@ -37,7 +37,16 @@ from superfermion.runner import run, simulate
 from superfermion.compiler.manager import compile
 from superfermion.parameters import param
 from superfermion.results import RunResult
-from superfermion._sf_core import State
+try:
+    from superfermion._sf_core import State
+except ImportError as e:
+    raise ImportError(
+        "The Rust extension module `_sf_core` is not built.\n"
+        "Build it with:\n"
+        "    pip install maturin\n"
+        "    cd crates/sf-bindings && maturin develop --release\n"
+        "Or install the pre-built wheel: pip install superfermion\n"
+    ) from e
 from superfermion.utils.exceptions import MethodError
 
 from superfermion.devices import (

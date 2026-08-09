@@ -17,7 +17,9 @@ pub struct Correction {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CorrectionType {
-    X, Z, Y,
+    X,
+    Z,
+    Y,
 }
 
 /// Trait for QEC decoders.
@@ -90,7 +92,7 @@ impl MWPMDecoder {
     }
 
     fn defect_distance(&self, a: usize, b: usize) -> usize {
-        if a > b { a - b } else { b - a }
+        a.abs_diff(b)
     }
 }
 
@@ -109,7 +111,9 @@ impl Decoder for MWPMDecoder {
             .collect();
 
         if defects.is_empty() {
-            return Correction { corrections: vec![] };
+            return Correction {
+                corrections: vec![],
+            };
         }
 
         let pairs = self.greedy_matching(&defects);
@@ -207,7 +211,9 @@ impl Decoder for UnionFindDecoder {
             .collect();
 
         if defects.is_empty() {
-            return Correction { corrections: vec![] };
+            return Correction {
+                corrections: vec![],
+            };
         }
 
         // Grow clusters: union adjacent defects
@@ -227,7 +233,7 @@ impl Decoder for UnionFindDecoder {
         }
 
         let mut corrections = Vec::new();
-        for (_, members) in &cluster_sizes {
+        for members in cluster_sizes.values() {
             if members.len() % 2 == 1 {
                 // Odd parity cluster — correct first qubit
                 let d = members[0];
@@ -273,7 +279,12 @@ impl LookupDecoder {
         let mut table = HashMap::new();
 
         // No error
-        table.insert(vec![0; n - 1], Correction { corrections: vec![] });
+        table.insert(
+            vec![0; n - 1],
+            Correction {
+                corrections: vec![],
+            },
+        );
 
         // Single-qubit X errors
         for q in 0..n {
@@ -310,10 +321,9 @@ impl Decoder for LookupDecoder {
     }
 
     fn decode(&self, syndrome: &[u8]) -> Correction {
-        self.table
-            .get(syndrome)
-            .cloned()
-            .unwrap_or(Correction { corrections: vec![] })
+        self.table.get(syndrome).cloned().unwrap_or(Correction {
+            corrections: vec![],
+        })
     }
 }
 

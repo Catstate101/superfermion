@@ -1,7 +1,7 @@
 //! Syndrome extraction — build circuits to measure stabilizers.
 
-use crate::codes::{Stabilizer, StabilizerCode, Pauli};
-use sf_ir::{QuantumDAG, OpType};
+use crate::codes::{Pauli, Stabilizer, StabilizerCode};
+use sf_ir::{OpType, QuantumDAG};
 
 /// Builds syndrome extraction circuits from stabilizer codes.
 pub struct SyndromeExtractor;

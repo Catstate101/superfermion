@@ -24,10 +24,14 @@ pub fn commutes(op_a: &OpType, qubits_a: &[usize], op_b: &OpType, qubits_b: &[us
     }
 
     // Barriers and measurements don't commute with anything sharing qubits
-    if op_a.is_boundary() || op_b.is_boundary()
-        || op_a.is_measurement() || op_b.is_measurement()
-        || *op_a == OpType::Barrier || *op_b == OpType::Barrier
-        || *op_a == OpType::Reset || *op_b == OpType::Reset
+    if op_a.is_boundary()
+        || op_b.is_boundary()
+        || op_a.is_measurement()
+        || op_b.is_measurement()
+        || *op_a == OpType::Barrier
+        || *op_b == OpType::Barrier
+        || *op_a == OpType::Reset
+        || *op_b == OpType::Reset
     {
         return false;
     }
@@ -66,15 +70,26 @@ fn commutes_1q_1q(a: &OpType, b: &OpType) -> bool {
     }
 
     // Same-axis rotations commute
-    if is_rz(a) && is_rz(b) { return true; }
-    if is_rx(a) && is_rx(b) { return true; }
-    if is_ry(a) && is_ry(b) { return true; }
+    if is_rz(a) && is_rz(b) {
+        return true;
+    }
+    if is_rx(a) && is_rx(b) {
+        return true;
+    }
+    if is_ry(a) && is_ry(b) {
+        return true;
+    }
 
     false
 }
 
 /// Check commutation of a 1-qubit gate with a 2-qubit gate.
-fn commutes_1q_2q(gate_1q: &OpType, qubit_1q: usize, gate_2q: &OpType, qubits_2q: &[usize]) -> bool {
+fn commutes_1q_2q(
+    gate_1q: &OpType,
+    qubit_1q: usize,
+    gate_2q: &OpType,
+    qubits_2q: &[usize],
+) -> bool {
     let is_control = qubits_2q[0] == qubit_1q;
     let is_target = qubits_2q[1] == qubit_1q;
 
@@ -135,23 +150,36 @@ fn commutes_2q_2q(a: &OpType, qa: &[usize], b: &OpType, qb: &[usize]) -> bool {
 
     // CZ is symmetric, so CZ on (0,1) commutes with CZ on (1,0)
     if *a == OpType::CZ && *b == OpType::CZ {
-        let mut sa = qa.to_vec(); sa.sort();
-        let mut sb = qb.to_vec(); sb.sort();
-        if sa == sb { return true; }
+        let mut sa = qa.to_vec();
+        sa.sort();
+        let mut sb = qb.to_vec();
+        sb.sort();
+        if sa == sb {
+            return true;
+        }
     }
 
     false
 }
 
 fn is_z_diagonal_1q(op: &OpType) -> bool {
-    matches!(op,
-        OpType::Rz(_) | OpType::S | OpType::Sdg | OpType::T | OpType::Tdg
-        | OpType::Z | OpType::P(_) | OpType::R1(_) | OpType::Id
+    matches!(
+        op,
+        OpType::Rz(_)
+            | OpType::S
+            | OpType::Sdg
+            | OpType::T
+            | OpType::Tdg
+            | OpType::Z
+            | OpType::P(_)
+            | OpType::R1(_)
+            | OpType::Id
     )
 }
 
 fn is_x_basis_1q(op: &OpType) -> bool {
-    matches!(op,
+    matches!(
+        op,
         OpType::X | OpType::Rx(_) | OpType::SX | OpType::SXdg | OpType::Id
     )
 }
@@ -161,7 +189,16 @@ fn is_y_basis_1q(op: &OpType) -> bool {
 }
 
 fn is_rz(op: &OpType) -> bool {
-    matches!(op, OpType::Rz(_) | OpType::S | OpType::Sdg | OpType::T | OpType::Tdg | OpType::Z | OpType::P(_))
+    matches!(
+        op,
+        OpType::Rz(_)
+            | OpType::S
+            | OpType::Sdg
+            | OpType::T
+            | OpType::Tdg
+            | OpType::Z
+            | OpType::P(_)
+    )
 }
 
 fn is_rx(op: &OpType) -> bool {
@@ -189,24 +226,49 @@ mod tests {
 
     #[test]
     fn test_z_diag_commute() {
-        assert!(commutes(&OpType::Rz(Parameter::Const(0.5)), &[0], &OpType::S, &[0]));
+        assert!(commutes(
+            &OpType::Rz(Parameter::Const(0.5)),
+            &[0],
+            &OpType::S,
+            &[0]
+        ));
         assert!(commutes(&OpType::T, &[0], &OpType::Z, &[0]));
-        assert!(commutes(&OpType::Rz(Parameter::Const(0.5)), &[0], &OpType::Rz(Parameter::Const(1.0)), &[0]));
+        assert!(commutes(
+            &OpType::Rz(Parameter::Const(0.5)),
+            &[0],
+            &OpType::Rz(Parameter::Const(1.0)),
+            &[0]
+        ));
     }
 
     #[test]
     fn test_h_rz_dont_commute() {
-        assert!(!commutes(&OpType::H, &[0], &OpType::Rz(Parameter::Const(0.5)), &[0]));
+        assert!(!commutes(
+            &OpType::H,
+            &[0],
+            &OpType::Rz(Parameter::Const(0.5)),
+            &[0]
+        ));
     }
 
     #[test]
     fn test_rz_commutes_with_cnot_on_control() {
-        assert!(commutes(&OpType::Rz(Parameter::Const(0.5)), &[0], &OpType::CNOT, &[0, 1]));
+        assert!(commutes(
+            &OpType::Rz(Parameter::Const(0.5)),
+            &[0],
+            &OpType::CNOT,
+            &[0, 1]
+        ));
     }
 
     #[test]
     fn test_rz_doesnt_commute_with_cnot_on_target() {
-        assert!(!commutes(&OpType::Rz(Parameter::Const(0.5)), &[1], &OpType::CNOT, &[0, 1]));
+        assert!(!commutes(
+            &OpType::Rz(Parameter::Const(0.5)),
+            &[1],
+            &OpType::CNOT,
+            &[0, 1]
+        ));
     }
 
     #[test]
@@ -221,7 +283,12 @@ mod tests {
 
     #[test]
     fn test_z_diag_commutes_with_cz() {
-        assert!(commutes(&OpType::Rz(Parameter::Const(0.5)), &[0], &OpType::CZ, &[0, 1]));
+        assert!(commutes(
+            &OpType::Rz(Parameter::Const(0.5)),
+            &[0],
+            &OpType::CZ,
+            &[0, 1]
+        ));
         assert!(commutes(&OpType::S, &[1], &OpType::CZ, &[0, 1]));
     }
 
@@ -244,8 +311,10 @@ mod tests {
     #[test]
     fn test_rzz_commutes_with_rz() {
         assert!(commutes(
-            &OpType::Rz(Parameter::Const(0.5)), &[0],
-            &OpType::Rzz(Parameter::Const(0.3)), &[0, 1],
+            &OpType::Rz(Parameter::Const(0.5)),
+            &[0],
+            &OpType::Rzz(Parameter::Const(0.3)),
+            &[0, 1],
         ));
     }
 }

@@ -15,7 +15,9 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Superfermion Team"]
-description = "The Holy Grail of Quantum ML — Hardware-agnostic quantum-classical framework"
+description = "High-performance quantum computing framework with a Python API and Rust simulation core"
+repository = "https://github.com/Catstate101/superfermion"
+documentation = "https://github.com/Catstate101/superfermion"
 
 [workspace.dependencies]
 # Shared dependencies across all crates

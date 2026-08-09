@@ -1,14 +1,17 @@
+#![allow(clippy::new_without_default)]
+#![allow(clippy::needless_range_loop)]
+
+pub mod commutative_cancel;
 pub mod decompose;
+pub mod fusion;
+pub mod kak;
 pub mod passes;
 pub mod rotation_merge;
 pub mod twirl;
-pub mod fusion;
-pub mod commutative_cancel;
-pub mod kak;
 
-use sf_ir::{QuantumDAG};
-use thiserror::Error;
 use rand::Rng;
+use sf_ir::QuantumDAG;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CompilerError {
@@ -34,7 +37,13 @@ impl Default for BackendSpec {
     fn default() -> Self {
         Self {
             name: "generic".to_string(),
-            native_gates: vec!["H".to_string(), "X".to_string(), "Y".to_string(), "Z".to_string(), "CNOT".to_string()],
+            native_gates: vec![
+                "H".to_string(),
+                "X".to_string(),
+                "Y".to_string(),
+                "Z".to_string(),
+                "CNOT".to_string(),
+            ],
             connectivity: vec![],
             n_qubits: 32,
             optimization_level: 1,
@@ -84,15 +93,15 @@ impl Compiler {
     /// Compile a circuit for the target backend using an optimized pipeline.
     pub fn compile(&self, dag: &QuantumDAG) -> Result<QuantumDAG, CompilerError> {
         let mut result = dag.clone_dag();
-        
+
         let mut manager = PassManager::new();
-        
+
         // 1. Initial Gate Cancellation (Remove identity ops)
         manager.add_pass(Box::new(passes::GateCancellationPass::new()));
-        
+
         // 2. High-level Decomposition (e.g. SWAP -> 3 CNOTs)
         manager.add_pass(Box::new(decompose::BasicDecomposePass::new()));
-        
+
         // 3. Backend-specific target decomposition
         let is_superconducting_basis = {
             let ng = &self.backend.native_gates;
@@ -101,23 +110,23 @@ impl Compiler {
         };
         if is_superconducting_basis {
             manager.add_pass(Box::new(
-                decompose::superconducting::SuperconductingDecomposePass::new()
+                decompose::superconducting::SuperconductingDecomposePass::new(),
             ));
         }
 
         // 4. Target-driven basis translation (handles any target gate set)
         if !self.backend.native_gates.is_empty() {
-            manager.add_pass(Box::new(
-                decompose::basis::BasisTranslationPass::new(&self.backend.native_gates)
-            ));
+            manager.add_pass(Box::new(decompose::basis::BasisTranslationPass::new(
+                &self.backend.native_gates,
+            )));
         }
 
         // 5. Rotation merging (collapse consecutive Rz/Rx/Ry)
         manager.add_pass(Box::new(rotation_merge::RotationMergingPass::new()));
-        
+
         // 6. Gate fusion: merge consecutive 1Q gates into a single U gate
         manager.add_pass(Box::new(fusion::GateFusionPass::new()));
-        
+
         manager.run(&mut result)?;
 
         // 5. Routing: map logical qubits to hardware topology
@@ -135,15 +144,17 @@ impl Compiler {
             // After routing, re-run optimization on the routed DAG
             let mut post_manager = PassManager::new();
             post_manager.add_pass(Box::new(passes::GateCancellationPass::new()));
-            post_manager.add_pass(Box::new(commutative_cancel::CommutativeCancellationPass::new()));
+            post_manager.add_pass(Box::new(
+                commutative_cancel::CommutativeCancellationPass::new(),
+            ));
             post_manager.add_pass(Box::new(kak::KakSynthesisPass::new()));
             post_manager.add_pass(Box::new(rotation_merge::RotationMergingPass::new()));
             post_manager.add_pass(Box::new(fusion::GateFusionPass::new()));
             // Re-run basis translation after KAK (KAK emits CNOT which may not be native)
             if !self.backend.native_gates.is_empty() {
-                post_manager.add_pass(Box::new(
-                    decompose::basis::BasisTranslationPass::new(&self.backend.native_gates)
-                ));
+                post_manager.add_pass(Box::new(decompose::basis::BasisTranslationPass::new(
+                    &self.backend.native_gates,
+                )));
             }
             post_manager.add_pass(Box::new(passes::GateCancellationPass::new()));
             post_manager.run(&mut result)?;
@@ -158,7 +169,7 @@ impl Compiler {
             twirl_manager.add_pass(Box::new(twirl_pass));
             twirl_manager.run(&mut result)?;
         }
-        
+
         Ok(result)
     }
 }
@@ -177,7 +188,7 @@ mod tests {
 
         let compiler = Compiler::new(BackendSpec::default());
         let compiled = compiler.compile(&dag)?;
-        
+
         // H * H should cancel out
         assert_eq!(compiled.gate_count(), 0);
         Ok(())
@@ -191,7 +202,7 @@ mod tests {
 
         let compiler = Compiler::new(BackendSpec::default());
         let compiled = compiler.compile(&dag)?;
-        
+
         // SWAP should become 3 CNOTs
         assert_eq!(compiled.gate_count(), 3);
         assert_eq!(compiled.count_ops_of_type("CNOT"), 3);
@@ -209,7 +220,7 @@ mod tests {
 
         let compiler = Compiler::new(BackendSpec::default());
         let compiled = compiler.compile(&dag)?;
-        
+
         assert_eq!(compiled.gate_count(), 3);
         Ok(())
     }
@@ -252,11 +263,17 @@ mod tests {
         let compiler = Compiler::new(backend);
         let compiled = compiler.compile(&dag)?;
 
-        assert_eq!(compiled.count_ops_of_type("CNOT"), 0,
+        assert_eq!(
+            compiled.count_ops_of_type("CNOT"),
+            0,
             "No CNOT should remain in CZ basis, got {} CNOTs. Total gates: {}",
-            compiled.count_ops_of_type("CNOT"), compiled.gate_count());
-        assert!(compiled.count_ops_of_type("CZ") > 0 || compiled.gate_count() > 0,
-            "Should have CZ gates or fused equivalents");
+            compiled.count_ops_of_type("CNOT"),
+            compiled.gate_count()
+        );
+        assert!(
+            compiled.count_ops_of_type("CZ") > 0 || compiled.gate_count() > 0,
+            "Should have CZ gates or fused equivalents"
+        );
         Ok(())
     }
 

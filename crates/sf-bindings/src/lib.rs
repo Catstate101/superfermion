@@ -13,11 +13,18 @@
 //! from superfermion._sf_core import QuantumDAG, Compiler, Router, CouplingMap
 //! ```
 
-use pyo3::prelude::*;
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::needless_range_loop)]
+
 use numpy::{PyArrayMethods, PyUntypedArrayMethods};
-use sf_ir::{QuantumDAG, OpType, Parameter, SerializedCircuit, MPSState};
+use pyo3::prelude::*;
 use sf_ir::gate_list::GateSequence;
-use sf_ir::state::{QuantumStateImpl, StatevectorState, DensityMatrixStateWrapper, MPSStateWrapper, StabilizerStateWrapper};
+use sf_ir::state::{
+    DensityMatrixStateWrapper, MPSStateWrapper, QuantumStateImpl, StabilizerStateWrapper,
+    StatevectorState,
+};
+use sf_ir::{MPSState, OpType, Parameter, QuantumDAG, SerializedCircuit};
 
 // ═══════════════════════════════════════════════════════════
 // MPS State Bindings
@@ -99,13 +106,19 @@ pub struct PyState {
 impl PyState {
     fn expectation(&self, observable: Vec<(Vec<u8>, f64, f64)>) -> PyResult<f64> {
         let terms = Self::parse_observable(&observable);
-        self.inner.expectation(&terms)
+        self.inner
+            .expectation(&terms)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     #[pyo3(signature = (shots, seed=42))]
-    fn sample(&self, shots: usize, seed: u64) -> PyResult<std::collections::HashMap<String, usize>> {
-        self.inner.sample(shots, seed)
+    fn sample(
+        &self,
+        shots: usize,
+        seed: u64,
+    ) -> PyResult<std::collections::HashMap<String, usize>> {
+        self.inner
+            .sample(shots, seed)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -116,7 +129,9 @@ impl PyState {
         param_values: std::collections::HashMap<String, f64>,
     ) -> PyResult<std::collections::HashMap<String, f64>> {
         let terms = Self::parse_observable(&observable);
-        let gradients = self.inner.grad(&terms, &dag.inner, &param_values)
+        let gradients = self
+            .inner
+            .grad(&terms, &dag.inner, &param_values)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let names = dag.inner.parameter_names();
         let mut result = std::collections::HashMap::new();
@@ -127,17 +142,20 @@ impl PyState {
     }
 
     fn entropy(&self) -> PyResult<f64> {
-        self.inner.entropy()
+        self.inner
+            .entropy()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     fn purity(&self) -> PyResult<f64> {
-        self.inner.purity()
+        self.inner
+            .purity()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     fn fidelity(&self, other: &PyState) -> PyResult<f64> {
-        self.inner.fidelity(other.inner.as_ref())
+        self.inner
+            .fidelity(other.inner.as_ref())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -147,7 +165,9 @@ impl PyState {
         dag: &PyQuantumDAG,
         param_values: std::collections::HashMap<String, f64>,
     ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
-        let matrix = self.inner.qfim(&dag.inner, &param_values)
+        let matrix = self
+            .inner
+            .qfim(&dag.inner, &param_values)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let n = matrix.len();
         if n == 0 {
@@ -156,31 +176,46 @@ impl PyState {
         Ok(numpy::PyArray2::from_vec2(py, &matrix).unwrap())
     }
 
-    fn numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
-        let v = self.inner.to_vec()
+    fn numpy<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        let v = self
+            .inner
+            .to_vec()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(numpy::PyArray1::from_vec(py, v))
     }
 
     fn probabilities<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-        let p = self.inner.probabilities()
+        let p = self
+            .inner
+            .probabilities()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(numpy::PyArray1::from_vec(py, p))
     }
 
     fn partial_trace(&self, keep_qubits: Vec<usize>) -> PyResult<Self> {
-        let new_state = self.inner.partial_trace(&keep_qubits)
+        let new_state = self
+            .inner
+            .partial_trace(&keep_qubits)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyState { inner: new_state })
     }
 
     #[staticmethod]
-    fn from_numpy(data: numpy::PyReadonlyArray1<num_complex::Complex64>, n_qubits: usize) -> PyResult<Self> {
+    fn from_numpy(
+        data: numpy::PyReadonlyArray1<num_complex::Complex64>,
+        n_qubits: usize,
+    ) -> PyResult<Self> {
         let v: Vec<num_complex::Complex64> = data.as_slice()?.to_vec();
         if v.len() != 1 << n_qubits {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("array length {} doesn't match 2^{} = {}", v.len(), n_qubits, 1usize << n_qubits)
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "array length {} doesn't match 2^{} = {}",
+                v.len(),
+                n_qubits,
+                1usize << n_qubits
+            )));
         }
         Ok(PyState {
             inner: Box::new(StatevectorState::new(v, n_qubits, "cpu")),
@@ -227,12 +262,13 @@ impl PyState {
     }
 
     fn parse_observable(terms: &[(Vec<u8>, f64, f64)]) -> Vec<sf_ir::PauliTerm> {
-        terms.iter().map(|(paulis, re, im)| {
-            sf_ir::PauliTerm {
+        terms
+            .iter()
+            .map(|(paulis, re, im)| sf_ir::PauliTerm {
                 paulis: paulis.clone(),
                 coef: num_complex::Complex64::new(*re, *im),
-            }
-        }).collect()
+            })
+            .collect()
     }
 }
 
@@ -258,31 +294,44 @@ impl PyQuantumDAG {
     /// Add a gate to the circuit.
     /// Qubit indices are passed through directly to Rust (LSB convention).
     /// The Python RustBackend handles MSB↔LSB conversion via statevector transpose.
-    fn add_gate(&mut self, gate_name: &str, qubits: Vec<usize>, params: Vec<pyo3::Bound<'_, pyo3::PyAny>>) -> PyResult<()> {
-        let rust_params: Vec<Parameter> = params.into_iter().map(|p| {
-            if let Ok(f) = p.extract::<f64>() {
-                Parameter::Const(f)
-            } else if let Ok(s) = p.extract::<String>() {
-                Parameter::Variable { name: s, id: 0 }
-            } else {
-                Parameter::Const(0.0)
-            }
-        }).collect();
-        
+    fn add_gate(
+        &mut self,
+        gate_name: &str,
+        qubits: Vec<usize>,
+        params: Vec<pyo3::Bound<'_, pyo3::PyAny>>,
+    ) -> PyResult<()> {
+        let rust_params: Vec<Parameter> = params
+            .into_iter()
+            .map(|p| {
+                if let Ok(f) = p.extract::<f64>() {
+                    Parameter::Const(f)
+                } else if let Ok(s) = p.extract::<String>() {
+                    Parameter::Variable { name: s, id: 0 }
+                } else {
+                    Parameter::Const(0.0)
+                }
+            })
+            .collect();
+
         let op = Self::parse_gate(gate_name, &rust_params)?;
         self.inner.add_op(op, &qubits);
         Ok(())
     }
 
     /// Add an opaque unitary matrix gate directly to the DAG.
-    fn add_unitary(&mut self, qubits: Vec<usize>, matrix: numpy::PyReadonlyArray2<num_complex::Complex64>) -> PyResult<()> {
+    fn add_unitary(
+        &mut self,
+        qubits: Vec<usize>,
+        matrix: numpy::PyReadonlyArray2<num_complex::Complex64>,
+    ) -> PyResult<()> {
         let shape = matrix.shape();
         let rows = shape[0];
         let cols = shape[1];
         if rows != cols || !rows.is_power_of_two() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Unitary matrix must be square with power-of-2 dimension, got {}x{}", rows, cols)
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unitary matrix must be square with power-of-2 dimension, got {}x{}",
+                rows, cols
+            )));
         }
         let slice = matrix.as_slice()?;
         let dm = nalgebra::DMatrix::from_row_slice(rows, cols, slice);
@@ -358,7 +407,10 @@ impl PyQuantumDAG {
     }
 
     /// Export to full unitary matrix (NumPy).
-    fn to_unitary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray2<num_complex::Complex64>>> {
+    fn to_unitary<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray2<num_complex::Complex64>>> {
         let u = self.inner.to_unitary();
         let (r, c) = u.shape();
         // nalgebra matrices are column-major by default
@@ -369,13 +421,19 @@ impl PyQuantumDAG {
     }
 
     /// Run high-performance statevector simulation and return the final statevector.
-    fn simulate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+    fn simulate<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
         let state = self.inner.simulate();
         Ok(numpy::PyArray1::from_vec(py, state))
     }
 
     /// Run high-performance density-matrix simulation and return the vectorized DM.
-    fn simulate_dm<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+    fn simulate_dm<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
         let state = self.inner.simulate_dm();
         Ok(numpy::PyArray1::from_vec(py, state))
     }
@@ -386,7 +444,12 @@ impl PyQuantumDAG {
     }
 
     /// Run high-performance MPS simulation and return counts directly.
-    fn sample_mps(&self, bond_dim: usize, shots: usize, seed: u64) -> std::collections::HashMap<String, usize> {
+    fn sample_mps(
+        &self,
+        bond_dim: usize,
+        shots: usize,
+        seed: u64,
+    ) -> std::collections::HashMap<String, usize> {
         self.inner.sample_mps(bond_dim, shots, seed)
     }
 
@@ -440,18 +503,25 @@ impl PyQuantumDAG {
         match method {
             "statevector" => {
                 let sv = if device == "gpu" {
-                    self.inner.simulate_on("gpu")
+                    self.inner
+                        .simulate_on("gpu")
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?
                 } else {
                     self.inner.simulate()
                 };
-                Ok(PyState::new(Box::new(StatevectorState::new(sv, self.inner.n_qubits, device))))
+                Ok(PyState::new(Box::new(StatevectorState::new(
+                    sv,
+                    self.inner.n_qubits,
+                    device,
+                ))))
             }
             "density_matrix" => {
                 let dm_vec = self.inner.simulate_dm();
                 let mut dm = sf_ir::dm::DensityMatrixState::new(self.inner.n_qubits);
                 dm.data = dm_vec;
-                Ok(PyState::new(Box::new(DensityMatrixStateWrapper::new(dm, device))))
+                Ok(PyState::new(Box::new(DensityMatrixStateWrapper::new(
+                    dm, device,
+                ))))
             }
             "mps" => {
                 let mps = self.inner.evolve_mps(bond_dim);
@@ -459,20 +529,27 @@ impl PyQuantumDAG {
             }
             "stabilizer" => {
                 let gates = self.inner.to_gate_records();
-                let gate_list: Vec<(String, Vec<usize>)> = gates.iter()
+                let gate_list: Vec<(String, Vec<usize>)> = gates
+                    .iter()
                     .filter(|(name, _, _)| {
                         let up = name.to_uppercase();
                         up != "BARRIER" && up != "MEASURE" && up != "RESET"
                     })
                     .map(|(name, qubits, _params)| (name.to_uppercase(), qubits.clone()))
                     .collect();
-                let tab = sf_ir::stabilizer::StabilizerTableau::from_gate_list(self.inner.n_qubits, &gate_list)
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
-                Ok(PyState::new(Box::new(StabilizerStateWrapper::new(tab, device))))
+                let tab = sf_ir::stabilizer::StabilizerTableau::from_gate_list(
+                    self.inner.n_qubits,
+                    &gate_list,
+                )
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+                Ok(PyState::new(Box::new(StabilizerStateWrapper::new(
+                    tab, device,
+                ))))
             }
-            _ => Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Unknown method '{}'. Use 'statevector', 'density_matrix', 'mps', or 'stabilizer'.", method)
-            ))
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown method '{}'. Use 'statevector', 'density_matrix', 'mps', or 'stabilizer'.",
+                method
+            ))),
         }
     }
 
@@ -522,12 +599,13 @@ impl PyQuantumDAG {
         observable: Vec<(Vec<u8>, f64, f64)>,
         param_values: std::collections::HashMap<String, f64>,
     ) -> PyResult<std::collections::HashMap<String, f64>> {
-        let terms: Vec<sf_ir::PauliTerm> = observable.iter().map(|(paulis, re, im)| {
-            sf_ir::PauliTerm {
+        let terms: Vec<sf_ir::PauliTerm> = observable
+            .iter()
+            .map(|(paulis, re, im)| sf_ir::PauliTerm {
                 paulis: paulis.clone(),
                 coef: num_complex::Complex64::new(*re, *im),
-            }
-        }).collect();
+            })
+            .collect();
 
         let result = sf_ir::adjoint_grad(&self.inner, &terms, &param_values);
         let mut out = std::collections::HashMap::new();
@@ -550,8 +628,8 @@ impl PyQuantumDAG {
 
         let probs: Vec<f64> = sv.iter().map(|c| c.re * c.re + c.im * c.im).collect();
 
-        use rand::SeedableRng;
         use rand::Rng;
+        use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
@@ -564,11 +642,16 @@ impl PyQuantumDAG {
 
         for _ in 0..shots {
             let r: f64 = rng.gen::<f64>() * total;
-            let idx = match cumulative.binary_search_by(|v| v.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less)) {
+            let idx = match cumulative
+                .binary_search_by(|v| v.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less))
+            {
                 Ok(i) => i.min(dim - 1),
                 Err(i) => (i - 1).min(dim - 1),
             };
-            let bitstring: String = (0..n).rev().map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' }).collect();
+            let bitstring: String = (0..n)
+                .rev()
+                .map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' })
+                .collect();
             *counts.entry(bitstring).or_insert(0) += 1;
         }
 
@@ -577,7 +660,10 @@ impl PyQuantumDAG {
 
     /// Simulate and apply MSB/LSB endianness transpose in Rust before returning.
     /// Returns statevector in MSB (q0=leftmost) convention directly.
-    fn simulate_msb<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+    fn simulate_msb<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
         let sv = self.inner.simulate();
         let n = self.inner.n_qubits;
         let dim = sv.len();
@@ -593,8 +679,14 @@ impl PyQuantumDAG {
     /// Simulate on a specified device: "cpu" or "gpu".
     /// Returns statevector in LSB convention (same as simulate()).
     /// Raises RuntimeError if GPU is unavailable or circuit is too large for VRAM.
-    fn simulate_on<'py>(&self, py: Python<'py>, device: &str) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
-        let sv = self.inner.simulate_on(device)
+    fn simulate_on<'py>(
+        &self,
+        py: Python<'py>,
+        device: &str,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        let sv = self
+            .inner
+            .simulate_on(device)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         Ok(numpy::PyArray1::from_vec(py, sv))
     }
@@ -624,15 +716,17 @@ impl PyQuantumDAG {
 
             for (noise_qubit, kraus_flat) in &noise_ops {
                 if inst.qubits.contains(noise_qubit) {
-                    let kraus_matrices: Vec<nalgebra::DMatrix<num_complex::Complex64>> =
-                        kraus_flat.chunks(8).map(|flat| {
+                    let kraus_matrices: Vec<nalgebra::DMatrix<num_complex::Complex64>> = kraus_flat
+                        .chunks(8)
+                        .map(|flat| {
                             let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(2, 2);
                             m[(0, 0)] = num_complex::Complex64::new(flat[0], flat[1]);
                             m[(0, 1)] = num_complex::Complex64::new(flat[2], flat[3]);
                             m[(1, 0)] = num_complex::Complex64::new(flat[4], flat[5]);
                             m[(1, 1)] = num_complex::Complex64::new(flat[6], flat[7]);
                             m
-                        }).collect();
+                        })
+                        .collect();
                     state.apply_kraus(&kraus_matrices, *noise_qubit);
                 }
             }
@@ -748,6 +842,7 @@ pub struct PyCompiler {
 #[pymethods]
 impl PyCompiler {
     #[new]
+    #[pyo3(signature = (name, native_gates, n_qubits, connectivity, optimization_level=None))]
     fn new(
         name: &str,
         native_gates: Vec<String>,
@@ -1188,7 +1283,14 @@ impl PyStabilizerTableau {
     }
 
     /// Export tableau data as numpy arrays: (x, z, r) where x/z are (2n, n) uint8.
-    fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, numpy::PyArray2<u8>>, Bound<'py, numpy::PyArray2<u8>>, Bound<'py, numpy::PyArray1<u8>>)> {
+    fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray2<u8>>,
+        Bound<'py, numpy::PyArray2<u8>>,
+        Bound<'py, numpy::PyArray1<u8>>,
+    )> {
         let (x_flat, z_flat, r_flat) = self.inner.to_raw();
         let n = self.inner.n;
         let x_arr = numpy::PyArray1::from_vec(py, x_flat).reshape([2 * n, n])?;
@@ -1227,7 +1329,11 @@ fn pauli_twirl(gates: Vec<(String, Vec<usize>)>, seed: u64) -> Vec<(String, Vec<
 /// Avoids Python-side tuple allocation by accessing GateRecord attributes via PyO3.
 /// Returns a list of (name, qubits, params) ready for Circuit construction.
 #[pyfunction]
-fn pauli_twirl_circuit(_py: pyo3::Python<'_>, circuit: &pyo3::Bound<'_, pyo3::PyAny>, seed: u64) -> PyResult<Vec<(String, Vec<usize>, Vec<f64>)>> {
+fn pauli_twirl_circuit(
+    _py: pyo3::Python<'_>,
+    circuit: &pyo3::Bound<'_, pyo3::PyAny>,
+    seed: u64,
+) -> PyResult<Vec<(String, Vec<usize>, Vec<f64>)>> {
     // Get circuit._gates (list of GateRecord)
     let gates = circuit.getattr("_gates")?;
     let gate_list: &pyo3::Bound<'_, pyo3::types::PyList> = gates.downcast()?;
@@ -1321,14 +1427,19 @@ impl PyGateSequence {
     /// Add an opaque unitary matrix gate.
     /// The matrix is stored in Rust without decomposition and emitted as
     /// OpType::Unitary when converting to a QuantumDAG via to_dag().
-    fn add_unitary(&mut self, qubits: Vec<usize>, matrix: numpy::PyReadonlyArray2<num_complex::Complex64>) -> PyResult<()> {
+    fn add_unitary(
+        &mut self,
+        qubits: Vec<usize>,
+        matrix: numpy::PyReadonlyArray2<num_complex::Complex64>,
+    ) -> PyResult<()> {
         let shape = matrix.shape();
         let rows = shape[0];
         let cols = shape[1];
         if rows != cols || !rows.is_power_of_two() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Unitary matrix must be square with power-of-2 dimension, got {}x{}", rows, cols)
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unitary matrix must be square with power-of-2 dimension, got {}x{}",
+                rows, cols
+            )));
         }
         let slice = matrix.as_slice()?;
         let dm = nalgebra::DMatrix::from_row_slice(rows, cols, slice);
@@ -1389,28 +1500,48 @@ impl PyGateSequence {
         let pauli = ["I", "X", "Z", "Y"];
 
         // 14 valid CNOT Pauli pairs: (p1_before, p2_before, p1_after, p2_after)
-        let cnot_pairs: [(usize,usize,usize,usize); 14] = [
-            (0,0,0,0),(0,1,0,1),(0,2,2,2),(0,3,2,3),
-            (1,0,1,1),(1,1,1,0),(1,3,3,2),
-            (2,0,2,0),(2,1,2,1),(2,2,0,2),(2,3,0,3),
-            (3,0,3,1),(3,1,3,0),(3,2,1,3),
+        let cnot_pairs: [(usize, usize, usize, usize); 14] = [
+            (0, 0, 0, 0),
+            (0, 1, 0, 1),
+            (0, 2, 2, 2),
+            (0, 3, 2, 3),
+            (1, 0, 1, 1),
+            (1, 1, 1, 0),
+            (1, 3, 3, 2),
+            (2, 0, 2, 0),
+            (2, 1, 2, 1),
+            (2, 2, 0, 2),
+            (2, 3, 0, 3),
+            (3, 0, 3, 1),
+            (3, 1, 3, 0),
+            (3, 2, 1, 3),
         ];
         // 14 valid CZ Pauli pairs
-        let cz_pairs: [(usize,usize,usize,usize); 14] = [
-            (0,0,0,0),(0,1,2,1),(0,2,0,2),(0,3,2,3),
-            (1,0,1,2),(1,1,3,3),(1,2,1,0),
-            (2,0,2,0),(2,1,0,1),(2,2,2,2),(2,3,0,3),
-            (3,0,3,2),(3,2,3,0),(3,3,1,1),
+        let cz_pairs: [(usize, usize, usize, usize); 14] = [
+            (0, 0, 0, 0),
+            (0, 1, 2, 1),
+            (0, 2, 0, 2),
+            (0, 3, 2, 3),
+            (1, 0, 1, 2),
+            (1, 1, 3, 3),
+            (1, 2, 1, 0),
+            (2, 0, 2, 0),
+            (2, 1, 0, 1),
+            (2, 2, 2, 2),
+            (2, 3, 0, 3),
+            (3, 0, 3, 2),
+            (3, 2, 3, 0),
+            (3, 3, 1, 1),
         ];
 
         let n = self.inner.len();
-        let mut out = GateSequence::with_capacity(
-            self.inner.n_qubits, self.inner.n_cbits, n * 3,
-        );
+        let mut out = GateSequence::with_capacity(self.inner.n_qubits, self.inner.n_cbits, n * 3);
 
         // Simple xorshift64 RNG (fast, deterministic from seed)
         let mut state: u64 = seed ^ 0x5DEECE66D;
-        if state == 0 { state = 1; }
+        if state == 0 {
+            state = 1;
+        }
         let mut next_u64 = || -> u64 {
             state ^= state << 13;
             state ^= state >> 7;
@@ -1426,13 +1557,21 @@ impl PyGateSequence {
                 let idx = (next_u64() % 14) as usize;
                 let (p1b, p2b, p1a, p2a) = pairs[idx];
 
-                if p1b != 0 { out.push(pauli[p1b], &[q0], &[]); }
-                if p2b != 0 { out.push(pauli[p2b], &[q1], &[]); }
+                if p1b != 0 {
+                    out.push(pauli[p1b], &[q0], &[]);
+                }
+                if p2b != 0 {
+                    out.push(pauli[p2b], &[q1], &[]);
+                }
 
                 out.push(name, qubits, params);
 
-                if p1a != 0 { out.push(pauli[p1a], &[q0], &[]); }
-                if p2a != 0 { out.push(pauli[p2a], &[q1], &[]); }
+                if p1a != 0 {
+                    out.push(pauli[p1a], &[q0], &[]);
+                }
+                if p2a != 0 {
+                    out.push(pauli[p2a], &[q1], &[]);
+                }
             } else {
                 out.push(name, qubits, params);
             }
@@ -1486,10 +1625,12 @@ fn hamiltonian_expval(
             for (q, &pauli_op) in paulis.iter().enumerate() {
                 let bit_pos = n_qubits - 1 - q;
                 match pauli_op {
-                    1 => { // X
+                    1 => {
+                        // X
                         target_idx ^= 1 << bit_pos;
                     }
-                    2 => { // Y
+                    2 => {
+                        // Y
                         target_idx ^= 1 << bit_pos;
                         if (i >> bit_pos) & 1 == 0 {
                             phase *= num_complex::Complex64::new(0.0, -1.0);
@@ -1497,7 +1638,8 @@ fn hamiltonian_expval(
                             phase *= num_complex::Complex64::new(0.0, 1.0);
                         }
                     }
-                    3 => { // Z
+                    3 => {
+                        // Z
                         if (i >> bit_pos) & 1 == 1 {
                             phase *= -1.0;
                         }

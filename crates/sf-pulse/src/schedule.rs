@@ -22,16 +22,28 @@ pub struct ChannelId {
 
 impl ChannelId {
     pub fn drive(qubit: usize) -> Self {
-        Self { channel_type: ChannelType::Drive, index: qubit }
+        Self {
+            channel_type: ChannelType::Drive,
+            index: qubit,
+        }
     }
     pub fn control(index: usize) -> Self {
-        Self { channel_type: ChannelType::Control, index }
+        Self {
+            channel_type: ChannelType::Control,
+            index,
+        }
     }
     pub fn measure(qubit: usize) -> Self {
-        Self { channel_type: ChannelType::Measure, index: qubit }
+        Self {
+            channel_type: ChannelType::Measure,
+            index: qubit,
+        }
     }
     pub fn acquire(qubit: usize) -> Self {
-        Self { channel_type: ChannelType::Acquire, index: qubit }
+        Self {
+            channel_type: ChannelType::Acquire,
+            index: qubit,
+        }
     }
 
     pub fn name(&self) -> String {
@@ -80,7 +92,12 @@ impl PulseSchedule {
     }
 
     /// Add a pulse instruction at a specific time.
-    pub fn play(&mut self, envelope: PulseEnvelope, channel: ChannelId, t0: Option<usize>) -> &mut Self {
+    pub fn play(
+        &mut self,
+        envelope: PulseEnvelope,
+        channel: ChannelId,
+        t0: Option<usize>,
+    ) -> &mut Self {
         let ch_name = channel.name();
         let start = t0.unwrap_or_else(|| *self.cursors.get(&ch_name).unwrap_or(&0));
 
@@ -167,18 +184,38 @@ mod tests {
     #[test]
     fn test_schedule_sequential() {
         let mut sched = PulseSchedule::new("test");
-        sched.play(PulseEnvelope::gaussian(100, 25.0, 0.5), ChannelId::drive(0), None);
-        sched.play(PulseEnvelope::gaussian(100, 25.0, 0.3), ChannelId::drive(0), None);
+        sched.play(
+            PulseEnvelope::gaussian(100, 25.0, 0.5),
+            ChannelId::drive(0),
+            None,
+        );
+        sched.play(
+            PulseEnvelope::gaussian(100, 25.0, 0.3),
+            ChannelId::drive(0),
+            None,
+        );
         assert_eq!(sched.duration(), 200);
     }
 
     #[test]
     fn test_schedule_barrier() {
         let mut sched = PulseSchedule::new("test");
-        sched.play(PulseEnvelope::gaussian(200, 50.0, 0.5), ChannelId::drive(0), None);
-        sched.play(PulseEnvelope::gaussian(100, 25.0, 0.3), ChannelId::drive(1), None);
+        sched.play(
+            PulseEnvelope::gaussian(200, 50.0, 0.5),
+            ChannelId::drive(0),
+            None,
+        );
+        sched.play(
+            PulseEnvelope::gaussian(100, 25.0, 0.3),
+            ChannelId::drive(1),
+            None,
+        );
         sched.barrier();
-        sched.play(PulseEnvelope::gaussian(50, 12.0, 0.4), ChannelId::drive(1), None);
+        sched.play(
+            PulseEnvelope::gaussian(50, 12.0, 0.4),
+            ChannelId::drive(1),
+            None,
+        );
         assert_eq!(sched.duration(), 250);
     }
 }

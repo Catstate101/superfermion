@@ -66,7 +66,9 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
                 (qubits_str.as_str(), None)
             };
             if let Some(q_idx) = parse_first_bracket_index(q_part) {
-                if q_idx >= n { continue; }
+                if q_idx >= n {
+                    continue;
+                }
                 let qubit = n - 1 - q_idx;
                 let cbit = c_part
                     .and_then(parse_first_bracket_index)
@@ -190,8 +192,7 @@ fn eval_simple_expr(s: &str) -> f64 {
     let s = s.trim();
 
     // Handle unary minus
-    if s.starts_with('-') {
-        let rest = &s[1..];
+    if let Some(rest) = s.strip_prefix('-') {
         // Check if rest starts with a digit
         if rest.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
             return -eval_simple_expr(rest);

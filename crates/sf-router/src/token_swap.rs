@@ -21,7 +21,9 @@ pub fn token_swap_route(
     let n = target_perm.len();
     if n != coupling.n_qubits() {
         return Err(RouterError::TokenSwapError(format!(
-            "Permutation size {} != coupling map size {}", n, coupling.n_qubits()
+            "Permutation size {} != coupling map size {}",
+            n,
+            coupling.n_qubits()
         )));
     }
 

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::dag::{QubitId, QuantumDAG};
+use crate::dag::{QuantumDAG, QubitId};
 use crate::ops::{OpType, Parameter};
 
 /// A flat, compact gate sequence stored as Structure-of-Arrays.
@@ -27,18 +27,18 @@ use crate::ops::{OpType, Parameter};
 pub struct GateSequence {
     /// Gate names (uppercase, e.g. "RX", "CNOT")
     names: Vec<String>,
-    
+
     /// Flat array of all qubit indices across all gates
     qubits_data: Vec<QubitId>,
     /// qubit_offsets[i] = start index in qubits_data for gate i
     /// qubit_offsets[i+1] - qubit_offsets[i] = number of qubits for gate i
     qubit_offsets: Vec<u32>,
-    
+
     /// Flat array of all gate parameters across all gates
     params_data: Vec<f64>,
     /// param_offsets[i] = start index in params_data for gate i
     param_offsets: Vec<u32>,
-    
+
     /// Opaque unitary matrices keyed by gate index (sparse -- only populated
     /// for gates added via `add_unitary`, zero overhead for normal circuits)
     matrices: HashMap<usize, nalgebra::DMatrix<num_complex::Complex64>>,
@@ -63,7 +63,7 @@ impl GateSequence {
             n_cbits,
         }
     }
-    
+
     /// Pre-allocate capacity for `expected_gates` gates.
     /// Avoids Vec reallocations during batch construction.
     pub fn with_capacity(n_qubits: usize, n_cbits: usize, expected_gates: usize) -> Self {
@@ -78,18 +78,18 @@ impl GateSequence {
             n_cbits,
         }
     }
-    
+
     /// Add a single gate to the sequence.
     pub fn push(&mut self, name: &str, qubits: &[QubitId], params: &[f64]) {
         self.qubits_data.extend_from_slice(qubits);
         self.qubit_offsets.push(self.qubits_data.len() as u32);
-        
+
         self.params_data.extend_from_slice(params);
         self.param_offsets.push(self.params_data.len() as u32);
-        
+
         self.names.push(name.to_string());
     }
-    
+
     /// Batch-extend from Python-compatible tuple format.
     /// Each record is (name: String, qubits: Vec<usize>, params: Vec<f64>).
     pub fn extend(&mut self, records: &[(String, Vec<QubitId>, Vec<f64>)]) {
@@ -99,15 +99,19 @@ impl GateSequence {
         self.qubit_offsets.reserve(total);
         self.params_data.reserve(total);
         self.param_offsets.reserve(total);
-        
+
         for (name, qubits, params) in records {
             self.push(name, qubits, params);
         }
     }
-    
+
     /// Add an opaque unitary matrix gate. The matrix is stored internally
     /// and emitted as `OpType::Unitary` when converting to a QuantumDAG.
-    pub fn add_unitary(&mut self, qubits: &[QubitId], matrix: nalgebra::DMatrix<num_complex::Complex64>) {
+    pub fn add_unitary(
+        &mut self,
+        qubits: &[QubitId],
+        matrix: nalgebra::DMatrix<num_complex::Complex64>,
+    ) {
         let idx = self.names.len();
         self.push("UNITARY", qubits, &[]);
         self.matrices.insert(idx, matrix);
@@ -129,24 +133,24 @@ impl GateSequence {
         angles: &[f64],
     ) -> Self {
         let pairs_per_layer = n_qubits / 2;
-        let gates_per_layer = pairs_per_layer * 5;  // 5 gates per SU(4) pair
+        let gates_per_layer = pairs_per_layer * 5; // 5 gates per SU(4) pair
         let total_gates = depth * gates_per_layer;
-        
+
         let mut gs = Self::with_capacity(n_qubits, n_cbits, total_gates);
-        
+
         for layer in 0..depth {
             let perm_off = layer * n_qubits;
             let angle_off = layer * pairs_per_layer * 4;
-            
+
             for pair_idx in 0..pairs_per_layer {
                 let q0 = perms[perm_off + pair_idx * 2] as usize;
                 let q1 = perms[perm_off + pair_idx * 2 + 1] as usize;
-                
+
                 let a0 = angles[angle_off + pair_idx * 4];
                 let a1 = angles[angle_off + pair_idx * 4 + 1];
                 let a2 = angles[angle_off + pair_idx * 4 + 2];
                 let a3 = angles[angle_off + pair_idx * 4 + 3];
-                
+
                 // SU(4) = RY(a0,q0) · RY(a1,q1) · CNOT(q0,q1) · RY(a2,q0) · RY(a3,q1)
                 gs.push("RY", &[q0], &[a0]);
                 gs.push("RY", &[q1], &[a1]);
@@ -155,39 +159,47 @@ impl GateSequence {
                 gs.push("RY", &[q1], &[a3]);
             }
         }
-        
+
         gs
     }
-    
+
     /// Number of gates.
     pub fn len(&self) -> usize {
         self.names.len()
     }
-    
+
     /// True if empty.
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
-    
+
     /// Number of gates (alias for len).
     pub fn gate_count(&self) -> usize {
         self.len()
     }
-    
+
     /// Get qubits for gate at index i.
     fn qubits_at(&self, i: usize) -> &[QubitId] {
-        let start = if i == 0 { 0 } else { self.qubit_offsets[i - 1] as usize };
+        let start = if i == 0 {
+            0
+        } else {
+            self.qubit_offsets[i - 1] as usize
+        };
         let end = self.qubit_offsets[i] as usize;
         &self.qubits_data[start..end]
     }
-    
+
     /// Get params for gate at index i.
     fn params_at(&self, i: usize) -> &[f64] {
-        let start = if i == 0 { 0 } else { self.param_offsets[i - 1] as usize };
+        let start = if i == 0 {
+            0
+        } else {
+            self.param_offsets[i - 1] as usize
+        };
         let end = self.param_offsets[i] as usize;
         &self.params_data[start..end]
     }
-    
+
     /// Export as (name, qubits, params) tuples for Python interop.
     pub fn to_gate_records(&self) -> Vec<(String, Vec<QubitId>, Vec<f64>)> {
         let mut records = Vec::with_capacity(self.len());
@@ -200,12 +212,12 @@ impl GateSequence {
         }
         records
     }
-    
+
     /// Convert to a full QuantumDAG for compiler passes.
     /// This is the bridge between lightweight storage and compilation.
     pub fn to_dag(&self) -> QuantumDAG {
         let mut dag = QuantumDAG::new(self.n_qubits, self.n_cbits);
-        
+
         for i in 0..self.len() {
             let qubits = self.qubits_at(i);
 
@@ -218,21 +230,18 @@ impl GateSequence {
                 dag.add_op(op_type, qubits);
             }
         }
-        
+
         dag
     }
-    
+
     /// Get a reference to the name at index i.
     pub fn name_at(&self, i: usize) -> &str {
         &self.names[i]
     }
-    
+
     /// Iterate over all gates as (name, qubits, params) tuples.
     pub fn iter(&self) -> GateSequenceIter<'_> {
-        GateSequenceIter {
-            seq: self,
-            pos: 0,
-        }
+        GateSequenceIter { seq: self, pos: 0 }
     }
 }
 
@@ -244,16 +253,20 @@ pub struct GateSequenceIter<'a> {
 
 impl<'a> Iterator for GateSequenceIter<'a> {
     type Item = (&'a str, &'a [QubitId], &'a [f64]);
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         if self.pos >= self.seq.len() {
             return None;
         }
         let i = self.pos;
         self.pos += 1;
-        Some((self.seq.name_at(i), self.seq.qubits_at(i), self.seq.params_at(i)))
+        Some((
+            self.seq.name_at(i),
+            self.seq.qubits_at(i),
+            self.seq.params_at(i),
+        ))
     }
-    
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.seq.len() - self.pos;
         (remaining, Some(remaining))
@@ -313,7 +326,10 @@ fn parse_gate_name(name: &str, params: &[f64]) -> OpType {
         "barrier" => OpType::Barrier,
         "input" => OpType::Input,
         "output" => OpType::Output,
-        _ => OpType::Custom(name.to_string(), params.iter().map(|&v| Parameter::Const(v)).collect()),
+        _ => OpType::Custom(
+            name.to_string(),
+            params.iter().map(|&v| Parameter::Const(v)).collect(),
+        ),
     }
 }
 
@@ -325,7 +341,7 @@ fn param_single(params: &[f64], default: f64) -> Parameter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_new_empty() {
         let gs = GateSequence::new(3, 2);
@@ -333,14 +349,14 @@ mod tests {
         assert_eq!(gs.n_qubits, 3);
         assert_eq!(gs.n_cbits, 2);
     }
-    
+
     #[test]
     fn test_push_and_readback() {
         let mut gs = GateSequence::new(2, 0);
         gs.push("RX", &[0], &[0.5]);
         gs.push("CNOT", &[0, 1], &[]);
         gs.push("RZZ", &[1, 0], &[1.2]);
-        
+
         assert_eq!(gs.len(), 3);
         assert_eq!(gs.name_at(0), "RX");
         assert_eq!(gs.qubits_at(0), &[0]);
@@ -352,7 +368,7 @@ mod tests {
         assert_eq!(gs.qubits_at(2), &[1, 0]);
         assert_eq!(gs.params_at(2), &[1.2]);
     }
-    
+
     #[test]
     fn test_extend() {
         let mut gs = GateSequence::new(2, 0);
@@ -367,13 +383,13 @@ mod tests {
         assert_eq!(gs.name_at(1), "CX");
         assert_eq!(gs.name_at(2), "X");
     }
-    
+
     #[test]
     fn test_to_gate_records() {
         let mut gs = GateSequence::new(2, 0);
         gs.push("H", &[0], &[]);
         gs.push("CNOT", &[0, 1], &[]);
-        
+
         let records = gs.to_gate_records();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].0, "H");
@@ -382,23 +398,23 @@ mod tests {
         assert_eq!(records[1].0, "CNOT");
         assert_eq!(records[1].1, vec![0, 1]);
     }
-    
+
     #[test]
     fn test_to_dag() {
         let mut gs = GateSequence::new(2, 0);
         gs.push("H", &[0], &[]);
         gs.push("CNOT", &[0, 1], &[]);
         gs.push("X", &[1], &[]);
-        
+
         let dag = gs.to_dag();
         assert_eq!(dag.gate_count(), 3);
-        assert_eq!(dag.depth(), 3);  // H(0) → CNOT(0,1) → X(1)
-        
+        assert_eq!(dag.depth(), 3); // H(0) → CNOT(0,1) → X(1)
+
         // Verify round-trip through gate records
         let records = dag.to_gate_records();
         assert_eq!(records.len(), 3);
     }
-    
+
     #[test]
     fn test_with_capacity() {
         let mut gs = GateSequence::with_capacity(100, 0, 10000);
@@ -407,13 +423,13 @@ mod tests {
         }
         assert_eq!(gs.len(), 10000);
     }
-    
+
     #[test]
     fn test_iterator() {
         let mut gs = GateSequence::new(2, 0);
         gs.push("H", &[0], &[]);
         gs.push("Z", &[1], &[]);
-        
+
         let gates: Vec<_> = gs.iter().collect();
         assert_eq!(gates.len(), 2);
         assert_eq!(gates[0].0, "H");

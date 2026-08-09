@@ -4,9 +4,9 @@
 //! sequence of native gates. This replaces the Python `BasisTranslationPass`
 //! shim with a fast, in-place DAG transformation.
 
-use sf_ir::{OpType, QuantumDAG};
+use crate::{CompilerError, Pass};
 use sf_ir::ops::Parameter;
-use crate::{Pass, CompilerError};
+use sf_ir::{OpType, QuantumDAG};
 use std::collections::HashSet;
 use std::f64::consts::PI;
 
@@ -28,7 +28,9 @@ impl BasisTranslationPass {
             return true;
         }
         match op {
-            OpType::Measure | OpType::MeasureAll | OpType::Reset | OpType::Barrier | OpType::Id => true,
+            OpType::Measure | OpType::MeasureAll | OpType::Reset | OpType::Barrier | OpType::Id => {
+                true
+            }
             _ => self.native.contains(&op.name()),
         }
     }
@@ -79,9 +81,13 @@ impl BasisTranslationPass {
         match op {
             OpType::X => {
                 let q = qubits[0];
-                if self.has("X") { vec![(OpType::X, vec![q])] }
-                else if self.has("SX") { vec![(OpType::SX, vec![q]), (OpType::SX, vec![q])] }
-                else { vec![(OpType::Rx(Parameter::Const(PI)), vec![q])] }
+                if self.has("X") {
+                    vec![(OpType::X, vec![q])]
+                } else if self.has("SX") {
+                    vec![(OpType::SX, vec![q]), (OpType::SX, vec![q])]
+                } else {
+                    vec![(OpType::Rx(Parameter::Const(PI)), vec![q])]
+                }
             }
             OpType::Y => {
                 let q = qubits[0];
@@ -102,8 +108,9 @@ impl BasisTranslationPass {
             OpType::H => self.h_decomp(qubits[0]),
             OpType::CNOT => self.cx_decomp(qubits[0], qubits[1]),
             OpType::CZ => {
-                if self.has("CZ") { vec![(OpType::CZ, vec![qubits[0], qubits[1]])] }
-                else {
+                if self.has("CZ") {
+                    vec![(OpType::CZ, vec![qubits[0], qubits[1]])]
+                } else {
                     let mut v = self.h_decomp(qubits[1]);
                     v.extend(self.cx_decomp(qubits[0], qubits[1]));
                     v.extend(self.h_decomp(qubits[1]));
@@ -115,8 +122,11 @@ impl BasisTranslationPass {
             OpType::T => vec![(OpType::Rz(Parameter::Const(PI / 4.0)), vec![qubits[0]])],
             OpType::Tdg => vec![(OpType::Rz(Parameter::Const(-PI / 4.0)), vec![qubits[0]])],
             OpType::SX => {
-                if self.has("SX") { vec![(OpType::SX, vec![qubits[0]])] }
-                else { vec![(OpType::Rx(Parameter::Const(PI2)), vec![qubits[0]])] }
+                if self.has("SX") {
+                    vec![(OpType::SX, vec![qubits[0]])]
+                } else {
+                    vec![(OpType::Rx(Parameter::Const(PI2)), vec![qubits[0]])]
+                }
             }
             OpType::SXdg => {
                 if self.has("SX") {
@@ -132,8 +142,9 @@ impl BasisTranslationPass {
             }
             OpType::Rx(p) => {
                 let q = qubits[0];
-                if self.has("RX") { vec![(op.clone(), vec![q])] }
-                else if let Some(theta) = p.try_evaluate() {
+                if self.has("RX") {
+                    vec![(op.clone(), vec![q])]
+                } else if let Some(theta) = p.try_evaluate() {
                     if self.has("SX") {
                         vec![
                             (OpType::Rz(Parameter::Const(-PI2)), vec![q]),
@@ -151,8 +162,9 @@ impl BasisTranslationPass {
             }
             OpType::Ry(p) => {
                 let q = qubits[0];
-                if self.has("RY") { vec![(op.clone(), vec![q])] }
-                else if let Some(theta) = p.try_evaluate() {
+                if self.has("RY") {
+                    vec![(op.clone(), vec![q])]
+                } else if let Some(theta) = p.try_evaluate() {
                     if self.has("SX") {
                         vec![
                             (OpType::Rz(Parameter::Const(PI2)), vec![q]),
@@ -174,10 +186,14 @@ impl BasisTranslationPass {
             }
             OpType::Rz(p) => {
                 let q = qubits[0];
-                if self.has("RZ") { vec![(op.clone(), vec![q])] }
-                else if let Some(theta) = p.try_evaluate() {
-                    if self.has("P") { vec![(OpType::P(Parameter::Const(theta)), vec![q])] }
-                    else { vec![(op.clone(), vec![q])] }
+                if self.has("RZ") {
+                    vec![(op.clone(), vec![q])]
+                } else if let Some(theta) = p.try_evaluate() {
+                    if self.has("P") {
+                        vec![(OpType::P(Parameter::Const(theta)), vec![q])]
+                    } else {
+                        vec![(op.clone(), vec![q])]
+                    }
                 } else {
                     vec![(op.clone(), vec![q])]
                 }
@@ -222,9 +238,12 @@ impl BasisTranslationPass {
             OpType::CCX => {
                 let (q0, q1, q2) = (qubits[0], qubits[1], qubits[2]);
                 let mut v = self.h_decomp(q2);
-                v.extend(self.cx_decomp(q1, q2)); v.push((OpType::Rz(Parameter::Const(-PI / 4.0)), vec![q2]));
-                v.extend(self.cx_decomp(q0, q2)); v.push((OpType::Rz(Parameter::Const(PI / 4.0)), vec![q2]));
-                v.extend(self.cx_decomp(q1, q2)); v.push((OpType::Rz(Parameter::Const(-PI / 4.0)), vec![q2]));
+                v.extend(self.cx_decomp(q1, q2));
+                v.push((OpType::Rz(Parameter::Const(-PI / 4.0)), vec![q2]));
+                v.extend(self.cx_decomp(q0, q2));
+                v.push((OpType::Rz(Parameter::Const(PI / 4.0)), vec![q2]));
+                v.extend(self.cx_decomp(q1, q2));
+                v.push((OpType::Rz(Parameter::Const(-PI / 4.0)), vec![q2]));
                 v.extend(self.cx_decomp(q0, q2));
                 v.push((OpType::Rz(Parameter::Const(PI / 4.0)), vec![q1]));
                 v.push((OpType::Rz(Parameter::Const(PI / 4.0)), vec![q2]));
@@ -268,8 +287,9 @@ impl BasisTranslationPass {
                 v
             }
             OpType::ECR => {
-                if self.has("ECR") { vec![(OpType::ECR, vec![qubits[0], qubits[1]])] }
-                else {
+                if self.has("ECR") {
+                    vec![(OpType::ECR, vec![qubits[0], qubits[1]])]
+                } else {
                     let (q0, q1) = (qubits[0], qubits[1]);
                     let mut v = vec![(OpType::SX, vec![q0])];
                     v.extend(self.cx_decomp(q0, q1));
@@ -355,15 +375,11 @@ mod tests {
     use super::*;
 
     fn cz_basis() -> BasisTranslationPass {
-        BasisTranslationPass::new(&[
-            "RZ".into(), "SX".into(), "X".into(), "CZ".into(),
-        ])
+        BasisTranslationPass::new(&["RZ".into(), "SX".into(), "X".into(), "CZ".into()])
     }
 
     fn cx_basis() -> BasisTranslationPass {
-        BasisTranslationPass::new(&[
-            "RZ".into(), "SX".into(), "X".into(), "CX".into(),
-        ])
+        BasisTranslationPass::new(&["RZ".into(), "SX".into(), "X".into(), "CX".into()])
     }
 
     #[test]

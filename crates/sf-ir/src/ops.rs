@@ -157,9 +157,10 @@ impl ParameterExpr {
                 names.extend(b.variable_names());
                 names
             }
-            ParameterExpr::Neg(a) | ParameterExpr::Sin(a) | ParameterExpr::Cos(a) | ParameterExpr::Exp(a) => {
-                a.variable_names()
-            }
+            ParameterExpr::Neg(a)
+            | ParameterExpr::Sin(a)
+            | ParameterExpr::Cos(a)
+            | ParameterExpr::Exp(a) => a.variable_names(),
         }
     }
 }
@@ -278,17 +279,38 @@ impl OpType {
             // 0-qubit (boundary/barrier)
             OpType::Barrier | OpType::Input | OpType::Output => 0,
             // Single-qubit
-            OpType::H | OpType::X | OpType::Y | OpType::Z
-            | OpType::S | OpType::Sdg | OpType::T | OpType::Tdg
-            | OpType::SX | OpType::SXdg | OpType::Id
-            | OpType::Rx(_) | OpType::Ry(_) | OpType::Rz(_)
-            | OpType::R1(_) | OpType::U(_, _, _) | OpType::P(_)
-            | OpType::Measure | OpType::Reset => 1,
+            OpType::H
+            | OpType::X
+            | OpType::Y
+            | OpType::Z
+            | OpType::S
+            | OpType::Sdg
+            | OpType::T
+            | OpType::Tdg
+            | OpType::SX
+            | OpType::SXdg
+            | OpType::Id
+            | OpType::Rx(_)
+            | OpType::Ry(_)
+            | OpType::Rz(_)
+            | OpType::R1(_)
+            | OpType::U(_, _, _)
+            | OpType::P(_)
+            | OpType::Measure
+            | OpType::Reset => 1,
             // Two-qubit
-            OpType::CNOT | OpType::CZ | OpType::CY
-            | OpType::SWAP | OpType::ISWAP | OpType::ECR
-            | OpType::Rzz(_) | OpType::Rxx(_) | OpType::Ryy(_)
-            | OpType::CRx(_) | OpType::CRz(_) | OpType::CP(_) => 2,
+            OpType::CNOT
+            | OpType::CZ
+            | OpType::CY
+            | OpType::SWAP
+            | OpType::ISWAP
+            | OpType::ECR
+            | OpType::Rzz(_)
+            | OpType::Rxx(_)
+            | OpType::Ryy(_)
+            | OpType::CRx(_)
+            | OpType::CRz(_)
+            | OpType::CP(_) => 2,
             // Three-qubit
             OpType::CCX | OpType::CSWAP => 3,
             // Special
@@ -301,10 +323,18 @@ impl OpType {
     /// Whether this operation is parameterized.
     pub fn is_parameterized(&self) -> bool {
         match self {
-            OpType::Rx(_) | OpType::Ry(_) | OpType::Rz(_)
-            | OpType::R1(_) | OpType::U(_, _, _) | OpType::P(_)
-            | OpType::Rzz(_) | OpType::Rxx(_) | OpType::Ryy(_)
-            | OpType::CRx(_) | OpType::CRz(_) | OpType::CP(_) => true,
+            OpType::Rx(_)
+            | OpType::Ry(_)
+            | OpType::Rz(_)
+            | OpType::R1(_)
+            | OpType::U(_, _, _)
+            | OpType::P(_)
+            | OpType::Rzz(_)
+            | OpType::Rxx(_)
+            | OpType::Ryy(_)
+            | OpType::CRx(_)
+            | OpType::CRz(_)
+            | OpType::CP(_) => true,
             _ => false,
         }
     }
@@ -327,15 +357,17 @@ impl OpType {
     /// This is the exp(-iθX/2) convention.
     pub fn to_matrix(&self) -> nalgebra::DMatrix<num_complex::Complex64> {
         let u_vec = self.to_unitary_matrix().unwrap_or_else(|| {
-             // Return IDENTITY for non-unitary ops so contraction doesn't fail.
-             // (Previously this returned an all-ones matrix — a subtle correctness
-             // bug that caused statevector overflow for any gate without a
-             // to_unitary_matrix implementation. Identity is unitary and a safe
-             // no-op fallback.)
-             let dim = 1 << self.n_qubits();
-             let zero = num_complex::Complex64::new(0.0, 0.0);
-             let one  = num_complex::Complex64::new(1.0, 0.0);
-             (0..dim).map(|i| (0..dim).map(|j| if i == j { one } else { zero }).collect()).collect()
+            // Return IDENTITY for non-unitary ops so contraction doesn't fail.
+            // (Previously this returned an all-ones matrix — a subtle correctness
+            // bug that caused statevector overflow for any gate without a
+            // to_unitary_matrix implementation. Identity is unitary and a safe
+            // no-op fallback.)
+            let dim = 1 << self.n_qubits();
+            let zero = num_complex::Complex64::new(0.0, 0.0);
+            let one = num_complex::Complex64::new(1.0, 0.0);
+            (0..dim)
+                .map(|i| (0..dim).map(|j| if i == j { one } else { zero }).collect())
+                .collect()
         });
 
         let rows = u_vec.len();
@@ -354,10 +386,7 @@ impl OpType {
         let inv_sqrt2 = Complex64::new(1.0 / SQRT_2, 0.0);
 
         match self {
-            OpType::Id => Some(vec![
-                vec![one, zero],
-                vec![zero, one],
-            ]),
+            OpType::Id => Some(vec![vec![one, zero], vec![zero, one]]),
 
             // H = (1/√2) [[1, 1], [1, -1]]
             OpType::H => Some(vec![
@@ -366,71 +395,44 @@ impl OpType {
             ]),
 
             // X = [[0, 1], [1, 0]]
-            OpType::X => Some(vec![
-                vec![zero, one],
-                vec![one, zero],
-            ]),
+            OpType::X => Some(vec![vec![zero, one], vec![one, zero]]),
 
             // Y = [[0, -i], [i, 0]]
-            OpType::Y => Some(vec![
-                vec![zero, -i],
-                vec![i, zero],
-            ]),
+            OpType::Y => Some(vec![vec![zero, -i], vec![i, zero]]),
 
             // Z = [[1, 0], [0, -1]]
-            OpType::Z => Some(vec![
-                vec![one, zero],
-                vec![zero, neg_one],
-            ]),
+            OpType::Z => Some(vec![vec![one, zero], vec![zero, neg_one]]),
 
             // S = [[1, 0], [0, i]]
-            OpType::S => Some(vec![
-                vec![one, zero],
-                vec![zero, i],
-            ]),
+            OpType::S => Some(vec![vec![one, zero], vec![zero, i]]),
 
             // Sdg = [[1, 0], [0, -i]]
-            OpType::Sdg => Some(vec![
-                vec![one, zero],
-                vec![zero, -i],
-            ]),
+            OpType::Sdg => Some(vec![vec![one, zero], vec![zero, -i]]),
 
             // T = [[1, 0], [0, e^{iπ/4}]]
             OpType::T => {
                 let t_phase = Complex64::from_polar(1.0, FRAC_PI_4);
-                Some(vec![
-                    vec![one, zero],
-                    vec![zero, t_phase],
-                ])
+                Some(vec![vec![one, zero], vec![zero, t_phase]])
             }
 
             // Tdg = [[1, 0], [0, e^{-iπ/4}]]
             OpType::Tdg => {
                 let t_phase = Complex64::from_polar(1.0, -FRAC_PI_4);
-                Some(vec![
-                    vec![one, zero],
-                    vec![zero, t_phase],
-                ])
+                Some(vec![vec![one, zero], vec![zero, t_phase]])
             }
 
             // SX = (1/2)[[1+i, 1-i], [1-i, 1+i]]
             OpType::SX => {
-                let a = Complex64::new(0.5, 0.5);  // (1+i)/2
+                let a = Complex64::new(0.5, 0.5); // (1+i)/2
                 let b = Complex64::new(0.5, -0.5); // (1-i)/2
-                Some(vec![
-                    vec![a, b],
-                    vec![b, a],
-                ])
+                Some(vec![vec![a, b], vec![b, a]])
             }
 
             // SXdg = (1/2)[[1-i, 1+i], [1+i, 1-i]]
             OpType::SXdg => {
                 let a = Complex64::new(0.5, -0.5);
                 let b = Complex64::new(0.5, 0.5);
-                Some(vec![
-                    vec![a, b],
-                    vec![b, a],
-                ])
+                Some(vec![vec![a, b], vec![b, a]])
             }
 
             // Rx(θ) = [[cos(θ/2), -i·sin(θ/2)], [-i·sin(θ/2), cos(θ/2)]]
@@ -438,10 +440,7 @@ impl OpType {
                 let theta = param.evaluate();
                 let c = Complex64::new((theta / 2.0).cos(), 0.0);
                 let s = Complex64::new(0.0, -(theta / 2.0).sin());
-                Some(vec![
-                    vec![c, s],
-                    vec![s, c],
-                ])
+                Some(vec![vec![c, s], vec![s, c]])
             }
 
             // Ry(θ) = exp(-iθY/2) = [[cos(θ/2), -sin(θ/2)], [sin(θ/2), cos(θ/2)]]
@@ -449,10 +448,7 @@ impl OpType {
                 let theta = param.evaluate();
                 let c = Complex64::new((theta / 2.0).cos(), 0.0);
                 let s = Complex64::new((theta / 2.0).sin(), 0.0);
-                Some(vec![
-                    vec![c, -s],
-                    vec![s, c],
-                ])
+                Some(vec![vec![c, -s], vec![s, c]])
             }
 
             // Rz(θ) = [[e^{-iθ/2}, 0], [0, e^{iθ/2}]]
@@ -460,20 +456,14 @@ impl OpType {
                 let theta = param.evaluate();
                 let em = Complex64::from_polar(1.0, -theta / 2.0);
                 let ep = Complex64::from_polar(1.0, theta / 2.0);
-                Some(vec![
-                    vec![em, zero],
-                    vec![zero, ep],
-                ])
+                Some(vec![vec![em, zero], vec![zero, ep]])
             }
 
             // R1(φ) = [[1, 0], [0, e^{iφ}]]
             OpType::R1(param) | OpType::P(param) => {
                 let phi = param.evaluate();
                 let ep = Complex64::from_polar(1.0, phi);
-                Some(vec![
-                    vec![one, zero],
-                    vec![zero, ep],
-                ])
+                Some(vec![vec![one, zero], vec![zero, ep]])
             }
 
             // U(θ,φ,λ) = [[cos(θ/2), -e^{iλ}·sin(θ/2)],
@@ -487,10 +477,7 @@ impl OpType {
                 let el = Complex64::from_polar(1.0, l);
                 let ep = Complex64::from_polar(1.0, p);
                 let epl = Complex64::from_polar(1.0, p + l);
-                Some(vec![
-                    vec![ct, -el * st],
-                    vec![ep * st, epl * ct],
-                ])
+                Some(vec![vec![ct, -el * st], vec![ep * st, epl * ct]])
             }
 
             // CNOT = [[1,0,0,0],[0,1,0,0],[0,0,0,1],[0,0,1,0]]
@@ -542,10 +529,10 @@ impl OpType {
                 let c = Complex64::new((theta / 2.0).cos(), 0.0);
                 let nis = Complex64::new(0.0, -(theta / 2.0).sin()); // -i*sin
                 Some(vec![
-                    vec![c,    zero, zero, nis ],
-                    vec![zero, c,    nis,  zero],
-                    vec![zero, nis,  c,    zero],
-                    vec![nis,  zero, zero, c   ],
+                    vec![c, zero, zero, nis],
+                    vec![zero, c, nis, zero],
+                    vec![zero, nis, c, zero],
+                    vec![nis, zero, zero, c],
                 ])
             }
 
@@ -561,13 +548,13 @@ impl OpType {
                 let theta = param.evaluate();
                 let c = Complex64::new((theta / 2.0).cos(), 0.0);
                 let s = (theta / 2.0).sin();
-                let pis = Complex64::new(0.0,  s); // +i*sin
+                let pis = Complex64::new(0.0, s); // +i*sin
                 let nis = Complex64::new(0.0, -s); // -i*sin
                 Some(vec![
-                    vec![c,    zero, zero, pis ],
-                    vec![zero, c,    nis,  zero],
-                    vec![zero, nis,  c,    zero],
-                    vec![pis,  zero, zero, c   ],
+                    vec![c, zero, zero, pis],
+                    vec![zero, c, nis, zero],
+                    vec![zero, nis, c, zero],
+                    vec![pis, zero, zero, c],
                 ])
             }
 
@@ -589,10 +576,10 @@ impl OpType {
                 let c = Complex64::new((theta / 2.0).cos(), 0.0);
                 let nis = Complex64::new(0.0, -(theta / 2.0).sin());
                 Some(vec![
-                    vec![one,  zero, zero, zero],
-                    vec![zero, one,  zero, zero],
-                    vec![zero, zero, c,    nis ],
-                    vec![zero, zero, nis,  c   ],
+                    vec![one, zero, zero, zero],
+                    vec![zero, one, zero, zero],
+                    vec![zero, zero, c, nis],
+                    vec![zero, zero, nis, c],
                 ])
             }
 
@@ -600,43 +587,43 @@ impl OpType {
             OpType::CRz(param) => {
                 let theta = param.evaluate();
                 let em = Complex64::from_polar(1.0, -theta / 2.0);
-                let ep = Complex64::from_polar(1.0,  theta / 2.0);
+                let ep = Complex64::from_polar(1.0, theta / 2.0);
                 Some(vec![
-                    vec![one,  zero, zero, zero],
-                    vec![zero, one,  zero, zero],
-                    vec![zero, zero, em,   zero],
-                    vec![zero, zero, zero, ep  ],
+                    vec![one, zero, zero, zero],
+                    vec![zero, one, zero, zero],
+                    vec![zero, zero, em, zero],
+                    vec![zero, zero, zero, ep],
                 ])
             }
 
             // CY: control q0, Y on q1 (basis |00>,|01>,|10>,|11>)
             // Matrix: [[1,0,0,0],[0,1,0,0],[0,0,0,-i],[0,0,i,0]]
             OpType::CY => Some(vec![
-                vec![one,  zero, zero,         zero        ],
-                vec![zero, one,  zero,         zero        ],
-                vec![zero, zero, zero,         -i          ],
-                vec![zero, zero, i,            zero        ],
+                vec![one, zero, zero, zero],
+                vec![zero, one, zero, zero],
+                vec![zero, zero, zero, -i],
+                vec![zero, zero, i, zero],
             ]),
 
             // iSWAP: [[1,0,0,0],[0,0,i,0],[0,i,0,0],[0,0,0,1]]
             OpType::ISWAP => Some(vec![
-                vec![one,  zero, zero, zero],
-                vec![zero, zero, i,    zero],
-                vec![zero, i,    zero, zero],
-                vec![zero, zero, zero, one ],
+                vec![one, zero, zero, zero],
+                vec![zero, zero, i, zero],
+                vec![zero, i, zero, zero],
+                vec![zero, zero, zero, one],
             ]),
 
             // ECR: Echoed Cross-Resonance (OpenQASM 3 standard)
             // (1/√2) * [[0,0,1,i],[0,0,i,1],[1,-i,0,0],[-i,1,0,0]]
             OpType::ECR => {
                 let s = Complex64::new(1.0 / SQRT_2, 0.0);
-                let is_ = Complex64::new(0.0,  1.0 / SQRT_2);
+                let is_ = Complex64::new(0.0, 1.0 / SQRT_2);
                 let nis = Complex64::new(0.0, -1.0 / SQRT_2);
                 Some(vec![
-                    vec![zero, zero, s,    is_ ],
-                    vec![zero, zero, is_,  s   ],
-                    vec![s,    nis,  zero, zero],
-                    vec![nis,  s,    zero, zero],
+                    vec![zero, zero, s, is_],
+                    vec![zero, zero, is_, s],
+                    vec![s, nis, zero, zero],
+                    vec![nis, s, zero, zero],
                 ])
             }
 
@@ -644,9 +631,13 @@ impl OpType {
             // Swaps |110> ↔ |111> (indices 6 ↔ 7).
             OpType::CCX => {
                 let mut m = vec![vec![zero; 8]; 8];
-                for k in 0..8 { m[k][k] = one; }
-                m[6][6] = zero; m[7][7] = zero;
-                m[6][7] = one;  m[7][6] = one;
+                for k in 0..8 {
+                    m[k][k] = one;
+                }
+                m[6][6] = zero;
+                m[7][7] = zero;
+                m[6][7] = one;
+                m[7][6] = one;
                 Some(m)
             }
 
@@ -654,15 +645,23 @@ impl OpType {
             // Swaps |101> ↔ |110> (indices 5 ↔ 6).
             OpType::CSWAP => {
                 let mut m = vec![vec![zero; 8]; 8];
-                for k in 0..8 { m[k][k] = one; }
-                m[5][5] = zero; m[6][6] = zero;
-                m[5][6] = one;  m[6][5] = one;
+                for k in 0..8 {
+                    m[k][k] = one;
+                }
+                m[5][5] = zero;
+                m[6][6] = zero;
+                m[5][6] = one;
+                m[6][5] = one;
                 Some(m)
             }
 
             // Non-unitary operations
-            OpType::Measure | OpType::MeasureAll | OpType::Barrier
-            | OpType::Reset | OpType::Input | OpType::Output => None,
+            OpType::Measure
+            | OpType::MeasureAll
+            | OpType::Barrier
+            | OpType::Reset
+            | OpType::Input
+            | OpType::Output => None,
 
             OpType::Unitary(ref m) => {
                 let rows = m.nrows();
@@ -713,10 +712,17 @@ impl OpType {
     /// Get all parameters from this op type.
     pub fn parameters(&self) -> Vec<&Parameter> {
         match self {
-            OpType::Rx(p) | OpType::Ry(p) | OpType::Rz(p)
-            | OpType::R1(p) | OpType::P(p)
-            | OpType::Rzz(p) | OpType::Rxx(p) | OpType::Ryy(p)
-            | OpType::CRx(p) | OpType::CRz(p) | OpType::CP(p) => vec![p],
+            OpType::Rx(p)
+            | OpType::Ry(p)
+            | OpType::Rz(p)
+            | OpType::R1(p)
+            | OpType::P(p)
+            | OpType::Rzz(p)
+            | OpType::Rxx(p)
+            | OpType::Ryy(p)
+            | OpType::CRx(p)
+            | OpType::CRz(p)
+            | OpType::CP(p) => vec![p],
             OpType::U(a, b, c) => vec![a, b, c],
             OpType::Custom(_, params) => params.iter().collect(),
             OpType::Unitary(_) => vec![],
@@ -727,19 +733,43 @@ impl OpType {
     /// Human-readable name for display.
     pub fn name(&self) -> String {
         match self {
-            OpType::H => "H".to_string(), OpType::X => "X".to_string(), OpType::Y => "Y".to_string(), OpType::Z => "Z".to_string(),
-            OpType::S => "S".to_string(), OpType::Sdg => "Sdg".to_string(), OpType::T => "T".to_string(), OpType::Tdg => "Tdg".to_string(),
-            OpType::SX => "SX".to_string(), OpType::SXdg => "SXdg".to_string(), OpType::Id => "Id".to_string(),
-            OpType::Rx(_) => "Rx".to_string(), OpType::Ry(_) => "Ry".to_string(), OpType::Rz(_) => "Rz".to_string(),
-            OpType::R1(_) => "R1".to_string(), OpType::U(_, _, _) => "U".to_string(), OpType::P(_) => "P".to_string(),
-            OpType::CNOT => "CNOT".to_string(), OpType::CZ => "CZ".to_string(), OpType::CY => "CY".to_string(),
-            OpType::SWAP => "SWAP".to_string(), OpType::ISWAP => "iSWAP".to_string(), OpType::ECR => "ECR".to_string(),
-            OpType::Rzz(_) => "Rzz".to_string(), OpType::Rxx(_) => "Rxx".to_string(), OpType::Ryy(_) => "Ryy".to_string(),
-            OpType::CRx(_) => "CRx".to_string(), OpType::CRz(_) => "CRz".to_string(), OpType::CP(_) => "CP".to_string(),
-            OpType::CCX => "CCX".to_string(), OpType::CSWAP => "CSWAP".to_string(),
-            OpType::Measure => "Measure".to_string(), OpType::MeasureAll => "MeasureAll".to_string(),
-            OpType::Barrier => "Barrier".to_string(), OpType::Reset => "Reset".to_string(),
-            OpType::Input => "Input".to_string(), OpType::Output => "Output".to_string(),
+            OpType::H => "H".to_string(),
+            OpType::X => "X".to_string(),
+            OpType::Y => "Y".to_string(),
+            OpType::Z => "Z".to_string(),
+            OpType::S => "S".to_string(),
+            OpType::Sdg => "Sdg".to_string(),
+            OpType::T => "T".to_string(),
+            OpType::Tdg => "Tdg".to_string(),
+            OpType::SX => "SX".to_string(),
+            OpType::SXdg => "SXdg".to_string(),
+            OpType::Id => "Id".to_string(),
+            OpType::Rx(_) => "Rx".to_string(),
+            OpType::Ry(_) => "Ry".to_string(),
+            OpType::Rz(_) => "Rz".to_string(),
+            OpType::R1(_) => "R1".to_string(),
+            OpType::U(_, _, _) => "U".to_string(),
+            OpType::P(_) => "P".to_string(),
+            OpType::CNOT => "CNOT".to_string(),
+            OpType::CZ => "CZ".to_string(),
+            OpType::CY => "CY".to_string(),
+            OpType::SWAP => "SWAP".to_string(),
+            OpType::ISWAP => "iSWAP".to_string(),
+            OpType::ECR => "ECR".to_string(),
+            OpType::Rzz(_) => "Rzz".to_string(),
+            OpType::Rxx(_) => "Rxx".to_string(),
+            OpType::Ryy(_) => "Ryy".to_string(),
+            OpType::CRx(_) => "CRx".to_string(),
+            OpType::CRz(_) => "CRz".to_string(),
+            OpType::CP(_) => "CP".to_string(),
+            OpType::CCX => "CCX".to_string(),
+            OpType::CSWAP => "CSWAP".to_string(),
+            OpType::Measure => "Measure".to_string(),
+            OpType::MeasureAll => "MeasureAll".to_string(),
+            OpType::Barrier => "Barrier".to_string(),
+            OpType::Reset => "Reset".to_string(),
+            OpType::Input => "Input".to_string(),
+            OpType::Output => "Output".to_string(),
             OpType::Custom(ref name, _) => name.clone(),
             OpType::Unitary(_) => "UNITARY".to_string(),
         }
@@ -780,23 +810,45 @@ mod tests {
     #[test]
     fn test_all_single_qubit_gates_are_unitary() {
         let gates = vec![
-            OpType::H, OpType::X, OpType::Y, OpType::Z,
-            OpType::S, OpType::Sdg, OpType::T, OpType::Tdg,
-            OpType::SX, OpType::SXdg, OpType::Id,
+            OpType::H,
+            OpType::X,
+            OpType::Y,
+            OpType::Z,
+            OpType::S,
+            OpType::Sdg,
+            OpType::T,
+            OpType::Tdg,
+            OpType::SX,
+            OpType::SXdg,
+            OpType::Id,
         ];
         for gate in &gates {
-            let u = gate.to_unitary_matrix()
+            let u = gate
+                .to_unitary_matrix()
                 .unwrap_or_else(|| panic!("{:?} should have a unitary", gate));
             assert!(is_unitary(&u), "{:?} is NOT unitary! U†U ≠ I", gate);
             let det = det_2x2(&u);
-            assert!((det.norm() - 1.0).abs() < 1e-10,
-                "{:?} |det| = {} ≠ 1", gate, det.norm());
+            assert!(
+                (det.norm() - 1.0).abs() < 1e-10,
+                "{:?} |det| = {} ≠ 1",
+                gate,
+                det.norm()
+            );
         }
     }
 
     #[test]
     fn test_parameterized_gates_are_unitary() {
-        let angles = vec![0.0, 0.5, 1.0, PI / 4.0, PI / 2.0, PI, 3.0 * PI / 2.0, 2.0 * PI];
+        let angles = vec![
+            0.0,
+            0.5,
+            1.0,
+            PI / 4.0,
+            PI / 2.0,
+            PI,
+            3.0 * PI / 2.0,
+            2.0 * PI,
+        ];
         for theta in &angles {
             let gates = vec![
                 OpType::Rx(Parameter::Const(*theta)),
@@ -855,7 +907,9 @@ mod tests {
 
     #[test]
     fn test_rx_2pi_is_neg_identity() {
-        let rx = OpType::Rx(Parameter::Const(2.0 * PI)).to_unitary_matrix().unwrap();
+        let rx = OpType::Rx(Parameter::Const(2.0 * PI))
+            .to_unitary_matrix()
+            .unwrap();
         let neg_id = vec![
             vec![Complex64::new(-1.0, 0.0), Complex64::new(0.0, 0.0)],
             vec![Complex64::new(0.0, 0.0), Complex64::new(-1.0, 0.0)],
@@ -865,7 +919,9 @@ mod tests {
 
     #[test]
     fn test_rx_4pi_is_identity() {
-        let rx = OpType::Rx(Parameter::Const(4.0 * PI)).to_unitary_matrix().unwrap();
+        let rx = OpType::Rx(Parameter::Const(4.0 * PI))
+            .to_unitary_matrix()
+            .unwrap();
         let id = OpType::Id.to_unitary_matrix().unwrap();
         assert_matrices_close(&rx, &id, 1e-10, "Rx(4π) ≠ I");
     }
@@ -876,13 +932,18 @@ mod tests {
         let cnot2 = mat_mul(&cnot, &cnot);
         let dim = 4;
         let mut id4 = vec![vec![Complex64::new(0.0, 0.0); dim]; dim];
-        for i in 0..dim { id4[i][i] = Complex64::new(1.0, 0.0); }
+        for i in 0..dim {
+            id4[i][i] = Complex64::new(1.0, 0.0);
+        }
         assert_matrices_close(&cnot2, &id4, 1e-10, "CNOT² ≠ I");
     }
 
     #[test]
     fn test_parameter_binding() {
-        let p = Parameter::Variable { name: "theta".into(), id: 0 };
+        let p = Parameter::Variable {
+            name: "theta".into(),
+            id: 0,
+        };
         let mut values = std::collections::HashMap::new();
         values.insert("theta".into(), 1.5);
         let bound = p.bind(&values);
@@ -925,9 +986,13 @@ mod tests {
         assert_eq!(a.len(), b.len(), "{msg}: dimension mismatch");
         for i in 0..a.len() {
             for j in 0..a[i].len() {
-                assert!((a[i][j] - b[i][j]).norm() < tol,
+                assert!(
+                    (a[i][j] - b[i][j]).norm() < tol,
                     "{msg}: [{i}][{j}] = {:?} ≠ {:?} (diff={:.2e})",
-                    a[i][j], b[i][j], (a[i][j] - b[i][j]).norm());
+                    a[i][j],
+                    b[i][j],
+                    (a[i][j] - b[i][j]).norm()
+                );
             }
         }
     }

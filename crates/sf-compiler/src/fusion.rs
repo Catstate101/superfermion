@@ -5,15 +5,17 @@
 //! gate reduction entirely in Rust, eliminating one Python→Rust round-trip.
 
 use crate::{CompilerError, Pass};
-use sf_ir::{QuantumDAG, OpType, Parameter};
-use num_complex::Complex64;
 use nalgebra::Matrix2;
+use num_complex::Complex64;
+use sf_ir::{OpType, Parameter, QuantumDAG};
 
 /// Fuse consecutive 1-qubit gates on the same qubit into a single U gate.
 pub struct GateFusionPass;
 
 impl GateFusionPass {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     /// Multiply two 2x2 unitary matrices.
     fn mat_mul(a: &Matrix2<Complex64>, b: &Matrix2<Complex64>) -> Matrix2<Complex64> {
@@ -36,7 +38,9 @@ impl GateFusionPass {
         if theta < 1e-6 {
             // Near-identity: theta~0, phi+lambda = arg(u11)
             let phase = u11.arg();
-            if phase.abs() < 1e-6 { return (0.0, 0.0, 0.0); }
+            if phase.abs() < 1e-6 {
+                return (0.0, 0.0, 0.0);
+            }
             return (0.0, 0.0, phase);
         }
 
@@ -55,20 +59,24 @@ impl GateFusionPass {
 }
 
 impl Pass for GateFusionPass {
-    fn name(&self) -> &str { "GateFusion" }
+    fn name(&self) -> &str {
+        "GateFusion"
+    }
 
     fn run(&self, dag: &mut QuantumDAG) -> Result<(), CompilerError> {
         let n_qubits = dag.n_qubits;
 
         // For each qubit, collect consecutive 1q gates and fuse them.
         // We rebuild the DAG from scratch with fused gates.
-        let instructions: Vec<_> = dag.to_instructions().into_iter().map(|op| op.clone()).collect();
+        let instructions: Vec<_> = dag.to_instructions().into_iter().cloned().collect();
 
         // Track pending 1q gate accumulator per qubit: Option<Matrix2<Complex64>>
         let mut accum: Vec<Option<Matrix2<Complex64>>> = vec![None; n_qubits];
         let mut fused_ops: Vec<(OpType, Vec<usize>)> = Vec::new();
 
-        let flush_qubit = |q: usize, accum: &mut Vec<Option<Matrix2<Complex64>>>, fused_ops: &mut Vec<(OpType, Vec<usize>)>| {
+        let flush_qubit = |q: usize,
+                           accum: &mut Vec<Option<Matrix2<Complex64>>>,
+                           fused_ops: &mut Vec<(OpType, Vec<usize>)>| {
             if let Some(mat) = accum[q].take() {
                 let (theta, phi, lambda) = Self::decompose_u3(&mat);
                 // Skip if near-identity (threshold accounts for float precision in matrix products)
@@ -94,8 +102,10 @@ impl Pass for GateFusionPass {
                 let q = inst.qubits[0];
                 let gate_mat = inst.op_type.to_matrix();
                 let m = Matrix2::new(
-                    gate_mat[(0, 0)], gate_mat[(0, 1)],
-                    gate_mat[(1, 0)], gate_mat[(1, 1)],
+                    gate_mat[(0, 0)],
+                    gate_mat[(0, 1)],
+                    gate_mat[(1, 0)],
+                    gate_mat[(1, 1)],
                 );
 
                 accum[q] = Some(match accum[q].take() {
@@ -136,7 +146,7 @@ impl Pass for GateFusionPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sf_ir::{QuantumDAG, OpType, Parameter};
+    use sf_ir::{OpType, Parameter, QuantumDAG};
 
     #[test]
     fn test_hh_cancels() {
@@ -204,7 +214,11 @@ mod tests {
         pass.run(&mut dag).unwrap();
 
         // q0: H*S → 1 gate (or identity check), q1: X*Y → should fuse
-        assert!(dag.gate_count() <= 2, "Each qubit chain should fuse: got {}", dag.gate_count());
+        assert!(
+            dag.gate_count() <= 2,
+            "Each qubit chain should fuse: got {}",
+            dag.gate_count()
+        );
     }
 
     #[test]
@@ -247,23 +261,34 @@ mod tests {
     #[test]
     fn test_decompose_u3_identity() {
         let eye = Matrix2::new(
-            Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0),
-            Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 0.0),
         );
         let (theta, phi, lam) = GateFusionPass::decompose_u3(&eye);
         assert!(theta.abs() < 1e-6, "Identity theta={}", theta);
-        assert!((phi + lam).abs() < 1e-6 || (phi + lam - 2.0*std::f64::consts::PI).abs() < 1e-6,
-            "Identity phi+lam should be ~0, got phi={}, lam={}", phi, lam);
+        assert!(
+            (phi + lam).abs() < 1e-6 || (phi + lam - 2.0 * std::f64::consts::PI).abs() < 1e-6,
+            "Identity phi+lam should be ~0, got phi={}, lam={}",
+            phi,
+            lam
+        );
     }
 
     #[test]
     fn test_decompose_u3_x_gate() {
         let x_mat = Matrix2::new(
-            Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0),
-            Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
         );
         let (theta, _phi, _lam) = GateFusionPass::decompose_u3(&x_mat);
-        assert!((theta - std::f64::consts::PI).abs() < 1e-6,
-            "X gate theta should be pi, got {}", theta);
+        assert!(
+            (theta - std::f64::consts::PI).abs() < 1e-6,
+            "X gate theta should be pi, got {}",
+            theta
+        );
     }
 }

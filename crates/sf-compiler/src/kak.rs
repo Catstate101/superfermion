@@ -15,11 +15,11 @@
 //! the same qubit pair, multiplies them into a 4×4 unitary, and
 //! re-synthesizes with minimal CNOT count.
 
-use sf_ir::{OpType, QuantumDAG};
-use sf_ir::ops::Parameter;
-use crate::{Pass, CompilerError};
-use nalgebra::{Matrix4, Matrix2};
+use crate::{CompilerError, Pass};
+use nalgebra::{Matrix2, Matrix4};
 use num_complex::Complex64;
+use sf_ir::ops::Parameter;
+use sf_ir::{OpType, QuantumDAG};
 use std::f64::consts::PI;
 
 const TOLERANCE: f64 = 1e-8;
@@ -27,7 +27,9 @@ const TOLERANCE: f64 = 1e-8;
 pub struct KakSynthesisPass;
 
 impl KakSynthesisPass {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     /// Decompose a 4×4 unitary into Cartan interaction coefficients (ax, ay, az)
     /// and single-qubit unitaries.
@@ -37,11 +39,11 @@ impl KakSynthesisPass {
         let magic_dag = magic.adjoint();
 
         // Transform to magic basis: U_b = M† · U · M
-        let u_b = &magic_dag * u * &magic;
+        let u_b = magic_dag * u * magic;
 
         // U_b^T · U_b should be a diagonal matrix in the Weyl chamber
         let u_bt = u_b.transpose();
-        let m2 = &u_bt * &u_b;
+        let m2 = u_bt * u_b;
 
         // Find eigenvalues of M2 to extract interaction angles
         let (ax, ay, az) = extract_weyl_coords(&m2);
@@ -50,7 +52,15 @@ impl KakSynthesisPass {
         // For simplicity, we compute them from the decomposition structure
         let (a0, a1, b0, b1) = compute_single_qubit_unitaries(u, ax, ay, az);
 
-        KakDecomposition { ax, ay, az, a0, a1, b0, b1 }
+        KakDecomposition {
+            ax,
+            ay,
+            az,
+            a0,
+            a1,
+            b0,
+            b1,
+        }
     }
 
     /// Determine the minimum CNOT count needed.
@@ -67,11 +77,7 @@ impl KakSynthesisPass {
     }
 
     /// Synthesize a 2-qubit unitary into CNOT + 1Q gates.
-    fn synthesize(
-        kak: &KakDecomposition,
-        q0: usize,
-        q1: usize,
-    ) -> Vec<(OpType, Vec<usize>)> {
+    fn synthesize(kak: &KakDecomposition, q0: usize, q1: usize) -> Vec<(OpType, Vec<usize>)> {
         let n_cx = Self::cnot_count(kak.ax, kak.ay, kak.az);
 
         let mut gates = Vec::new();
@@ -156,10 +162,22 @@ fn magic_basis() -> Matrix4<Complex64> {
     let s = Complex64::new(1.0 / 2.0_f64.sqrt(), 0.0);
     let i = Complex64::i();
     Matrix4::new(
-        s,          Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0), i * s,
-        Complex64::new(0.0, 0.0), i * s,     s,                 Complex64::new(0.0, 0.0),
-        Complex64::new(0.0, 0.0), i * s,     -s,                Complex64::new(0.0, 0.0),
-        s,          Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0), -i * s,
+        s,
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        i * s,
+        Complex64::new(0.0, 0.0),
+        i * s,
+        s,
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        i * s,
+        -s,
+        Complex64::new(0.0, 0.0),
+        s,
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        -i * s,
     )
 }
 
@@ -222,7 +240,12 @@ fn compute_single_qubit_unitaries(
     ax: f64,
     ay: f64,
     az: f64,
-) -> (Matrix2<Complex64>, Matrix2<Complex64>, Matrix2<Complex64>, Matrix2<Complex64>) {
+) -> (
+    Matrix2<Complex64>,
+    Matrix2<Complex64>,
+    Matrix2<Complex64>,
+    Matrix2<Complex64>,
+) {
     // Build the interaction unitary
     let interaction = build_interaction(ax, ay, az);
 
@@ -230,7 +253,7 @@ fn compute_single_qubit_unitaries(
     // We need to solve for A and B.
     // Try B = I, then A = U · interaction†
     let int_dag = interaction.adjoint();
-    let a_kron = u * &int_dag;
+    let a_kron = u * int_dag;
 
     // Extract A0 and A1 from the Kronecker product A1 ⊗ A0
     // Using the structure of 4×4 matrices as 2×2 blocks of 2×2 matrices
@@ -247,10 +270,10 @@ fn build_interaction(ax: f64, ay: f64, az: f64) -> Matrix4<Complex64> {
     // In the computational basis, exp(i(ax·XX + ay·YY + az·ZZ)):
     // |00> -> cos(ax)cos(ay)cos(az)|00> + ...
     // Diagonal elements:
-    let e0 = (i * (ax + ay + az)).exp();   // |00><00|
-    let e1 = (i * (ax - ay - az)).exp();   // |01><01|
-    let e2 = (i * (-ax + ay - az)).exp();  // |10><10|
-    let e3 = (i * (-ax - ay + az)).exp();  // |11><11|
+    let e0 = (i * (ax + ay + az)).exp(); // |00><00|
+    let e1 = (i * (ax - ay - az)).exp(); // |01><01|
+    let e2 = (i * (-ax + ay - az)).exp(); // |10><10|
+    let e3 = (i * (-ax - ay + az)).exp(); // |11><11|
 
     // Off-diagonal from XX and YY terms
     // Actually, the interaction is diagonal in the Bell basis.
@@ -266,10 +289,22 @@ fn build_interaction(ax: f64, ay: f64, az: f64) -> Matrix4<Complex64> {
     let _ = (e0, e1, e2, e3);
 
     Matrix4::new(
-        c_p * s_xy2,            Complex64::new(0.0, 0.0),      Complex64::new(0.0, 0.0),      c_p * is_xy2,
-        Complex64::new(0.0, 0.0),      c_m * s_xy,             c_m * is_xy,            Complex64::new(0.0, 0.0),
-        Complex64::new(0.0, 0.0),      c_m * is_xy,            c_m * s_xy,             Complex64::new(0.0, 0.0),
-        c_p * is_xy2,           Complex64::new(0.0, 0.0),      Complex64::new(0.0, 0.0),      c_p * s_xy2,
+        c_p * s_xy2,
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        c_p * is_xy2,
+        Complex64::new(0.0, 0.0),
+        c_m * s_xy,
+        c_m * is_xy,
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        c_m * is_xy,
+        c_m * s_xy,
+        Complex64::new(0.0, 0.0),
+        c_p * is_xy2,
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        c_p * s_xy2,
     )
 }
 
@@ -286,16 +321,35 @@ fn extract_kron_factors(m: &Matrix4<Complex64>) -> (Matrix2<Complex64>, Matrix2<
     let block11 = Matrix2::new(m[(2, 2)], m[(2, 3)], m[(3, 2)], m[(3, 3)]);
 
     // Find the block with largest norm for numerical stability
-    let norms = [block00.norm(), block01.norm(), block10.norm(), block11.norm()];
-    let max_idx = norms.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+    let norms = [
+        block00.norm(),
+        block01.norm(),
+        block10.norm(),
+        block11.norm(),
+    ];
+    let max_idx = norms
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap()
+        .0;
 
     let (a0_raw, a1_coeff) = match max_idx {
         0 => {
-            let scale = if block00[(0,0)].norm() > TOLERANCE { block00[(0,0)] } else { block00[(1,0)] };
-            (block00 / scale, Matrix2::new(
-                scale, block01[(0,0)] / (block00[(0,0)] / scale),
-                block10[(0,0)] / (block00[(0,0)] / scale), block11[(0,0)] / (block00[(0,0)] / scale),
-            ))
+            let scale = if block00[(0, 0)].norm() > TOLERANCE {
+                block00[(0, 0)]
+            } else {
+                block00[(1, 0)]
+            };
+            (
+                block00 / scale,
+                Matrix2::new(
+                    scale,
+                    block01[(0, 0)] / (block00[(0, 0)] / scale),
+                    block10[(0, 0)] / (block00[(0, 0)] / scale),
+                    block11[(0, 0)] / (block00[(0, 0)] / scale),
+                ),
+            )
         }
         _ => {
             // Fallback: use identity for both
@@ -313,10 +367,34 @@ fn extract_kron_factors(m: &Matrix4<Complex64>) -> (Matrix2<Complex64>, Matrix2<
     };
 
     // Compute A1 from the block ratios
-    let a1_00 = if a0[(0,0)].norm() > TOLERANCE { m[(0,0)] / a0[(0,0)] } else if a0[(1,0)].norm() > TOLERANCE { m[(1,0)] / a0[(1,0)] } else { Complex64::new(1.0, 0.0) };
-    let a1_01 = if a0[(0,0)].norm() > TOLERANCE { m[(0,2)] / a0[(0,0)] } else if a0[(1,0)].norm() > TOLERANCE { m[(1,2)] / a0[(1,0)] } else { Complex64::new(0.0, 0.0) };
-    let a1_10 = if a0[(0,0)].norm() > TOLERANCE { m[(2,0)] / a0[(0,0)] } else if a0[(1,0)].norm() > TOLERANCE { m[(3,0)] / a0[(1,0)] } else { Complex64::new(0.0, 0.0) };
-    let a1_11 = if a0[(0,0)].norm() > TOLERANCE { m[(2,2)] / a0[(0,0)] } else if a0[(1,0)].norm() > TOLERANCE { m[(3,2)] / a0[(1,0)] } else { Complex64::new(1.0, 0.0) };
+    let a1_00 = if a0[(0, 0)].norm() > TOLERANCE {
+        m[(0, 0)] / a0[(0, 0)]
+    } else if a0[(1, 0)].norm() > TOLERANCE {
+        m[(1, 0)] / a0[(1, 0)]
+    } else {
+        Complex64::new(1.0, 0.0)
+    };
+    let a1_01 = if a0[(0, 0)].norm() > TOLERANCE {
+        m[(0, 2)] / a0[(0, 0)]
+    } else if a0[(1, 0)].norm() > TOLERANCE {
+        m[(1, 2)] / a0[(1, 0)]
+    } else {
+        Complex64::new(0.0, 0.0)
+    };
+    let a1_10 = if a0[(0, 0)].norm() > TOLERANCE {
+        m[(2, 0)] / a0[(0, 0)]
+    } else if a0[(1, 0)].norm() > TOLERANCE {
+        m[(3, 0)] / a0[(1, 0)]
+    } else {
+        Complex64::new(0.0, 0.0)
+    };
+    let a1_11 = if a0[(0, 0)].norm() > TOLERANCE {
+        m[(2, 2)] / a0[(0, 0)]
+    } else if a0[(1, 0)].norm() > TOLERANCE {
+        m[(3, 2)] / a0[(1, 0)]
+    } else {
+        Complex64::new(1.0, 0.0)
+    };
 
     let a1 = Matrix2::new(a1_00, a1_01, a1_10, a1_11);
     let det_a1 = a1.determinant();
@@ -343,7 +421,9 @@ fn decompose_u3(u: &Matrix2<Complex64>) -> (f64, f64, f64) {
 
     if theta < TOLERANCE {
         let phase = u11.arg();
-        if phase.abs() < TOLERANCE { return (0.0, 0.0, 0.0); }
+        if phase.abs() < TOLERANCE {
+            return (0.0, 0.0, 0.0);
+        }
         return (0.0, 0.0, phase);
     }
 
@@ -367,7 +447,9 @@ impl Pass for KakSynthesisPass {
     fn run(&self, dag: &mut QuantumDAG) -> Result<(), CompilerError> {
         // Collect blocks of consecutive gates on the same 2-qubit pair.
         // For each block, compute the combined unitary and re-synthesize.
-        let instructions: Vec<_> = dag.to_instructions().iter()
+        let instructions: Vec<_> = dag
+            .to_instructions()
+            .iter()
             .map(|op| (op.op_type.clone(), op.qubits.to_vec()))
             .collect();
 
@@ -399,7 +481,8 @@ impl Pass for KakSynthesisPass {
             while block_end < instructions.len() {
                 let (ref next_op, ref next_qs) = instructions[block_end];
 
-                if next_op.is_boundary() || *next_op == OpType::Barrier || next_op.is_measurement() {
+                if next_op.is_boundary() || *next_op == OpType::Barrier || next_op.is_measurement()
+                {
                     break;
                 }
 
@@ -444,8 +527,10 @@ impl Pass for KakSynthesisPass {
                 let mat_4x4 = if gate_qs.len() == 1 {
                     // 1Q gate: expand to 4×4 via Kronecker product
                     let gate_2x2 = Matrix2::new(
-                        gate_mat[(0, 0)], gate_mat[(0, 1)],
-                        gate_mat[(1, 0)], gate_mat[(1, 1)],
+                        gate_mat[(0, 0)],
+                        gate_mat[(0, 1)],
+                        gate_mat[(1, 0)],
+                        gate_mat[(1, 1)],
                     );
 
                     if gate_qs[0] == q0 {
@@ -501,10 +586,22 @@ impl Pass for KakSynthesisPass {
 /// Kronecker product of two 2×2 matrices.
 fn kron_2x2(a: &Matrix2<Complex64>, b: &Matrix2<Complex64>) -> Matrix4<Complex64> {
     Matrix4::new(
-        a[(0,0)]*b[(0,0)], a[(0,0)]*b[(0,1)], a[(0,1)]*b[(0,0)], a[(0,1)]*b[(0,1)],
-        a[(0,0)]*b[(1,0)], a[(0,0)]*b[(1,1)], a[(0,1)]*b[(1,0)], a[(0,1)]*b[(1,1)],
-        a[(1,0)]*b[(0,0)], a[(1,0)]*b[(0,1)], a[(1,1)]*b[(0,0)], a[(1,1)]*b[(0,1)],
-        a[(1,0)]*b[(1,0)], a[(1,0)]*b[(1,1)], a[(1,1)]*b[(1,0)], a[(1,1)]*b[(1,1)],
+        a[(0, 0)] * b[(0, 0)],
+        a[(0, 0)] * b[(0, 1)],
+        a[(0, 1)] * b[(0, 0)],
+        a[(0, 1)] * b[(0, 1)],
+        a[(0, 0)] * b[(1, 0)],
+        a[(0, 0)] * b[(1, 1)],
+        a[(0, 1)] * b[(1, 0)],
+        a[(0, 1)] * b[(1, 1)],
+        a[(1, 0)] * b[(0, 0)],
+        a[(1, 0)] * b[(0, 1)],
+        a[(1, 1)] * b[(0, 0)],
+        a[(1, 1)] * b[(0, 1)],
+        a[(1, 0)] * b[(1, 0)],
+        a[(1, 0)] * b[(1, 1)],
+        a[(1, 1)] * b[(1, 0)],
+        a[(1, 1)] * b[(1, 1)],
     )
 }
 
@@ -543,7 +640,11 @@ mod tests {
 
         KakSynthesisPass::new().run(&mut dag).unwrap();
         // CNOT · CNOT = I → should produce 0 or very few gates
-        assert!(dag.gate_count() <= 2, "CNOT·CNOT should simplify, got {} gates", dag.gate_count());
+        assert!(
+            dag.gate_count() <= 2,
+            "CNOT·CNOT should simplify, got {} gates",
+            dag.gate_count()
+        );
     }
 
     #[test]
@@ -556,10 +657,16 @@ mod tests {
 
         KakSynthesisPass::new().run(&mut dag).unwrap();
         // SWAP needs exactly 3 CNOTs, so the output should have ≤3 2Q gates
-        let n_2q = dag.to_instructions().iter()
+        let n_2q = dag
+            .to_instructions()
+            .iter()
             .filter(|op| op.op_type.n_qubits() == 2)
             .count();
-        assert!(n_2q <= 3, "SWAP should need at most 3 CNOTs, got {} 2Q gates", n_2q);
+        assert!(
+            n_2q <= 3,
+            "SWAP should need at most 3 CNOTs, got {} 2Q gates",
+            n_2q
+        );
     }
 
     #[test]
@@ -572,8 +679,14 @@ mod tests {
 
         KakSynthesisPass::new().run(&mut dag).unwrap();
         // H and X on qubit 2 should remain
-        let has_h = dag.to_instructions().iter().any(|op| op.op_type == OpType::H);
-        let has_x = dag.to_instructions().iter().any(|op| op.op_type == OpType::X);
+        let has_h = dag
+            .to_instructions()
+            .iter()
+            .any(|op| op.op_type == OpType::H);
+        let has_x = dag
+            .to_instructions()
+            .iter()
+            .any(|op| op.op_type == OpType::X);
         assert!(has_h, "H gate on q2 should be preserved");
         assert!(has_x, "X gate on q2 should be preserved");
     }
@@ -593,11 +706,18 @@ mod tests {
         // M†M should be close to identity
         for i in 0..4 {
             for j in 0..4 {
-                let expected = if i == j { Complex64::new(1.0, 0.0) } else { Complex64::new(0.0, 0.0) };
+                let expected = if i == j {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    Complex64::new(0.0, 0.0)
+                };
                 assert!(
                     (prod[(i, j)] - expected).norm() < 1e-10,
                     "M†M[{},{}] = {}, expected {}",
-                    i, j, prod[(i, j)], expected
+                    i,
+                    j,
+                    prod[(i, j)],
+                    expected
                 );
             }
         }

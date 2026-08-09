@@ -6,13 +6,15 @@
 //! - Decoders (MWPM, Union-Find, Lookup Table)
 //! - Logical error rate estimation
 
-pub mod codes;
-pub mod syndrome;
-pub mod decoders;
+#![allow(clippy::new_without_default)]
 
-pub use codes::{StabilizerCode, SurfaceCode, RepetitionCode, SteaneCode};
+pub mod codes;
+pub mod decoders;
+pub mod syndrome;
+
+pub use codes::{RepetitionCode, StabilizerCode, SteaneCode, SurfaceCode};
+pub use decoders::{Decoder, LookupDecoder, MWPMDecoder, UnionFindDecoder};
 pub use syndrome::SyndromeExtractor;
-pub use decoders::{Decoder, MWPMDecoder, UnionFindDecoder, LookupDecoder};
 
 #[cfg(test)]
 mod tests {

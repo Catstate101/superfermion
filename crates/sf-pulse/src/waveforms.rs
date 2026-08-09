@@ -22,7 +22,7 @@ pub struct PulseEnvelope {
     pub duration: usize,
     pub amp: f64,
     pub sigma: f64,
-    pub beta: f64,   // DRAG coefficient
+    pub beta: f64,    // DRAG coefficient
     pub width: usize, // GaussianSquare flat-top width
 }
 
@@ -30,15 +30,21 @@ impl PulseEnvelope {
     pub fn gaussian(duration: usize, sigma: f64, amp: f64) -> Self {
         Self {
             waveform_type: WaveformType::Gaussian,
-            duration, amp, sigma,
-            beta: 0.0, width: 0,
+            duration,
+            amp,
+            sigma,
+            beta: 0.0,
+            width: 0,
         }
     }
 
     pub fn drag(duration: usize, sigma: f64, amp: f64, beta: f64) -> Self {
         Self {
             waveform_type: WaveformType::DRAG,
-            duration, amp, sigma, beta,
+            duration,
+            amp,
+            sigma,
+            beta,
             width: 0,
         }
     }
@@ -46,15 +52,21 @@ impl PulseEnvelope {
     pub fn square(duration: usize, amp: f64) -> Self {
         Self {
             waveform_type: WaveformType::Square,
-            duration, amp,
-            sigma: 0.0, beta: 0.0, width: 0,
+            duration,
+            amp,
+            sigma: 0.0,
+            beta: 0.0,
+            width: 0,
         }
     }
 
     pub fn gaussian_square(duration: usize, sigma: f64, amp: f64, width: usize) -> Self {
         Self {
             waveform_type: WaveformType::GaussianSquare,
-            duration, amp, sigma, width,
+            duration,
+            amp,
+            sigma,
+            width,
             beta: 0.0,
         }
     }
@@ -144,7 +156,10 @@ impl Waveform {
 
     /// Peak amplitude.
     pub fn peak_amp(&self) -> f64 {
-        self.samples.iter().map(|s| s.norm()).fold(0.0_f64, f64::max)
+        self.samples
+            .iter()
+            .map(|s| s.norm())
+            .fold(0.0_f64, f64::max)
     }
 }
 

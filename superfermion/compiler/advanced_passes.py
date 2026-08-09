@@ -6,7 +6,7 @@ from superfermion.compiler.passes import Pass
 from superfermion.circuit import Circuit
 
 
-class KAKDecompositionPass(Pass):
+class _KAKDecompositionPass(Pass):
     """Placeholder: decomposes 2-qubit unitaries into at most 3 CNOTs.
 
     Not yet implemented — returns circuit unchanged.

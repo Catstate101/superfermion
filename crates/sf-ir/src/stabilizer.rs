@@ -4,11 +4,11 @@
 //! Word-packed representation (ceil(n/64) u64s per row) supports n ≤ 1024.
 //! `pauli_twirl_gate_list` — standalone gate-level Pauli twirl, no DAG dependency.
 
-use std::collections::HashMap;
-use rand::Rng;
 use rand::rngs::StdRng;
+use rand::Rng;
 use rand::SeedableRng;
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 // ═══════════════════════════════════════════════════════════
 // Stabilizer Tableau (word-packed for n ≤ 1024)
@@ -16,29 +16,37 @@ use rayon::prelude::*;
 
 pub struct StabilizerTableau {
     pub n: usize,
-    words: usize,           // ceil(n / 64)
-    x: Vec<Vec<u64>>,       // 2n rows, each with `words` u64s
+    words: usize,     // ceil(n / 64)
+    x: Vec<Vec<u64>>, // 2n rows, each with `words` u64s
     z: Vec<Vec<u64>>,
-    r: Vec<u64>,            // 2n phase bits (0 or 1)
+    r: Vec<u64>, // 2n phase bits (0 or 1)
     /// Scratch buffers reused across measure_z calls to avoid per-call heap alloc.
-    sx_buf: Vec<u64>,       // words elements, zeroed before each measure_z
-    sz_buf: Vec<u64>,       // words elements, zeroed before each measure_z
+    sx_buf: Vec<u64>, // words elements, zeroed before each measure_z
+    sz_buf: Vec<u64>, // words elements, zeroed before each measure_z
 }
 
 impl StabilizerTableau {
     pub fn new(n: usize) -> Self {
         assert!(n <= 1024, "Tableau supports n ≤ 1024");
-        let words = (n + 63) / 64;
+        let words = n.div_ceil(64);
         let mut x = vec![vec![0u64; words]; 2 * n];
         let mut z = vec![vec![0u64; words]; 2 * n];
         let r = vec![0u64; 2 * n];
         for q in 0..n {
             let w = q / 64;
             let b = q % 64;
-            x[q][w] = 1u64 << b;           // destabilizer i = X_i
-            z[n + q][w] = 1u64 << b;       // stabilizer i = Z_i
+            x[q][w] = 1u64 << b; // destabilizer i = X_i
+            z[n + q][w] = 1u64 << b; // stabilizer i = Z_i
         }
-        Self { n, words, x, z, r, sx_buf: vec![0u64; words], sz_buf: vec![0u64; words] }
+        Self {
+            n,
+            words,
+            x,
+            z,
+            r,
+            sx_buf: vec![0u64; words],
+            sz_buf: vec![0u64; words],
+        }
     }
 
     // ── Single-qubit gates ──
@@ -99,8 +107,10 @@ impl StabilizerTableau {
     /// CNOT(c, t): control=c, target=t.
     /// Phase: r ^= x_c · z_t · (x_t ⊕ z_c ⊕ 1)
     pub fn cnot(&mut self, a: usize, b: usize) {
-        let wa = a / 64; let ba = a % 64;
-        let wb = b / 64; let bb = b % 64;
+        let wa = a / 64;
+        let ba = a % 64;
+        let wb = b / 64;
+        let bb = b % 64;
         for i in 0..2 * self.n {
             let xa = (self.x[i][wa] >> ba) & 1;
             let xb = (self.x[i][wb] >> bb) & 1;
@@ -123,8 +133,10 @@ impl StabilizerTableau {
     }
 
     pub fn swap(&mut self, a: usize, b: usize) {
-        let wa = a / 64; let ba = a % 64;
-        let wb = b / 64; let bb = b % 64;
+        let wa = a / 64;
+        let ba = a % 64;
+        let wb = b / 64;
+        let bb = b % 64;
         let _ma = 1u64 << ba;
         let _mb = 1u64 << bb;
         for i in 0..2 * self.n {
@@ -153,8 +165,16 @@ impl StabilizerTableau {
             "H" => self.h(qubits[0]),
             "S" => self.s(qubits[0]),
             "SDG" => self.sdg(qubits[0]),
-            "SX" => { self.h(qubits[0]); self.s(qubits[0]); self.h(qubits[0]); }
-            "SXDG" => { self.h(qubits[0]); self.sdg(qubits[0]); self.h(qubits[0]); }
+            "SX" => {
+                self.h(qubits[0]);
+                self.s(qubits[0]);
+                self.h(qubits[0]);
+            }
+            "SXDG" => {
+                self.h(qubits[0]);
+                self.sdg(qubits[0]);
+                self.h(qubits[0]);
+            }
             "X" => self.x_gate(qubits[0]),
             "Y" => self.y_gate(qubits[0]),
             "Z" => self.z_gate(qubits[0]),
@@ -183,7 +203,14 @@ impl StabilizerTableau {
     /// Word-level: uses popcount on 64-bit masks instead of per-bit iteration.
     /// ~64× faster than the naive per-bit loop.
     #[inline(always)]
-    fn phase_of_product(x1: &[u64], z1: &[u64], x2: &[u64], z2: &[u64], n: usize, words: usize) -> u8 {
+    fn phase_of_product(
+        x1: &[u64],
+        z1: &[u64],
+        x2: &[u64],
+        z2: &[u64],
+        n: usize,
+        words: usize,
+    ) -> u8 {
         let mut phase: u32 = 0;
         for w in 0..words {
             let xw1 = x1[w];
@@ -194,18 +221,16 @@ impl StabilizerTableau {
             //   (Z,Y): !x1 & z1 & x2 & z2
             //   (X,Z): x1 & !z1 & !x2 & z2
             //   (Y,X): x1 & z1 & x2 & !z2
-            let c1 = (!xw1 & zw1 & xw2 & zw2)
-                   | (xw1 & !zw1 & !xw2 & zw2)
-                   | (xw1 & zw1 & xw2 & !zw2);
+            let c1 =
+                (!xw1 & zw1 & xw2 & zw2) | (xw1 & !zw1 & !xw2 & zw2) | (xw1 & zw1 & xw2 & !zw2);
             // Masks for contributions of 3 (mod 4):
             //   (Z,X): !x1 & z1 & x2 & !z2
             //   (X,Y): x1 & !z1 & x2 & z2
             //   (Y,Z): x1 & z1 & !x2 & z2
-            let c3 = (!xw1 & zw1 & xw2 & !zw2)
-                   | (xw1 & !zw1 & xw2 & zw2)
-                   | (xw1 & zw1 & !xw2 & zw2);
+            let c3 =
+                (!xw1 & zw1 & xw2 & !zw2) | (xw1 & !zw1 & xw2 & zw2) | (xw1 & zw1 & !xw2 & zw2);
             // Mask final word to the actual qubit count
-            let mask = if w == words - 1 && n % 64 != 0 {
+            let mask = if w == words - 1 && !n.is_multiple_of(64) {
                 (1u64 << (n % 64)) - 1
             } else {
                 u64::MAX
@@ -223,9 +248,13 @@ impl StabilizerTableau {
     /// Inlined into measure_z hot path — avoids function-call overhead
     /// for O(n²) calls per measurement.
     #[inline(always)]
+    #[allow(dead_code)]
     fn row_mult(&mut self, h: usize, i: usize) {
-        let new_phase = (2 * self.r[h] + 2 * self.r[i]
-            + Self::phase_of_product(&self.x[h], &self.z[h], &self.x[i], &self.z[i], self.n, self.words) as u64)
+        let new_phase = (2 * self.r[h]
+            + 2 * self.r[i]
+            + Self::phase_of_product(
+                &self.x[h], &self.z[h], &self.x[i], &self.z[i], self.n, self.words,
+            ) as u64)
             & 3;
         self.r[h] = (new_phase >> 1) & 1;
         for w in 0..self.words {
@@ -259,12 +288,11 @@ impl StabilizerTableau {
                 for i in 0..2 * n {
                     if i != p && (self.x[i][w] & mask) != 0 {
                         // ── Inlined row_mult (avoids fn-call + repeated self.x[p] indexing) ──
-                        let new_phase = (2 * self.r[i] + 2 * rp
-                            + Self::phase_of_product(
-                                &self.x[i], &self.z[i],
-                                &xp, &zp,
-                                n, words,
-                            ) as u64) & 3;
+                        let new_phase = (2 * self.r[i]
+                            + 2 * rp
+                            + Self::phase_of_product(&self.x[i], &self.z[i], &xp, &zp, n, words)
+                                as u64)
+                            & 3;
                         self.r[i] = (new_phase >> 1) & 1;
                         // XOR loop (raw pointers — row i is exclusive, row p is const)
                         let xi_ptr = self.x[i].as_mut_ptr();
@@ -308,8 +336,16 @@ impl StabilizerTableau {
         for i in 0..n {
             if (self.x[i][w] & mask) != 0 {
                 let si = i + n;
-                let phase = (sr + 2 * self.r[si]
-                    + Self::phase_of_product(&self.sx_buf, &self.sz_buf, &self.x[si], &self.z[si], n, words) as u64)
+                let phase = (sr
+                    + 2 * self.r[si]
+                    + Self::phase_of_product(
+                        &self.sx_buf,
+                        &self.sz_buf,
+                        &self.x[si],
+                        &self.z[si],
+                        n,
+                        words,
+                    ) as u64)
                     & 3;
                 sr = phase;
                 // XOR loop — raw pointers avoid bounds checks on repeated buf access
@@ -323,7 +359,11 @@ impl StabilizerTableau {
                 }
             }
         }
-        if (sr & 2) != 0 { 1 } else { 0 }
+        if (sr & 2) != 0 {
+            1
+        } else {
+            0
+        }
     }
 
     // ── Data export for Python interop ──
@@ -363,7 +403,7 @@ impl StabilizerTableau {
                 let b = q % 64;
                 let sx = (self.x[i][w] >> b) & 1;
                 let sz = (self.z[i][w] >> b) & 1;
-                symp ^= sx * (pz[q] as u64) ^ sz * (px[q] as u64);
+                symp ^= (sx * (pz[q] as u64)) ^ (sz * (px[q] as u64));
             }
             if (symp & 1) != 0 {
                 return 0.0;
@@ -379,7 +419,7 @@ impl StabilizerTableau {
                 let b = q % 64;
                 let dx = (self.x[i][w] >> b) & 1;
                 let dz = (self.z[i][w] >> b) & 1;
-                symp ^= dx * (pz[q] as u64) ^ dz * (px[q] as u64);
+                symp ^= (dx * (pz[q] as u64)) ^ (dz * (px[q] as u64));
             }
             if (symp & 1) != 0 {
                 sel.push(i);
@@ -399,11 +439,17 @@ impl StabilizerTableau {
                 let b = q % 64;
                 let vx = (self.x[si][w] >> b) & 1;
                 let vz = (self.z[si][w] >> b) & 1;
-                if vx != 0 { sx[w] |= 1 << b; }
-                if vz != 0 { sz[w] |= 1 << b; }
+                if vx != 0 {
+                    sx[w] |= 1 << b;
+                }
+                if vz != 0 {
+                    sz[w] |= 1 << b;
+                }
             }
-            prod_phase = (prod_phase + 2 * self.r[si] as u32
-                + Self::phase_of_product_u8(&prod_x, &prod_z, &sx, &sz, n, self.words) as u32) & 3;
+            prod_phase = (prod_phase
+                + 2 * self.r[si] as u32
+                + Self::phase_of_product_u8(&prod_x, &prod_z, &sx, &sz, n, self.words) as u32)
+                & 3;
             for q in 0..n {
                 let w = q / 64;
                 let b = q % 64;
@@ -419,13 +465,15 @@ impl StabilizerTableau {
     }
 
     /// Phase of product for u8-level arrays (used by pauli_expval).
-    fn phase_of_product_u8(_x1: &[u8], _z1: &[u8], _x2: &[u64], _z2: &[u64], n: usize, _words: usize) -> u8 {
-        const G: [[u8; 4]; 4] = [
-            [0, 0, 0, 0],
-            [0, 0, 3, 1],
-            [0, 1, 0, 3],
-            [0, 3, 1, 0],
-        ];
+    fn phase_of_product_u8(
+        _x1: &[u8],
+        _z1: &[u8],
+        _x2: &[u64],
+        _z2: &[u64],
+        n: usize,
+        _words: usize,
+    ) -> u8 {
+        const G: [[u8; 4]; 4] = [[0, 0, 0, 0], [0, 0, 3, 1], [0, 1, 0, 3], [0, 3, 1, 0]];
         let mut phase: u32 = 0;
         for q in 0..n {
             let w = q / 64;
@@ -447,7 +495,7 @@ impl StabilizerTableau {
         if shots == 0 {
             return HashMap::new();
         }
-        let base_seed = seed.unwrap_or_else(|| rand::random());
+        let base_seed = seed.unwrap_or_else(rand::random);
         let n = self.n;
 
         // Parallel sampling: each shot is independent (measure_z is destructive)
@@ -503,22 +551,47 @@ impl Clone for StabilizerTableau {
 
 /// CNOT twirl pairs: (P1_before, P2_before, P1_after, P2_after). 0=I,1=X,2=Z,3=Y.
 const CNOT_TWIRL: &[(u8, u8, u8, u8)] = &[
-    (0, 0, 0, 0), (0, 1, 0, 1), (0, 2, 2, 2), (0, 3, 2, 3),
-    (1, 0, 1, 1), (1, 1, 1, 0), (1, 3, 3, 2),
-    (2, 0, 2, 0), (2, 1, 2, 1), (2, 2, 0, 2), (2, 3, 0, 3),
-    (3, 0, 3, 1), (3, 1, 3, 0), (3, 2, 1, 3),
+    (0, 0, 0, 0),
+    (0, 1, 0, 1),
+    (0, 2, 2, 2),
+    (0, 3, 2, 3),
+    (1, 0, 1, 1),
+    (1, 1, 1, 0),
+    (1, 3, 3, 2),
+    (2, 0, 2, 0),
+    (2, 1, 2, 1),
+    (2, 2, 0, 2),
+    (2, 3, 0, 3),
+    (3, 0, 3, 1),
+    (3, 1, 3, 0),
+    (3, 2, 1, 3),
 ];
 
 /// CZ twirl pairs: (P1_before, P2_before, P1_after, P2_after). 0=I,1=X,2=Z,3=Y.
 const CZ_TWIRL: &[(u8, u8, u8, u8)] = &[
-    (0, 0, 0, 0), (0, 1, 2, 1), (0, 2, 0, 2), (0, 3, 2, 3),
-    (1, 0, 1, 2), (1, 1, 3, 3), (1, 2, 1, 0),
-    (2, 0, 2, 0), (2, 1, 0, 1), (2, 2, 2, 2), (2, 3, 0, 3),
-    (3, 0, 3, 2), (3, 2, 3, 0), (3, 3, 1, 1),
+    (0, 0, 0, 0),
+    (0, 1, 2, 1),
+    (0, 2, 0, 2),
+    (0, 3, 2, 3),
+    (1, 0, 1, 2),
+    (1, 1, 3, 3),
+    (1, 2, 1, 0),
+    (2, 0, 2, 0),
+    (2, 1, 0, 1),
+    (2, 2, 2, 2),
+    (2, 3, 0, 3),
+    (3, 0, 3, 2),
+    (3, 2, 3, 0),
+    (3, 3, 1, 1),
 ];
 
 fn pauli_name(idx: u8) -> &'static str {
-    match idx { 1 => "X", 2 => "Z", 3 => "Y", _ => "I" }
+    match idx {
+        1 => "X",
+        2 => "Z",
+        3 => "Y",
+        _ => "I",
+    }
 }
 
 /// Apply Pauli twirling to a list of (gate_name, qubits, params) tuples.
@@ -541,15 +614,23 @@ pub fn pauli_twirl_gate_records(
 
             let pb1 = pauli_name(p1b);
             let pb2 = pauli_name(p2b);
-            if pb1 != "I" { result.push((pb1.to_string(), vec![q0], vec![])); }
-            if pb2 != "I" { result.push((pb2.to_string(), vec![q1], vec![])); }
+            if pb1 != "I" {
+                result.push((pb1.to_string(), vec![q0], vec![]));
+            }
+            if pb2 != "I" {
+                result.push((pb2.to_string(), vec![q1], vec![]));
+            }
 
             result.push((name.clone(), qubits.clone(), params.clone()));
 
             let pa1 = pauli_name(p1a);
             let pa2 = pauli_name(p2a);
-            if pa1 != "I" { result.push((pa1.to_string(), vec![q0], vec![])); }
-            if pa2 != "I" { result.push((pa2.to_string(), vec![q1], vec![])); }
+            if pa1 != "I" {
+                result.push((pa1.to_string(), vec![q0], vec![]));
+            }
+            if pa2 != "I" {
+                result.push((pa2.to_string(), vec![q1], vec![]));
+            }
         } else {
             result.push((name.clone(), qubits.clone(), params.clone()));
         }
@@ -558,7 +639,10 @@ pub fn pauli_twirl_gate_records(
 }
 
 /// Apply Pauli twirling to a list of (gate_name, qubits) tuples (no params).
-pub fn pauli_twirl_gate_list(gates: &[(String, Vec<usize>)], seed: u64) -> Vec<(String, Vec<usize>)> {
+pub fn pauli_twirl_gate_list(
+    gates: &[(String, Vec<usize>)],
+    seed: u64,
+) -> Vec<(String, Vec<usize>)> {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut result = Vec::with_capacity(gates.len() + gates.len() / 2);
 
@@ -574,15 +658,23 @@ pub fn pauli_twirl_gate_list(gates: &[(String, Vec<usize>)], seed: u64) -> Vec<(
 
             let pb1 = pauli_name(p1b);
             let pb2 = pauli_name(p2b);
-            if pb1 != "I" { result.push((pb1.to_string(), vec![q0])); }
-            if pb2 != "I" { result.push((pb2.to_string(), vec![q1])); }
+            if pb1 != "I" {
+                result.push((pb1.to_string(), vec![q0]));
+            }
+            if pb2 != "I" {
+                result.push((pb2.to_string(), vec![q1]));
+            }
 
             result.push((name.clone(), qubits.clone()));
 
             let pa1 = pauli_name(p1a);
             let pa2 = pauli_name(p2a);
-            if pa1 != "I" { result.push((pa1.to_string(), vec![q0])); }
-            if pa2 != "I" { result.push((pa2.to_string(), vec![q1])); }
+            if pa1 != "I" {
+                result.push((pa1.to_string(), vec![q0]));
+            }
+            if pa2 != "I" {
+                result.push((pa2.to_string(), vec![q1]));
+            }
         } else {
             result.push((name.clone(), qubits.clone()));
         }
@@ -646,16 +738,22 @@ mod tests {
         tab.swap(0, 2);
         let counts = tab.sample(500, Some(99));
         // Qubit 2 now has the |+> state → ~50% 0, 50% 1 at position 2
-        let ones: usize = counts.iter().filter(|(bs, _)| bs.chars().nth(2).unwrap() == '1').map(|(_, c)| c).sum();
-        assert!(ones > 180 && ones < 320, "Expected ~250 ones on qubit 2, got {}", ones);
+        let ones: usize = counts
+            .iter()
+            .filter(|(bs, _)| bs.chars().nth(2).unwrap() == '1')
+            .map(|(_, c)| c)
+            .sum();
+        assert!(
+            ones > 180 && ones < 320,
+            "Expected ~250 ones on qubit 2, got {}",
+            ones
+        );
     }
 
     #[test]
     fn test_from_gate_list() {
-        let gates: Vec<(String, Vec<usize>)> = vec![
-            ("H".into(), vec![0]),
-            ("CNOT".into(), vec![0, 1]),
-        ];
+        let gates: Vec<(String, Vec<usize>)> =
+            vec![("H".into(), vec![0]), ("CNOT".into(), vec![0, 1])];
         let tab = StabilizerTableau::from_gate_list(2, &gates).unwrap();
         let counts = tab.sample(500, Some(42));
         let z00 = *counts.get("00").unwrap_or(&0);

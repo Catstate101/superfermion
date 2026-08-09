@@ -64,7 +64,7 @@ fn init_gpu() -> Option<GpuState> {
 }
 
 fn get_state() -> Result<&'static GpuState, GpuError> {
-    let state = GPU_STATE.get_or_init(|| init_gpu());
+    let state = GPU_STATE.get_or_init(init_gpu);
     state.as_ref().ok_or(GpuError::NotAvailable)
 }
 
@@ -74,6 +74,7 @@ pub fn is_available() -> bool {
 }
 
 /// Diagnostic: returns detailed reason why GPU init failed (or "ok").
+#[allow(clippy::needless_return)]
 pub fn diagnose() -> String {
     match CudaContext::new(0) {
         Err(e) => return format!("CudaContext::new(0) failed: {:?}", e),
@@ -89,13 +90,13 @@ pub fn diagnose() -> String {
                 ..Default::default()
             };
             match cudarc::nvrtc::compile_ptx_with_opts(KERNEL_SOURCE, opts) {
-                Err(e) => return format!("compile_ptx failed (arch=sm_{}{}): {:?}", major, minor, e),
-                Ok(ptx) => {
-                    match ctx.load_module(ptx) {
-                        Err(e) => return format!("load_module failed: {:?}", e),
-                        Ok(_) => return format!("ok (sm_{}{}, GPU ready)", major, minor),
-                    }
+                Err(e) => {
+                    return format!("compile_ptx failed (arch=sm_{}{}): {:?}", major, minor, e)
                 }
+                Ok(ptx) => match ctx.load_module(ptx) {
+                    Err(e) => return format!("load_module failed: {:?}", e),
+                    Ok(_) => return format!("ok (sm_{}{}, GPU ready)", major, minor),
+                },
             }
         }
     }
@@ -151,12 +152,18 @@ pub fn simulate_statevector(n_qubits: usize, gates: &[GateOp]) -> Result<Vec<Com
     let mut dev_re: CudaSlice<f64> = state.stream.clone_htod(&state_re_host).map_err(cuda_err)?;
     let mut dev_im: CudaSlice<f64> = state.stream.clone_htod(&state_im_host).map_err(cuda_err)?;
 
-    let fn_1q: CudaFunction = state.module.load_function("apply_gate_1q").map_err(cuda_err)?;
+    let fn_1q: CudaFunction = state
+        .module
+        .load_function("apply_gate_1q")
+        .map_err(cuda_err)?;
     let fn_diag: CudaFunction = state
         .module
         .load_function("apply_diagonal_1q")
         .map_err(cuda_err)?;
-    let fn_2q: CudaFunction = state.module.load_function("apply_gate_2q").map_err(cuda_err)?;
+    let fn_2q: CudaFunction = state
+        .module
+        .load_function("apply_gate_2q")
+        .map_err(cuda_err)?;
 
     for gate in gates {
         match gate.qubits.len() {

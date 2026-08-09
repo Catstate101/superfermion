@@ -13,10 +13,12 @@ name = "superfermion"
 version = "0.1.0"
 description = "High-performance quantum computing framework with a Python API and Rust simulation core"
 readme = "README.md"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
-    {name = "Superfermion Team"},
+    {name = "Faisal Ahmed Sifat", email = "faisalahmed531@gmail.com"},
+    {name = "Tamim Muhebbullah", email = "cntgtamim@gmail.com"},
 ]
 keywords = [
     "quantum", "machine-learning", "jax", "quantum-computing",
@@ -94,8 +96,10 @@ all = [
 ]
 
 [project.urls]
-Repository = "https://github.com/superfermion/superfermion"
-Issues = "https://github.com/superfermion/superfermion/issues"
+Repository = "https://github.com/Catstate101/superfermion"
+Issues = "https://github.com/Catstate101/superfermion/issues"
+Documentation = "https://github.com/Catstate101/superfermion#readme"
+Changelog = "https://github.com/Catstate101/superfermion/blob/main/CHANGELOG.md"
 
 [tool.black]
 line-length = 100

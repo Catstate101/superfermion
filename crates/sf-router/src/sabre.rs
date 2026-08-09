@@ -11,12 +11,12 @@
 //! 5. Bidirectional: forward pass then backward pass, pick the better result
 //! 6. Multi-trial: multiple random initial layouts, return best
 
-use sf_ir::{QuantumDAG, OpType, QubitMapping, PhysicalQubit, LogicalQubit, QubitId, NodeId};
 use crate::topology::CouplingMap;
 use crate::RouterError;
+use sf_ir::{LogicalQubit, NodeId, OpType, PhysicalQubit, QuantumDAG, QubitId, QubitMapping};
 
-use std::collections::{HashSet, HashMap, VecDeque};
 use rand::prelude::*;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Configuration for the SABRE router.
 #[derive(Clone, Debug)]
@@ -119,9 +119,7 @@ impl<'a> SabreRouter<'a> {
         let mut routed_dag = QuantumDAG::new(n_physical, n_cbits);
 
         // Track how many predecessors each gate still has unexecuted
-        let mut remaining_preds: Vec<usize> = gates.iter()
-            .map(|g| g.predecessors.len())
-            .collect();
+        let mut remaining_preds: Vec<usize> = gates.iter().map(|g| g.predecessors.len()).collect();
 
         // Build initial front layer: gates with no predecessors
         let mut front_layer: Vec<usize> = Vec::new();
@@ -157,7 +155,13 @@ impl<'a> SabreRouter<'a> {
                         self.emit_gate(&gate.op_type, &gate.qubits, &mapping, &mut routed_dag);
                         executed[gate_idx] = true;
                         front_layer.swap_remove(i);
-                        self.update_front_layer(gate_idx, gates, &mut remaining_preds, &executed, &mut front_layer);
+                        self.update_front_layer(
+                            gate_idx,
+                            gates,
+                            &mut remaining_preds,
+                            &executed,
+                            &mut front_layer,
+                        );
                         progress = true;
                         continue;
                     }
@@ -170,7 +174,13 @@ impl<'a> SabreRouter<'a> {
                             routed_dag.add_op(gate.op_type.clone(), &[pq0, pq1]);
                             executed[gate_idx] = true;
                             front_layer.swap_remove(i);
-                            self.update_front_layer(gate_idx, gates, &mut remaining_preds, &executed, &mut front_layer);
+                            self.update_front_layer(
+                                gate_idx,
+                                gates,
+                                &mut remaining_preds,
+                                &executed,
+                                &mut front_layer,
+                            );
                             progress = true;
                             // Reset decay on progress
                             swaps_since_progress = 0;
@@ -180,13 +190,21 @@ impl<'a> SabreRouter<'a> {
 
                     // 3+ qubit gates: remap and execute
                     if gate.op_type.n_qubits() > 2 {
-                        let physical_qubits: Vec<usize> = gate.qubits.iter()
+                        let physical_qubits: Vec<usize> = gate
+                            .qubits
+                            .iter()
                             .map(|&lq| mapping.logical_to_physical(LogicalQubit(lq)).0)
                             .collect();
                         routed_dag.add_op(gate.op_type.clone(), &physical_qubits);
                         executed[gate_idx] = true;
                         front_layer.swap_remove(i);
-                        self.update_front_layer(gate_idx, gates, &mut remaining_preds, &executed, &mut front_layer);
+                        self.update_front_layer(
+                            gate_idx,
+                            gates,
+                            &mut remaining_preds,
+                            &executed,
+                            &mut front_layer,
+                        );
                         progress = true;
                         continue;
                     }
@@ -208,13 +226,8 @@ impl<'a> SabreRouter<'a> {
             // Build extended set from successors of front layer gates
             let extended_set = self.build_extended_set(gates, &front_layer, &executed);
 
-            let (s0, s1) = self.find_best_swap_sabre(
-                gates,
-                &front_layer,
-                &extended_set,
-                &mapping,
-                &decay,
-            );
+            let (s0, s1) =
+                self.find_best_swap_sabre(gates, &front_layer, &extended_set, &mapping, &decay);
 
             routed_dag.add_op(OpType::SWAP, &[s0, s1]);
             mapping.swap_physical(PhysicalQubit(s0), PhysicalQubit(s1));
@@ -248,10 +261,13 @@ impl<'a> SabreRouter<'a> {
         if logical_qubits.is_empty() {
             routed_dag.add_op(op_type.clone(), &[]);
         } else if op_type.n_qubits() <= 1 {
-            let physical = mapping.logical_to_physical(LogicalQubit(logical_qubits[0])).0;
+            let physical = mapping
+                .logical_to_physical(LogicalQubit(logical_qubits[0]))
+                .0;
             routed_dag.add_op(op_type.clone(), &[physical]);
         } else {
-            let physical_qubits: Vec<usize> = logical_qubits.iter()
+            let physical_qubits: Vec<usize> = logical_qubits
+                .iter()
                 .map(|&lq| mapping.logical_to_physical(LogicalQubit(lq)).0)
                 .collect();
             routed_dag.add_op(op_type.clone(), &physical_qubits);
@@ -332,7 +348,8 @@ impl<'a> SabreRouter<'a> {
         decay: &[f64],
     ) -> (usize, usize) {
         // Collect physical qubit pairs for front layer 2Q gates
-        let front_pairs: Vec<(usize, usize)> = front_layer.iter()
+        let front_pairs: Vec<(usize, usize)> = front_layer
+            .iter()
             .filter(|&&i| gates[i].op_type.n_qubits() == 2 && gates[i].qubits.len() >= 2)
             .map(|&i| {
                 let g = &gates[i];
@@ -342,7 +359,8 @@ impl<'a> SabreRouter<'a> {
             })
             .collect();
 
-        let extended_pairs: Vec<(usize, usize)> = extended_set.iter()
+        let extended_pairs: Vec<(usize, usize)> = extended_set
+            .iter()
             .filter(|&&i| gates[i].qubits.len() >= 2)
             .map(|&i| {
                 let g = &gates[i];
@@ -366,7 +384,11 @@ impl<'a> SabreRouter<'a> {
         let mut candidate_swaps: Vec<(usize, usize)> = Vec::new();
         for &q in &involved_qubits {
             for &neighbor in self.coupling.neighbors(q) {
-                let swap = if q < neighbor { (q, neighbor) } else { (neighbor, q) };
+                let swap = if q < neighbor {
+                    (q, neighbor)
+                } else {
+                    (neighbor, q)
+                };
                 if !candidate_swaps.contains(&swap) {
                     candidate_swaps.push(swap);
                 }
@@ -381,8 +403,20 @@ impl<'a> SabreRouter<'a> {
             // Front layer cost with decay
             let mut front_cost = 0.0;
             for &(p0, p1) in &front_pairs {
-                let new_p0 = if p0 == s0 { s1 } else if p0 == s1 { s0 } else { p0 };
-                let new_p1 = if p1 == s0 { s1 } else if p1 == s1 { s0 } else { p1 };
+                let new_p0 = if p0 == s0 {
+                    s1
+                } else if p0 == s1 {
+                    s0
+                } else {
+                    p0
+                };
+                let new_p1 = if p1 == s0 {
+                    s1
+                } else if p1 == s1 {
+                    s0
+                } else {
+                    p1
+                };
                 let dist = self.coupling.distance(new_p0, new_p1) as f64;
                 let max_decay = decay[new_p0].max(decay[new_p1]);
                 front_cost += dist * max_decay;
@@ -391,8 +425,20 @@ impl<'a> SabreRouter<'a> {
             // Extended set cost (no decay, weighted by config)
             let mut ext_cost = 0.0;
             for &(p0, p1) in &extended_pairs {
-                let new_p0 = if p0 == s0 { s1 } else if p0 == s1 { s0 } else { p0 };
-                let new_p1 = if p1 == s0 { s1 } else if p1 == s1 { s0 } else { p1 };
+                let new_p0 = if p0 == s0 {
+                    s1
+                } else if p0 == s1 {
+                    s0
+                } else {
+                    p0
+                };
+                let new_p1 = if p1 == s0 {
+                    s1
+                } else if p1 == s1 {
+                    s0
+                } else {
+                    p1
+                };
                 ext_cost += self.coupling.distance(new_p0, new_p1) as f64;
             }
 
@@ -414,7 +460,8 @@ impl<'a> SabreRouter<'a> {
         initial_layout: &QubitMapping,
     ) -> Result<(QuantumDAG, QubitMapping), RouterError> {
         let gates = self.build_gate_graph(dag);
-        let (routed, mapping, _) = self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits)?;
+        let (routed, mapping, _) =
+            self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits)?;
         Ok((routed, mapping))
     }
 
@@ -428,15 +475,13 @@ impl<'a> SabreRouter<'a> {
         let gates = self.build_gate_graph(dag);
 
         // Forward pass
-        let (fwd_dag, fwd_mapping, fwd_swaps) = self.forward_pass(
-            &gates, initial_layout, dag.n_qubits, dag.n_cbits,
-        )?;
+        let (fwd_dag, fwd_mapping, fwd_swaps) =
+            self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits)?;
 
         // Build reversed gate list for backward pass
         let rev_gates = self.reverse_gates(&gates);
-        let (bwd_dag, _bwd_mapping, bwd_swaps) = self.forward_pass(
-            &rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits,
-        )?;
+        let (bwd_dag, _bwd_mapping, bwd_swaps) =
+            self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits)?;
 
         // Pick the result with fewer SWAPs
         if bwd_swaps < fwd_swaps {
@@ -620,7 +665,10 @@ mod tests {
     #[test]
     fn test_bidirectional_routing() {
         let coupling = CouplingMap::linear(5);
-        let config = SabreConfig { n_trials: 1, ..Default::default() };
+        let config = SabreConfig {
+            n_trials: 1,
+            ..Default::default()
+        };
         let router = SabreRouter::with_config(&coupling, config);
         let layout = QubitMapping::identity(5);
 

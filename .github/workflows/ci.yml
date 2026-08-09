@@ -24,6 +24,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check --all-targets --manifest-path crates/sf-ir/Cargo.toml
+      - run: cargo fmt --check --all
+      - run: cargo clippy --workspace -- -D warnings
       - run: cargo test --workspace
 
   # ── Python checks ────────────────────────────────────────
@@ -50,6 +52,8 @@ jobs:
           cd crates/sf-bindings && maturin develop --release
       - name: Lint (ruff)
         run: ruff check superfermion/ --select=E,F,I,N,W,UP --ignore=E501
+      - name: Type check (mypy)
+        run: mypy superfermion/
       - name: Run core tests
         run: python -m pytest tests/ -q --timeout=120 -k "not (aer or qiskit or pennylane)"
 
