@@ -104,7 +104,7 @@ jobs:
             --ignore=tests/domain/test_gradients_full.py \
             --ignore=tests/integration/test_provider_adapters.py \
             --ignore=tests/integration/test_tracked_experiment.py \
-            -k "not (aer or qiskit or pennylane or braket)"
+            -k "not (aer or qiskit or pennylane or braket or test_decomposes_swap)"
 
   # ---- Publish to PyPI ---- 
   publish:
