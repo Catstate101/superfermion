@@ -10,7 +10,7 @@ features = ["pyo3/extension-module"]
 
 [project]
 name = "superfermion"
-version = "0.1.0"
+version = "0.1.1"
 description = "High-performance quantum computing framework with a Python API and Rust simulation core"
 readme = "README.md"
 license = "Apache-2.0"
@@ -111,6 +111,12 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.cibuildwheel]
+# Skip musllinux and 32-bit builds — we only target glibc (manylinux), macOS, and Windows
+skip = ["*-musllinux_*", "*-manylinux_i686", "*-win32"]
+# maturin builds the native extension; cibuildwheel should not try to repair platform tags
+repair-wheel-command = ""
 
 [tool.mypy]
 python_version = "3.10"
