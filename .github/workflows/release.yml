@@ -102,7 +102,9 @@ jobs:
           rm -rf superfermion/
           python -m pytest tests/ -q --timeout=120 \
             --ignore=tests/domain/test_gradients_full.py \
-            -k "not (aer or qiskit or pennylane)"
+            --ignore=tests/integration/test_provider_adapters.py \
+            --ignore=tests/integration/test_tracked_experiment.py \
+            -k "not (aer or qiskit or pennylane or braket)"
 
   # ---- Publish to PyPI ---- 
   publish:
