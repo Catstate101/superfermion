@@ -60,7 +60,6 @@ jobs:
         with:
           command: build
           args: ${{ matrix.maturin-args }}
-          working-directory: crates/sf-bindings
 
       - name: Build Python sdist with maturin
         if: matrix.os == 'ubuntu-latest'
@@ -68,15 +67,6 @@ jobs:
         with:
           command: sdist
           args: --out dist
-
-      - name: Collect artifacts to repo-root dist/
-        shell: bash
-        run: |
-          mkdir -p dist
-          # Wheel from maturin build (working-directory: crates/sf-bindings)
-          cp crates/sf-bindings/dist/* dist/ 2>/dev/null || true
-          # sdist from maturin sdist (repo root) — already in dist/
-          ls -la dist/
 
       - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4
