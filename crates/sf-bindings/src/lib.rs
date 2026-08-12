@@ -135,7 +135,7 @@ impl PyState {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let names = dag.inner.parameter_names();
         let mut result = std::collections::HashMap::new();
-        for (name, grad) in names.into_iter().zip(gradients.into_iter()) {
+        for (name, grad) in names.into_iter().zip(gradients) {
             result.insert(name, grad);
         }
         Ok(result)
@@ -1638,12 +1638,11 @@ fn hamiltonian_expval(
                             phase *= num_complex::Complex64::new(0.0, 1.0);
                         }
                     }
-                    3 => {
+                    3 if (i >> bit_pos) & 1 == 1 => {
                         // Z
-                        if (i >> bit_pos) & 1 == 1 {
-                            phase *= -1.0;
-                        }
+                        phase *= -1.0;
                     }
+                    3 => {}
                     _ => {} // I
                 }
             }
