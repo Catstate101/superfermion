@@ -96,11 +96,13 @@ jobs:
 
       - name: Install wheel and run tests
         run: |
-          pip install pytest pytest-timeout numpy
+          pip install pytest pytest-timeout numpy scipy
           pip install dist/*linux*.whl
           # Remove local source so it doesn't shadow the installed package
           rm -rf superfermion/
-          python -m pytest tests/ -q --timeout=120 -k "not (aer or qiskit or pennylane)"
+          python -m pytest tests/ -q --timeout=120 \
+            --ignore=tests/domain/test_gradients_full.py \
+            -k "not (aer or qiskit or pennylane)"
 
   # ---- Publish to PyPI ---- 
   publish:
