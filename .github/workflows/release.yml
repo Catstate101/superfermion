@@ -61,7 +61,6 @@ jobs:
           command: build
           args: ${{ matrix.maturin-args }}
           working-directory: crates/sf-bindings
-          manylinux: auto
 
       - name: Build Python sdist with maturin
         if: matrix.os == 'ubuntu-latest'
@@ -108,7 +107,7 @@ jobs:
       - name: Install wheel and run tests
         run: |
           pip install pytest pytest-timeout
-          pip install dist/*manylinux*.whl
+          pip install dist/*.tar.gz
           python -m pytest tests/ -q --timeout=120 -k "not (aer or qiskit or pennylane)"
 
   # ---- Publish to PyPI ---- 
