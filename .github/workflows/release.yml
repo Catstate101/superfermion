@@ -96,7 +96,7 @@ jobs:
 
       - name: Install wheel and run tests
         run: |
-          pip install pytest pytest-timeout numpy scipy
+          pip install pytest pytest-timeout pytest-benchmark numpy scipy boto3
           pip install dist/*linux*.whl
           # Remove local source so it doesn't shadow the installed package
           rm -rf superfermion/
