@@ -105,7 +105,7 @@ jobs:
       - name: Install wheel and run tests
         run: |
           pip install pytest pytest-timeout
-          pip install dist/*.whl
+          pip install dist/*manylinux*.whl
           python -m pytest tests/ -q --timeout=120 -k "not (aer or qiskit or pennylane)"
 
   # ---- Publish to PyPI ---- 
