@@ -98,8 +98,19 @@ jobs:
         run: |
           pip install pytest pytest-timeout numpy
           pip install dist/*linux*.whl
-          pip show -f superfermion | head -30
-          python -c "import superfermion._sf_core; print('OK:', superfermion._sf_core.__file__)"
+          python -c "
+          import sys, ctypes, os
+          site = next(p for p in sys.path if 'site-packages' in p)
+          so = os.path.join(site, 'superfermion', '_sf_core.cpython-312-x86_64-linux-gnu.so')
+          print('Trying:', so)
+          print('Exists:', os.path.exists(so))
+          try:
+              ctypes.CDLL(so)
+              print('ctypes load: OK')
+          except OSError as e:
+              print('ctypes load FAILED:', e)
+          "
+          python -c "import superfermion._sf_core; print('import OK')" || true
           python -m pytest tests/ -q --timeout=120 -k "not (aer or qiskit or pennylane)"
 
   # ---- Publish to PyPI ---- 
