@@ -10,7 +10,7 @@ features = ["pyo3/extension-module"]
 
 [project]
 name = "superfermion"
-version = "0.1.2"
+version = "0.1.3"
 description = "High-performance quantum computing framework with a Python API and Rust simulation core"
 readme = "README.md"
 license = "Apache-2.0"

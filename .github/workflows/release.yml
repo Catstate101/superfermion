@@ -147,7 +147,7 @@ jobs:
       - name: Install wheel and run tests
         run: |
           pip install pytest pytest-timeout pytest-benchmark numpy scipy boto3
-          pip install dist/*linux*.whl
+          pip install dist/*cp312*manylinux*.whl
           # Remove local source so it doesn't shadow the installed package
           rm -rf superfermion/
           python -m pytest tests/ -q --timeout=120 \
