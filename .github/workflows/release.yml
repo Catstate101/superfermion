@@ -60,14 +60,7 @@ jobs:
         with:
           command: build
           args: ${{ matrix.maturin-args }}
-          working-directory: crates/sf-bindings
           manylinux: auto
-
-      - name: Move wheels to repo-root dist/
-        shell: bash
-        run: |
-          mkdir -p dist
-          mv crates/sf-bindings/dist/* dist/ 2>/dev/null || true
 
       - name: Build Python sdist with maturin
         if: matrix.os == 'ubuntu-latest'
