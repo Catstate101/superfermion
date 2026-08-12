@@ -93,11 +93,10 @@ impl StatevectorState {
                                 phase *= Complex64::new(0.0, 1.0);
                             }
                         }
-                        3 => {
-                            if (i >> bit_pos) & 1 == 1 {
-                                phase *= -1.0;
-                            }
+                        3 if (i >> bit_pos) & 1 == 1 => {
+                            phase *= -1.0;
                         }
+                        3 => {}
                         _ => {}
                     }
                 }
@@ -382,11 +381,10 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
                                 phase *= Complex64::new(0.0, 1.0);
                             }
                         }
-                        3 => {
-                            if (i >> bit_pos) & 1 == 1 {
-                                phase *= -1.0;
-                            }
+                        3 if (i >> bit_pos) & 1 == 1 => {
+                            phase *= -1.0;
                         }
+                        3 => {}
                         _ => {}
                     }
                 }

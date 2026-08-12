@@ -421,12 +421,11 @@ impl QuantumDAG {
                                     phase *= -num_complex::Complex64::i();
                                 }
                             }
-                            3 => {
+                            3 if (i >> q) & 1 == 1 => {
                                 // Z
-                                if (i >> q) & 1 == 1 {
-                                    phase *= -1.0;
-                                }
+                                phase *= -1.0;
                             }
+                            3 => {}
                             _ => {} // I
                         }
                     }
