@@ -40,6 +40,7 @@ jobs:
 
       - name: Validate tag matches pyproject version
         if: github.event_name == 'push'
+        shell: bash
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#v}"
