@@ -2,5 +2,15 @@
 # SSSE3 + SSE3, supported on all x86_64 CPUs since ~2009). LLVM still
 # auto-vectorizes the statevector kernel within this ISA subset, and the
 # resulting binary runs everywhere — critical for pre-built PyPI wheels.
-[build]
+#
+# Applied only to x86_64 targets so ARM (macOS Apple Silicon) and other
+# architectures are unaffected.
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+[target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-cpu=x86-64-v2"]
