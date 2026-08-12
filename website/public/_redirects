@@ -1,0 +1,9 @@
+# Old (flat) → new (structured) paths
+/docs/usage-guide    /docs/reference/api           301
+/docs/architecture   /docs/reference/architecture   301
+/docs/performance    /docs/reference/performance    301
+/docs/compiler       /docs/guides/compiler          301
+/docs/chemistry      /docs/guides/chemistry         301
+/docs/qec            /docs/guides/qec               301
+/docs/ml-integration /docs/guides/ml-frameworks     301
+/docs/providers      /docs/guides/providers         301

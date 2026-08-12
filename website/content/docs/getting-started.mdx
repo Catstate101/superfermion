@@ -1,73 +1,125 @@
 ---
 title: "Getting Started"
-description: "Install Superfermion and run your first circuit."
+description: "Install Superfermion and run your first quantum circuit in 5 minutes."
 ---
 
-Superfermion combines a fluent Python API with a Rust simulation core. This page gets you from a clean checkout to a running Bell-state circuit.
+Welcome. This page gets you from zero to a running quantum circuit with gradients.
 
-## Installation
-
-```bash
-git clone https://github.com/Catstate101/superfermion.git
-cd superfermion
-pip install -e .
-
-# Build the Rust extension (required for simulation)
-pip install maturin
-cd crates/sf-bindings && maturin develop --release && cd ../..
-
-# Copy the built extension into the package
-# Linux:
-cp target/release/lib_sf_core.so superfermion/_sf_core.so
-# macOS:
-# cp target/release/lib_sf_core.dylib superfermion/_sf_core.so
-# Windows:
-# cp target/release/_sf_core.dll superfermion/_sf_core.pyd
-```
-
-Requirements: Python 3.10–3.13, Rust 1.75+, ~3 GB free disk for the Rust build.
-
-Optional dependency groups:
+## 1. Install
 
 ```bash
-pip install -e ".[dev]"        # pytest, ruff, mypy, black
-pip install -e ".[gpu]"        # JAX with CUDA 12
-pip install -e ".[qpu]"        # IBM + AWS Braket SDKs
-pip install -e ".[benchmarks]" # PennyLane, Qiskit Aer, pandas, matplotlib
-pip install -e ".[chemistry]"  # PySCF, SciPy
-pip install -e ".[viz]"        # matplotlib
-pip install -e ".[all]"        # everything
+pip install superfermion
 ```
 
-## Quick Start
+That's it. Python 3.10–3.13 on Linux, macOS, or Windows. Pre-built wheels for all three platforms — no Rust toolchain required.
+
+### Optional extras
+
+```bash
+pip install "superfermion[all]"        # everything
+pip install "superfermion[qml]"        # JAX + Flax + Optax
+pip install "superfermion[chemistry]"  # PySCF for molecular simulation
+pip install "superfermion[qpu]"        # IBM + AWS Braket SDKs
+pip install "superfermion[ml]"         # PyTorch + TensorFlow + Cirq
+```
+
+## 2. Verify
+
+```python
+import superfermion as sf
+print(sf.__version__)  # 0.1.0
+```
+
+## 3. Build a circuit
 
 ```python
 import superfermion as sf
 
-# Bell state
+# Bell state: entangle two qubits
 qc = sf.Circuit(2).h(0).cx(0, 1)
-result = sf.run(qc, device="cpu", shots=1024)
+print(qc.draw())
+# q0: ── H ── ● ──
+# q1: ────── X ──
+```
+
+Every gate method returns the circuit — chain as many as you want.
+
+## 4. Run it
+
+```python
+result = sf.run(qc, shots=1024)
 print(result.counts)  # {'00': ~512, '11': ~512}
+```
 
-# Exact simulation with sf.simulate()
-state = sf.simulate(qc, device="cpu")
-print(state.numpy())       # [0.707+0j, 0, 0, 0.707+0j]
-print(state.entropy())     # 0.0 (pure state)
-print(state.purity())      # 1.0
+`sf.run()` works everywhere — local CPU, GPU, IBM Quantum, IonQ. Same API.
 
-# Expectation value (Rust-native)
-zz_obs = [([3, 3], 1.0, 0.0)]  # ZZ observable
-print(state.expectation(zz_obs))  # 1.0
+## 5. Get the quantum state
 
-# Parameterized circuit with gradient
-qc = sf.Circuit(1).ry(sf.param("theta"), 0)
-bound = qc.bind({"theta": 0.5})
-state = sf.simulate(bound, device="cpu")
-grads = state.grad([([3], 1.0, 0.0)], qc.to_ir(), {"theta": 0.5})
+```python
+state = sf.simulate(qc)       # returns sf.State (Rust-native)
+print(state.numpy())           # [0.707+0j, 0, 0, 0.707+0j]
+print(state.entropy())         # 0.0
+print(state.purity())          # 1.0
+```
+
+`sf.State` lives in Rust. All methods — `expectation()`, `grad()`, `sample()` — dispatch to compiled Rust.
+
+## 6. Compute an expectation value
+
+```python
+from superfermion import Hamiltonian, PauliString
+
+H = Hamiltonian([PauliString("ZZ", coeff=1.0)])
+energy = state.expectation(H.to_sparse_list())
+print(energy)  # 1.0
+```
+
+## 7. Take a gradient
+
+```python
+theta = sf.param("theta")
+qc = sf.Circuit(1).ry(theta, 0)
+
+state = sf.simulate(qc, params={"theta": 0.5})
+obs = [([3], 1.0, 0.0)]      # Pauli Z
+dag = qc.bind({"theta": 0.5}).to_ir()
+grads = state.grad(obs, dag, {"theta": 0.5})
+
 print(grads)  # {"theta": -0.479...}
+```
+
+The adjoint method computes gradients in one backward pass regardless of parameter count. Up to **800x faster** than parameter-shift for deep circuits.
+
+## 8. Try a different simulation method
+
+```python
+# MPS — for weakly entangled circuits, scales to 200+ qubits
+result = sf.run(qc, method="mps", bond_dim=64, shots=1024)
+
+# Stabilizer — for Clifford-only circuits, scales to 1000+ qubits
+result = sf.run(qc, method="stabilizer", shots=1024)
+
+# Density matrix — for noisy simulation
+noise = sf.NoiseModel().add_depolarizing(0.01)
+result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
 ```
 
 ## Where next
 
-- [Usage Guide](/docs/usage-guide) — the canonical reference for the full API surface, one section per feature.
-- [Architecture](/docs/architecture) — how the Python API, Rust core, and adapters fit together.
+Now that you've run your first circuit, dive into the guides:
+
+- **[Building Circuits](/docs/guides/circuits)** — every gate, parameterized circuits, circuit properties
+- **[Running Simulations](/docs/guides/execution)** — devices, methods, noise, results
+- **[Gradients & VQE](/docs/guides/gradients)** — 5 gradient methods, VQE optimization
+- **[Hardware Compilation](/docs/guides/compiler)** — gate optimization, qubit routing
+- **[API Reference](/docs/reference/api)** — every class and method
+
+### From source (development)
+
+```bash
+git clone https://github.com/Catstate101/superfermion.git
+cd superfermion
+pip install maturin
+cd crates/sf-bindings && maturin develop --release && cd ../..
+pip install -e ".[dev]"
+```

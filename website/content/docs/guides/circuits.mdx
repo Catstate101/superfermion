@@ -1,0 +1,204 @@
+---
+title: "Building Circuits"
+description: "Construct quantum circuits: every gate, fluent chaining, parameters, circuit properties, and visualization."
+---
+
+## The Fluent Builder
+
+`sf.Circuit(n)` creates a circuit with `n` qubits. Every gate method returns the circuit, so you chain:
+
+```python
+import superfermion as sf
+
+qc = sf.Circuit(3).h(0).cnot(0, 1).cnot(1, 2).measure_all()
+```
+
+Circuits are **immutable** — each gate call returns a new circuit. This makes them safe to share, fork, and compose.
+
+## Gate Library
+
+### Single-Qubit Clifford
+
+```python
+qc = sf.Circuit(2)
+qc = qc.h(0)       # Hadamard
+qc = qc.x(1)       # Pauli-X (NOT)
+qc = qc.y(0)       # Pauli-Y
+qc = qc.z(1)       # Pauli-Z
+qc = qc.s(0)       # Phase (√Z)
+qc = qc.sdg(1)     # S dagger
+qc = qc.t(0)       # T (⁴√Z)
+qc = qc.tdg(1)     # T dagger
+qc = qc.sx(0)      # √X
+qc = qc.id(1)      # Identity (no-op, useful as placeholder)
+```
+
+### Single-Qubit Parametric
+
+```python
+from math import pi
+
+qc = sf.Circuit(1)
+qc = qc.rx(0.5, 0)                       # RX rotation
+qc = qc.ry(pi / 2, 0)                    # RY rotation
+qc = qc.rz(0.3, 0)                       # RZ rotation
+qc = qc.p(pi / 4, 0)                     # Phase gate
+qc = qc.u(theta=0.5, phi=0.3, lam=0.2, q=0)  # Arbitrary U(2)
+```
+
+### Two-Qubit
+
+```python
+qc = sf.Circuit(3)
+qc = qc.cnot(0, 1)        # CNOT (control=0, target=1)
+qc = qc.cx(0, 2)          # CX (alias for CNOT)
+qc = qc.cz(1, 2)          # Controlled-Z
+qc = qc.cy(0, 1)          # Controlled-Y
+qc = qc.swap(0, 2)        # SWAP
+qc = qc.iswap(1, 2)       # iSWAP
+qc = qc.ecr(0, 1)         # Echoed Cross-Resonance
+```
+
+### Two-Qubit Parametric
+
+```python
+qc = sf.Circuit(2)
+qc = qc.cp(theta=0.5, c=0, t=1)            # Controlled phase
+qc = qc.cu(theta=0.5, phi=0.3, lam=0.2, gamma=0.1, c=0, t=1)  # Controlled U
+qc = qc.rzz(theta=0.5, q0=0, q1=1)         # ZZ rotation
+qc = qc.rxx(theta=0.3, q0=0, q1=1)         # XX rotation
+qc = qc.ryy(theta=0.4, q0=0, q1=1)         # YY rotation
+```
+
+### Three-Qubit
+
+```python
+qc = sf.Circuit(3)
+qc = qc.ccx(0, 1, 2)      # Toffoli (CCNOT)
+qc = qc.toffoli(0, 1, 2)  # Alias for CCX
+qc = qc.cswap(0, 1, 2)    # Fredkin (CSWAP)
+qc = qc.fredkin(0, 1, 2)  # Alias for CSWAP
+```
+
+### Custom Unitaries
+
+```python
+import numpy as np
+
+# Custom 1Q unitary
+U1 = np.array([[1, 0], [0, 1j]])  # S gate matrix
+qc = sf.Circuit(1).unitary(U1, 0)
+
+# Custom 2Q unitary (4x4 matrix)
+U2 = np.eye(4)
+qc = sf.Circuit(2).unitary(U2, 0, 1)
+```
+
+### Special Operations
+
+```python
+qc = sf.Circuit(3)
+qc = qc.measure(0)         # Measure single qubit
+qc = qc.measure_all()      # Measure all qubits
+qc = qc.barrier(0, 1, 2)   # Compilation barrier (no optimization across)
+qc = qc.reset(0)            # Reset qubit to |0⟩
+```
+
+## Symbolic Parameters
+
+Use `sf.param()` for variational circuits:
+
+```python
+theta = sf.param("theta")
+phi = sf.param("phi")
+
+ansatz = (sf.Circuit(2)
+    .ry(theta, 0)
+    .ry(phi, 1)
+    .cnot(0, 1)
+    .rz(theta, 1))
+
+print(ansatz.n_parameters)   # 2
+print(ansatz.parameters)     # ['theta', 'phi']
+
+# Bind parameter values
+bound = ansatz.bind({"theta": 0.5, "phi": 1.2})
+print(bound.n_parameters)    # 0 — all bound
+```
+
+## Circuit Properties
+
+```python
+qc = sf.Circuit(3).h(0).cnot(0, 1).cnot(1, 2).measure_all()
+
+print(qc.n_qubits)       # 3
+print(qc.gate_count)     # 4
+print(qc.depth)          # 4
+print(qc.n_cbits)        # 3 (from measure_all)
+print(qc.n_parameters)   # 0
+
+# Gate inventory
+print(qc.count_ops())    # {'h': 1, 'cnot': 2, 'measure': 3}
+```
+
+## Visualization
+
+```python
+print(qc.draw())
+# q0: ─── H ─── ● ─────── M ───
+# q1: ───────── X ─── ● ─ M ───
+# q2: ─────────────── X ─ M ───
+```
+
+## Export Formats
+
+```python
+# OpenQASM 3.0
+print(qc.to_qasm3())
+
+# Gate list (for serialization)
+gates = qc.to_gate_list()
+# [{"name": "h", "qubits": [0], "params": []}, ...]
+
+# JSON round-trip
+json_str = qc.to_json()
+restored = sf.Circuit.from_json(json_str)
+
+# Unitary matrix (small circuits only — exponential cost)
+U = qc.to_unitary()  # 2^n × 2^n complex matrix
+
+# Rust IR (for gradient computation)
+dag = qc.to_ir()
+```
+
+## Programmatic Construction
+
+Build circuits from gate lists:
+
+```python
+# From a list of gate specifications
+gates = [
+    {"name": "h", "qubits": [0], "params": []},
+    {"name": "cnot", "qubits": [0, 1], "params": []},
+    {"name": "ry", "qubits": [0], "params": [0.5]},
+]
+qc = sf.Circuit(2)
+for g in gates:
+    qc = qc.__getattr__(g["name"])(*g["params"], *g["qubits"])
+```
+
+## Combinatorial Helpers
+
+```python
+# Apply H to all qubits
+qc = sf.Circuit(4)
+for q in range(4):
+    qc = qc.h(q)
+
+# Entanglement chain
+qc = sf.Circuit(5).h(0)
+for q in range(4):
+    qc = qc.cnot(q, q + 1)
+
+print(qc.depth)  # 5
+```

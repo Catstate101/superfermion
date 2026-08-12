@@ -1,0 +1,15 @@
+{
+  "title": "Guides",
+  "pages": [
+    "index",
+    "circuits",
+    "execution",
+    "compiler",
+    "gradients",
+    "chemistry",
+    "qec",
+    "ml-frameworks",
+    "providers",
+    "interop"
+  ]
+}

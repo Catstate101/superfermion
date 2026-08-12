@@ -1,0 +1,175 @@
+---
+title: "Hardware Compilation"
+description: "Gate decomposition, optimization, qubit routing, and noise suppression for hardware targets."
+---
+
+Superfermion's compiler transforms abstract circuits into hardware-executable form. It handles basis translation, gate optimization, qubit routing, and noise suppression — all in Rust.
+
+## Quick Start
+
+```python
+import superfermion as sf
+from superfermion.compiler.specs import HardwareSpec
+
+qc = sf.Circuit(5).h(0).cnot(0, 3).cnot(1, 4).swap(2, 3)
+
+# Optimization only
+optimized = sf.compile(qc, level=1)
+print(f"Before: {qc.gate_count} gates, After: {optimized.gate_count} gates")
+
+# Compile for a specific device
+ibm_target = HardwareSpec(
+    name="ibm_device",
+    n_qubits=5,
+    native_gates=["rz", "sx", "x", "cx"],
+    coupling_map=[
+        (0, 1), (1, 0), (1, 2), (2, 1), (2, 3),
+        (3, 2), (3, 4), (4, 3),
+    ],
+)
+compiled = sf.compile(qc, level=2, target=ibm_target)
+```
+
+## Optimization Levels
+
+| Level | Passes | Description |
+|-------|--------|-------------|
+| 0 | — | No optimization, passthrough |
+| 1 | SWAP decomposition, gate cancellation, rotation merging, constant folding | Standard optimization |
+| 2 | Level 1 + repeated cancellation, Pauli twirling, dynamical decoupling | Full optimization (requires target) |
+
+## Compiler Passes
+
+### Gate Cancellation
+
+Adjacent inverse gates cancel: `HH → ∅`, `CNOT CNOT → ∅`, `CZ CZ → ∅`.
+
+```python
+from superfermion.compiler import PassManager
+from superfermion.compiler.passes import GateCancellationPass
+
+pm = PassManager([GateCancellationPass()])
+qc = sf.Circuit(2).h(0).h(0).cnot(0, 1).cnot(0, 1)
+result = pm.run(qc)
+print(f"After cancellation: {result.gate_count} gates")  # 0
+```
+
+### Rotation Merging
+
+Sequential rotations around the same axis merge: `RZ(a) RZ(b) → RZ(a+b)`.
+
+```python
+from superfermion.compiler import apply_noise_suppression
+
+qc = sf.Circuit(1).rz(0.3, 0).rz(0.7, 0).rz(-0.2, 0)
+result = sf.compile(qc, level=1)
+print(f"After merging: {result.gate_count} gates")  # ~1 gate
+```
+
+### Basis Translation
+
+Decompose gates into a target basis set:
+
+```python
+from superfermion.compiler import BasisTranslationPass
+
+# Decompose H into RZ+RX basis
+qc = sf.Circuit(1).h(0)
+result = BasisTranslationPass(["RZ", "RX"]).run(qc)
+print(f"H decomposed to: {result.gate_count} native gates")  # 3 gates
+```
+
+### SWAP to CNOT Decomposition
+
+```python
+qc = sf.Circuit(2).swap(0, 1)
+result = sf.compile(qc, level=1)
+# SWAP → 3 CNOTs + single-qubit gates
+```
+
+### Pauli Twirling
+
+Convert coherent noise into stochastic Pauli noise:
+
+```python
+from superfermion.compiler import PauliTwirlingPass
+
+qc = sf.Circuit(2).cnot(0, 1)
+twirled = PauliTwirlingPass().run(qc)
+```
+
+### Dynamical Decoupling
+
+Insert XY4 / CPMG sequences to suppress decoherence:
+
+```python
+from superfermion.compiler import DynamicalDecouplingPass
+
+dd_pass = DynamicalDecouplingPass(sequence="xy4")
+result = dd_pass.run(qc)
+```
+
+## Qubit Routing
+
+SABRE routing maps logical qubits to physical hardware topology:
+
+```python
+from superfermion.compiler.specs import HardwareSpec
+
+# Linear topology
+linear = HardwareSpec(
+    name="linear_5",
+    n_qubits=5,
+    native_gates=["rz", "sx", "x", "cx"],
+    coupling_map=[(i, i+1) for i in range(4)] + [(i+1, i) for i in range(4)],
+)
+
+# Grid topology (heavy-hex, like IBM)
+qc = sf.Circuit(10).h(0).cnot(0, 5).cnot(1, 8).swap(3, 7)
+compiled = sf.compile(qc, level=2, target=linear)
+print(f"SWAPs inserted for routing: {compiled.gate_count - qc.gate_count}")
+```
+
+## Built-in Device Specifications
+
+```python
+from superfermion.compiler.specs import HardwareSpec
+
+# IBM-like heavy-hex
+ibm = HardwareSpec.ibm_like(n_qubits=27)
+
+# Rigetti-like grid
+rigetti = HardwareSpec.rigetti_like(n_qubits=16)
+
+# Custom topology
+custom = HardwareSpec(
+    name="my_chip",
+    n_qubits=10,
+    native_gates=["rz", "sx", "x", "cz", "iswap"],
+    coupling_map=[...],
+)
+```
+
+## Noise Model
+
+Attach a noise model to simulate realistic hardware:
+
+```python
+import superfermion as sf
+
+noise = sf.NoiseModel() \
+    .add_depolarizing(rate=0.001) \
+    .add_amplitude_damping(gamma=0.002) \
+    .add_thermal_relaxation(t1=50e-6, t2=70e-6, gate_time=35e-9)
+
+result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
+```
+
+## Auto-Compilation via `sf.run()`
+
+```python
+# Let sf.run() handle compilation automatically
+result = sf.run(qc, target="heavy_hex_127", shots=4096)
+```
+
+Internally, `sf.run()` with a `target=` string resolves the device spec, compiles the circuit at level 2, and executes.

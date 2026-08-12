@@ -1,0 +1,149 @@
+---
+title: "Framework Interop"
+description: "Import and export circuits between Superfermion, Qiskit, Cirq, PennyLane, and OpenQASM 2/3."
+---
+
+## Import/Export Matrix
+
+| Direction | Qiskit | Cirq | PennyLane | OpenQASM 2 | OpenQASM 3 | Braket | IonQ |
+|-----------|--------|------|-----------|------------|------------|--------|------|
+| Import → SF | `from_qiskit` | `from_cirq` | `from_pennylane` | `from_qasm` | `from_qasm3` | — | — |
+| Export SF → | `to_qiskit` | `to_cirq` | `to_pennylane` | `to_qasm` | `to_qasm3` | `to_braket` | `to_ionq` |
+
+## Qiskit
+
+```python
+from superfermion.bridge import from_qiskit, to_qiskit
+import superfermion as sf
+
+# Qiskit → Superfermion
+qiskit_qc = QuantumCircuit(2)
+qiskit_qc.h(0)
+qiskit_qc.cx(0, 1)
+sf_qc = from_qiskit(qiskit_qc)
+
+# Superfermion → Qiskit
+sf_qc = sf.Circuit(2).h(0).cnot(0, 1)
+qiskit_qc = to_qiskit(sf_qc)
+
+# Run on Qiskit Aer from Superfermion
+from qiskit_aer import AerSimulator
+result = AerSimulator().run(to_qiskit(sf_qc)).result()
+```
+
+## Cirq
+
+```python
+from superfermion.bridge import from_cirq, to_cirq
+
+# Cirq → Superfermion
+import cirq
+cirq_qc = cirq.Circuit(cirq.H(cirq.LineQubit(0)), cirq.CNOT(cirq.LineQubit(0), cirq.LineQubit(1)))
+sf_qc = from_cirq(cirq_qc)
+
+# Superfermion → Cirq
+cirq_qc = to_cirq(sf_qc)
+```
+
+## PennyLane
+
+```python
+from superfermion.bridge import from_pennylane, to_pennylane
+import pennylane as qml
+
+# PennyLane → Superfermion
+dev = qml.device("default.qubit", wires=2)
+
+@qml.qnode(dev)
+def circuit(x):
+    qml.RY(x, wires=0)
+    qml.CNOT(wires=[0, 1])
+    return qml.state()
+
+# Extract and convert
+pl_tape = circuit.tape
+sf_qc = from_pennylane(pl_tape)
+
+# Superfermion → PennyLane
+pl_tape = to_pennylane(sf_qc)
+```
+
+## OpenQASM 2.0
+
+```python
+from superfermion.bridge import from_qasm, to_qasm
+
+# Parse QASM (Rust-accelerated parser)
+qasm_str = """
+OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[2];
+h q[0];
+cx q[0], q[1];
+"""
+sf_qc = from_qasm(qasm_str)
+
+# Export to QASM 2
+qasm_output = to_qasm(sf_qc)
+```
+
+## OpenQASM 3.0
+
+```python
+# Export (built into Circuit)
+qasm3_str = sf.Circuit(2).h(0).cnot(0, 1).to_qasm3()
+
+# Import
+from superfermion.serialization import from_qasm3
+sf_qc = from_qasm3(qasm3_str)
+```
+
+## AWS Braket
+
+```python
+from superfermion.bridge import to_braket
+
+# Export Superfermion circuit to Braket format
+braket_task = to_braket(sf_qc)
+# Submit directly to AWS Braket
+# braket_task.submit(device_arn="...", shots=1000)
+```
+
+## IonQ
+
+```python
+from superfermion.bridge import to_ionq
+
+# Export to IonQ's native format
+ionq_circuit = to_ionq(sf_qc)
+```
+
+## JSON Round-Trip
+
+```python
+# Serialize
+json_str = sf.Circuit(2).h(0).cnot(0, 1).to_json()
+
+# Deserialize
+restored = sf.Circuit.from_json(json_str)
+assert restored.gate_count == 2
+```
+
+## Gate List Export
+
+```python
+gates = sf.Circuit(2).h(0).cnot(0, 1).to_gate_list()
+# [{"name": "h", "qubits": [0], "params": []},
+#  {"name": "cnot", "qubits": [0, 1], "params": []}]
+
+# Rebuild from gate list
+qc = sf.Circuit(2)
+for g in gates:
+    qc = qc.__getattr__(g["name"])(*g["params"], *g["qubits"])
+```
+
+## Caveats
+
+- **Gate mappings are best-effort** — framework-specific gates (e.g., PennyLane's `qml.QubitUnitary`) may not have a direct Superfermion equivalent
+- **Parameter expressions** — Qiskit's `ParameterExpression` is converted to symbolic parameters; complex expressions may be approximated
+- **Classical control** — OpenQASM 3's `if`/`while` statements are parsed but not executed; use Superfermion's Python API for classical logic

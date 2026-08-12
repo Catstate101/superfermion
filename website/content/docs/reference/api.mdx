@@ -1,0 +1,713 @@
+---
+title: "API Reference"
+description: "Complete API reference: every class, method, and parameter in Superfermion v0.1.0."
+---
+
+Complete API reference. All code examples verified against `superfermion==0.1.0`.
+
+---
+
+## First-Class Citizens
+
+```
+sf.Circuit(n)          Build circuits
+sf.run(circuit, ...)   Execute anywhere
+sf.simulate(circuit)   Execute and return sf.State directly
+sf.compile(circuit)    Compile for hardware
+sf.State               Rust-native quantum state handle
+sf.experiment(name)    Scoped experiment tracking
+sf.param(name)         Symbolic parameters
+sf.Hamiltonian(...)    Observable construction
+sf.PauliString(str)    Single Pauli term
+sf.NoiseModel()        Noise model for density matrix sim
+```
+
+---
+
+## 1. Circuit Construction
+
+`sf.Circuit` is a fluent builder. Each gate call returns the circuit for chaining.
+
+```python
+import superfermion as sf
+
+qc = sf.Circuit(2).h(0).cnot(0, 1)
+
+print(qc.n_qubits)     # 2
+print(qc.gate_count)   # 2
+print(qc.depth)        # 2
+print(qc.draw())       # ASCII diagram
+```
+
+### Available Gates
+
+| Category | Gates |
+|----------|-------|
+| 1Q Clifford | `h`, `x`, `y`, `z`, `s`, `sdg`, `t`, `tdg`, `sx`, `id` |
+| 1Q Parametric | `rx(theta, q)`, `ry(theta, q)`, `rz(theta, q)`, `p(phi, q)`, `u(theta, phi, lam, q)` |
+| 2Q | `cnot(c, t)` / `cx(c, t)`, `cz`, `cy`, `swap`, `iswap`, `ecr` |
+| 2Q Parametric | `cp`, `cu`, `rzz`, `rxx`, `ryy` |
+| 3Q | `ccx` / `toffoli`, `cswap` / `fredkin` |
+| Custom | `unitary(matrix, *qubits)` |
+| Special | `measure(q)`, `measure_all()`, `barrier(*qubits)`, `reset(q)` |
+
+### Circuit Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `n_qubits` | `int` | Number of qubits |
+| `gate_count` | `int` | Total gate count |
+| `depth` | `int` | Circuit depth |
+| `n_parameters` | `int` | Number of unbound parameters |
+| `parameters` | `list[str]` | Parameter names |
+| `n_cbits` | `int` | Number of classical bits |
+
+### Circuit Methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `.bind(params)` | `Circuit` | Bind symbolic parameters |
+| `.to_ir()` | `QuantumDAG` | Export to Rust IR |
+| `.to_qasm3()` | `str` | Export to OpenQASM 3.0 |
+| `.to_json()` | `str` | Export to JSON |
+| `.to_unitary()` | `ndarray` | Unitary matrix (exponential cost) |
+| `.to_gate_list()` | `list` | Export as gate list |
+| `.draw()` | `str` | ASCII visualization |
+| `.count_ops()` | `dict` | Count gates by type |
+| `.from_json(s)` | `Circuit` | Import from JSON (classmethod) |
+
+---
+
+## 2. Execution — `sf.run()`
+
+`sf.run()` is the single universal entry point. It accepts any device (local or QPU) and any simulation method.
+
+```python
+import superfermion as sf
+
+qc = sf.Circuit(2).h(0).cnot(0, 1)
+
+result = sf.run(qc, shots=4096)
+print(result.counts)        # {'00': 2048, '11': 2048}
+print(result.state)         # sf.State (Rust handle)
+print(result.shots)         # 4096
+```
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `circuit` | `Circuit` | required | The circuit to execute |
+| `device` | `str` or `DeviceExecutor` | `"cpu"` | Where to run |
+| `shots` | `int` | `1000` | Number of measurement shots |
+| `method` | `str` or `None` | `"statevector"` | Simulation algorithm |
+| `target` | `str` or `None` | `None` | Hardware target for auto-compilation |
+| `tracker` | `TrackerProtocol` or `None` | `None` | Explicit tracker |
+| `params` | `dict` or `None` | `None` | Auto-bind symbolic parameters |
+
+### Device Resolution
+
+```python
+# Local simulation (builtin shorthands)
+sf.run(qc, device="cpu")                  # Rust CPU (Rayon + AVX)
+sf.run(qc, device="gpu")                  # Rust GPU (CUDA)
+
+# QPU via provider objects (protocol-based, no registries)
+from superfermion.devices.ibm import IBMDevice
+ibm = IBMDevice(token="...")
+sf.run(qc, device=ibm("ibm_brisbane"))    # explicit object, not magic string
+
+from superfermion.devices.ionq import IonQDevice
+ionq = IonQDevice(api_key="...")
+sf.run(qc, device=ionq("aria-1"))         # same pattern, different provider
+```
+
+---
+
+## 3. Exact Simulation — `sf.simulate()`
+
+Shortcut that returns `sf.State` directly instead of `RunResult`.
+
+```python
+state = sf.simulate(qc)
+
+# sf.State is Rust-native — all methods dispatch to Rust
+print(state.n_qubits)           # 2
+print(state.entropy())          # Von Neumann entropy
+print(state.purity())           # state purity
+print(state.fidelity(state))    # 1.0
+
+sv = state.numpy()              # export to numpy
+samples = state.sample(1000)    # fast Rust sampling
+```
+
+### `sf.State` Methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `state.expectation(obs)` | `float` | Exact Pauli expectation value |
+| `state.grad(obs, dag, params)` | `dict` | Adjoint/parameter-shift gradient |
+| `state.sample(shots)` | `list[int]` | Measurement sampling |
+| `state.numpy()` | `ndarray` | Export to numpy array |
+| `state.entropy()` | `float` | Von Neumann entropy |
+| `state.purity()` | `float` | State purity |
+| `state.fidelity(other)` | `float` | Fidelity with another state |
+| `state.partial_trace(qubits)` | `ndarray` | Partial trace over qubits |
+| `state.probabilities()` | `ndarray` | Measurement outcome probabilities |
+| `state.qfim(dag, params)` | `ndarray` | Quantum Fisher Information Matrix |
+| `state.shape` | `tuple` | Shape of the statevector |
+| `state.n_qubits` | `int` | Number of qubits |
+| `state.method` | `str` | Simulation method used |
+| `state.device` | `str` | Device used |
+| `state.from_numpy(arr)` | `State` | Create State from numpy (classmethod) |
+
+### `RunResult` Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `result.counts` | `dict[str, int]` | Measurement counts |
+| `result.state` | `State` | Rust quantum state |
+| `result.shots` | `int` | Number of shots |
+| `result.circuit` | `Circuit` | Original circuit |
+| `result.metadata` | `object` | Execution metadata |
+| `result.probabilities` | `dict[str, float]` | Outcome probabilities |
+| `result.statevector` | `ndarray` | State amplitudes |
+
+### `RunResult` Methods
+
+| Method | Description |
+|--------|-------------|
+| `result.expectation(obs)` | Compute expectation from counts |
+| `result.grad(obs, dag, params)` | Compute gradient from state |
+| `result.plot(kind)` | Plot results ("histogram", etc.) |
+| `result.to_dict()` | Serialize to dict |
+| `result.from_dict(d)` | Import from dict (classmethod) |
+| `result.get_probabilities()` | Get probability distribution |
+| `result.probabilities_array()` | Get probabilities as ndarray |
+
+---
+
+## 4. Simulation Methods
+
+All methods use the same `sf.run()` / `sf.simulate()` API. Only the `method=` parameter changes.
+
+### Statevector (default)
+
+Exact simulation. Supports all `sf.State` methods including gradients. Up to ~25 qubits on CPU, ~30 on GPU.
+
+```python
+result = sf.run(qc, method="statevector", shots=1000)
+```
+
+### MPS (Tensor Network)
+
+For weakly entangled circuits. Scales to 200+ qubits.
+
+```python
+result = sf.run(qc, method="mps", bond_dim=64, shots=1000)
+```
+
+### Stabilizer
+
+For Clifford-only circuits. Polynomial time, scales to ~1000 qubits.
+
+```python
+clifford = sf.Circuit(100).h(0)
+for i in range(99):
+    clifford = clifford.cnot(i, i + 1)
+
+result = sf.run(clifford, method="stabilizer", shots=1000)
+```
+
+### Density Matrix
+
+For noisy simulation with Kraus channels.
+
+```python
+noise = sf.NoiseModel().add_depolarizing(0.01)
+result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
+```
+
+---
+
+## 5. Compilation — `sf.compile()`
+
+```python
+import superfermion as sf
+from superfermion.compiler.specs import HardwareSpec
+
+qc = sf.Circuit(5).h(0).cnot(0, 3).cnot(1, 4).swap(2, 3)
+
+# Optimization only (no hardware target)
+optimized = sf.compile(qc, level=1)
+
+# Compile for a specific topology and gate set
+target = HardwareSpec(
+    name="my_device",
+    n_qubits=5,
+    native_gates=["rz", "sx", "x", "cx"],
+    coupling_map=[(0,1), (1,2), (2,3), (3,4)],
+)
+compiled = sf.compile(qc, level=2, target=target)
+```
+
+### Optimization Levels
+
+| Level | What it does |
+|-------|-------------|
+| 0 | No optimization (passthrough) |
+| 1 | SWAP decomposition, gate cancellation, rotation merging, constant folding |
+| 2 | Level 1 + repeated cancellation, Pauli twirling, dynamical decoupling (if target set) |
+
+### Available Compiler Passes
+
+```python
+from superfermion.compiler import (
+    PassManager,
+    BasisTranslationPass,
+    PauliTwirlingPass,
+    DynamicalDecouplingPass,
+    UnitaryDecompositionPass,
+    SchedulingPass,
+    apply_dynamical_decoupling,
+    apply_noise_suppression,
+    schedule_circuit,
+)
+```
+
+See the **[Compiler Guide](/docs/compiler)** for detailed pass documentation.
+
+---
+
+## 6. Observables and Expectation Values
+
+```python
+import superfermion as sf
+
+# Build observables
+H = sf.Hamiltonian([
+    sf.PauliString("ZZ", coeff=0.5),
+    sf.PauliString("XI", coeff=0.3),
+    sf.PauliString("IZ", coeff=0.2),
+])
+
+# Exact expectation from state
+state = sf.simulate(sf.Circuit(2).h(0).cnot(0, 1))
+energy = state.expectation(H.to_sparse_list())
+
+# Estimate from measurement counts
+result = sf.run(sf.Circuit(2).h(0).cnot(0, 1), shots=10000)
+energy = result.expectation(H.to_sparse_list())
+```
+
+### Observable API
+
+```python
+# PauliString
+p = sf.PauliString("XZ", coeff=0.5)
+print(p.pauli)   # "XZ"
+print(p.coeff)   # 0.5
+
+# Hamiltonian
+H = sf.Hamiltonian([p, sf.PauliString("II", coeff=-1.0)])
+print(H.n_terms)        # 2
+print(H.n_qubits)       # 2
+sparse = H.to_sparse_list()  # [(pauli_indices, coeff_real, coeff_imag), ...]
+
+# SparsePauliOp
+op = sf.SparsePauliOp.from_list(["ZZ", "XI"], [0.5, 0.3])
+
+# Convenience Pauli matrices
+from superfermion.observables import I, X, Y, Z
+
+# expval shortcut
+from superfermion import expval
+val = expval(state.numpy(), H.to_sparse_list())
+```
+
+### Observable Format (Rust)
+
+```python
+# List of (pauli_indices, coeff_real, coeff_imag)
+# Pauli encoding: 0=I, 1=X, 2=Y, 3=Z
+zz_obs = [([3, 3], 1.0, 0.0)]     # ZZ with coefficient 1.0
+xz_obs = [([1, 3], 0.5, 0.0)]     # 0.5 * XZ
+```
+
+---
+
+## 7. Parametric Circuits and Gradients
+
+```python
+import superfermion as sf
+
+theta = sf.param("theta")
+phi = sf.param("phi")
+
+ansatz = (sf.Circuit(2)
+    .ry(theta, 0)
+    .ry(phi, 1)
+    .cnot(0, 1)
+    .rz(theta, 1))
+
+print(ansatz.n_parameters)   # 2
+print(ansatz.parameters)     # ['theta', 'phi']
+
+# Bind and compute gradients
+params = {"theta": 0.5, "phi": 1.2}
+state = sf.simulate(ansatz, params=params)
+
+obs = [([3, 3], 1.0, 0.0)]  # ZZ
+dag = ansatz.bind(params).to_ir()
+grads = state.grad(obs, dag, params)
+print(grads)  # {"theta": -0.23..., "phi": 0.41...}
+```
+
+### 5 Gradient Methods
+
+| Method | Module | Scaling | Best For |
+|--------|--------|---------|----------|
+| Adjoint | `qml.gradient.adjoint` | O(1) | Deep circuits, many params |
+| Parameter-shift | `qml.gradient.parameter_shift` | O(N) | Shallow circuits |
+| SPSA | `qml.gradient.spsa` | O(1) stochastic | Noisy, many params |
+| QNG | `qml.gradient.qng` | O(N²) | Natural gradient |
+| Riemannian | `qml.gradient.riemannian` | O(N²) | QFIM-based natural gradient |
+
+---
+
+## 8. VQE Optimization
+
+```python
+import superfermion as sf
+import numpy as np
+
+H = sf.Hamiltonian([
+    sf.PauliString("II", coeff=-1.0523),
+    sf.PauliString("IZ", coeff=0.3979),
+    sf.PauliString("ZI", coeff=-0.3979),
+    sf.PauliString("ZZ", coeff=-0.0112),
+    sf.PauliString("XX", coeff=0.1809),
+])
+
+ansatz = (sf.Circuit(2)
+    .ry(sf.param("t0"), 0)
+    .ry(sf.param("t1"), 1)
+    .cnot(0, 1)
+    .ry(sf.param("t2"), 0)
+    .ry(sf.param("t3"), 1))
+
+params = {f"t{i}": np.random.uniform(0, np.pi) for i in range(4)}
+obs = H.to_sparse_list()
+lr = 0.1
+
+for step in range(50):
+    state = sf.simulate(ansatz, params=params)
+    energy = state.expectation(obs)
+
+    dag = ansatz.bind(params).to_ir()
+    grads = state.grad(obs, dag, params)
+
+    for key in params:
+        params[key] -= lr * grads.get(key, 0.0)
+
+    if step % 10 == 0:
+        print(f"Step {step}: energy = {energy:.6f}")
+```
+
+### Built-in VQE Class
+
+```python
+from superfermion.algorithms.variational import VQE, QAOA
+
+# Use the built-in VQE class
+vqe = VQE(ansatz, obs)
+result = vqe.optimize(init_params, max_iterations=100)
+print(f"Energy: {result.energy}")
+```
+
+---
+
+## 9. Pulse-Level Control
+
+```python
+from superfermion.pulse import (
+    Schedule, GaussianPulse, DRAGPulse, SquarePulse,
+    GaussianSquarePulse, CosinePulse, Waveform,
+    Channel, ChannelType, CalibrationSet, GateCalibration,
+)
+
+# Build a pulse schedule
+s = Schedule()
+
+# Add a Gaussian pulse on the drive channel
+gaussian = GaussianPulse(amplitude=0.5, sigma=16e-9, duration=64e-9)
+s.add_pulse(gaussian, channel=Channel(0, ChannelType.DRIVE), start=0)
+
+# Add a DRAG pulse for reduced leakage
+drag = DRAGPulse(amplitude=0.5, sigma=16e-9, duration=64e-9, beta=0.1)
+s.add_pulse(drag, channel=Channel(0, ChannelType.DRIVE), start=100e-9)
+
+# Add a square pulse for measurement
+square = SquarePulse(amplitude=1.0, duration=500e-9)
+s.add_pulse(square, channel=Channel(0, ChannelType.MEASURE), start=200e-9)
+
+# Compile a circuit to a schedule
+from superfermion.compiler import schedule_circuit
+qc = sf.Circuit(1).rx(0.5, 0)
+scheduled = schedule_circuit(qc, calibration=my_calibration)
+```
+
+---
+
+## 10. Quantum Error Correction
+
+```python
+from superfermion.qec import (
+    SurfaceCode2D, SteaneCode, RepetitionCode,
+    MWPMDecoder, UnionFindDecoder, BPOSD_Decoder, NeuralDecoder,
+    QECManager,
+)
+
+# Create a surface code
+code = SurfaceCode2D(distance=3)
+
+# Decode errors
+decoder = MWPMDecoder(code)
+
+# Full QEC pipeline
+manager = QECManager(code, decoder)
+protected = manager.protect(my_logical_circuit, noise_level=0.01)
+```
+
+See the **[QEC Guide](/docs/qec)** for all 10 codes and 4 decoders.
+
+---
+
+## 11. Chemistry
+
+```python
+from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian, FermionicOperator
+from superfermion.chemistry.ansatz import uccsd_ansatz
+from superfermion.chemistry.pyscf_bridge import molecule_to_hamiltonian
+
+# Pre-built molecule
+h2 = get_molecular_hamiltonian("H2", bond_length=0.7414)
+
+# Custom molecule via PySCF
+H, meta = molecule_to_hamiltonian(atom="H 0 0 0; H 0 0 0.7414", basis="sto-3g")
+
+# Build UCCSD ansatz
+ansatz = uccsd_ansatz(H.n_qubits, n_electrons=meta["n_electrons"])
+
+# Fermionic operators
+fop = FermionicOperator("0^ 1^ 2 3")  # excitation
+qubit_op = fop.to_qubit_operator(mapping="jordan_wigner")
+```
+
+See the **[Chemistry Guide](/docs/chemistry)** for full details.
+
+---
+
+## 12. Experiment Tracking
+
+Tracking is scoped via context manager using `contextvars` (thread-safe, no global state).
+
+```python
+import superfermion as sf
+
+# Local tracking (no server needed)
+with sf.experiment("bell-study") as tracker:
+    r1 = sf.run(sf.Circuit(2).h(0).cnot(0, 1), shots=1000)
+    r2 = sf.run(sf.Circuit(3).h(0).cnot(0,1).cnot(1,2), shots=1000)
+
+# Runs saved to ~/.superfermion/runs/bell-study/
+print(tracker.runs)  # list of run metadata dicts
+```
+
+---
+
+## 13. Cross-Framework Interop
+
+```python
+from superfermion.bridge import (
+    from_qiskit, to_qiskit,
+    from_qasm, to_qasm,
+    from_cirq, to_cirq,
+    from_pennylane, to_pennylane,
+    to_braket, to_ionq,
+)
+from superfermion.serialization import to_qasm3, from_qasm3
+
+# Qiskit interop
+qiskit_circuit = to_qiskit(sf_circuit)
+sf_circuit = from_qiskit(qiskit_circuit)
+
+# Cirq interop
+cirq_circuit = to_cirq(sf_circuit)
+sf_circuit = from_cirq(cirq_circuit)
+
+# PennyLane interop
+pl_circuit = to_pennylane(sf_circuit)
+sf_circuit = from_pennylane(pl_circuit)
+
+# OpenQASM 2.0
+qasm_str = to_qasm(sf_circuit)
+sf_circuit = from_qasm(qasm_str)      # Rust-accelerated parser
+
+# OpenQASM 3.0
+qasm3_str = sf_circuit.to_qasm3()
+sf_circuit = from_qasm3(qasm3_str)
+
+# Braket + IonQ export
+braket_task = to_braket(sf_circuit)
+ionq_circuit = to_ionq(sf_circuit)
+
+# JSON round-trip
+json_str = sf_circuit.to_json()
+sf_circuit = sf.Circuit.from_json(json_str)
+```
+
+---
+
+## 14. Error Mitigation
+
+```python
+from superfermion.mitigation import (
+    readout_correction,
+    zne,
+    zne_with_calibration,
+    calibration_based_noise_model,
+)
+
+# Readout error correction
+result = sf.run(qc, device="cpu", shots=8192)
+corrected = readout_correction(result)
+
+# Zero-noise extrapolation
+mitigated = zne(qc, noise_levels=[1.0, 2.0, 3.0], device="cpu")
+
+# Build noise model from calibration data
+noise_model = calibration_based_noise_model(backend_properties)
+result = sf.run(qc, method="density_matrix", noise_model=noise_model)
+```
+
+---
+
+## 15. QPU Providers — Protocol-Based
+
+SF defines `DeviceExecutor` as a Python protocol. Any object satisfying it works with `sf.run()`. No registries, no magic strings for cloud devices.
+
+```python
+# Standalone provider usage (no platform needed)
+from superfermion.devices.ibm import IBMDevice
+ibm = IBMDevice(token="...")
+result = sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
+```
+
+### Device Access Tiers
+
+| What you pass | Credentials | Tracking |
+|---------------|-------------|----------|
+| `device="cpu"` | None | Optional |
+| `device="gpu"` | None | Optional |
+| `device=ibm("brisbane")` | User's IBM token (local) | Optional |
+| `device=cs("ibm:brisbane")` | User's IBM token (stored on Catstate) | Via platform |
+| `device=cs("best")` | Catstate's accounts | Via platform |
+
+See the **[QPU Providers Guide](/docs/providers)** for detailed setup instructions for each provider.
+
+---
+
+## 16. ML Framework Integration
+
+Each layer is a thin wrapper (~20 lines) around `sf.State.grad()`.
+
+```python
+# Flax/JAX
+from superfermion.nn.quantum_layer import QuantumLayer
+
+# PyTorch
+from superfermion.nn.torch_layer import TorchQuantumLayer
+
+# TensorFlow
+from superfermion.nn.tf_layer import TFQuantumLayer
+```
+
+See the **[ML Integration Guide](/docs/ml-integration)** for complete examples with all three frameworks.
+
+---
+
+## API Map
+
+```
+sf.Circuit(n)                     Circuit builder
+  .h(q) .x(q) .cnot(c,t) ...     Gate methods (fluent, chainable)
+  .rx(theta, q) .ry .rz .p .u    Parametric gates
+  .measure(q) .measure_all()      Measurement
+  .bind(params) -> Circuit        Parameter binding
+  .n_qubits -> int                Qubit count
+  .gate_count -> int              Total gate count
+  .depth -> int                   Circuit depth
+  .n_parameters -> int            Number of unbound parameters
+  .parameters -> list[str]        Parameter names
+  .to_qasm3() -> str              Export to OpenQASM 3.0
+  .to_unitary() -> ndarray        Export to unitary matrix
+  .to_ir() -> QuantumDAG          Export to Rust IR
+  .to_json() -> str               Export to JSON
+  .to_gate_list() -> list         Export to gate list
+  .draw() -> str                  ASCII visualization
+  .from_json(s) -> Circuit        Import from JSON (classmethod)
+
+sf.run(circuit, ...) -> RunResult   Universal execution
+  device="cpu" | "gpu" | executor   Where to run
+  method="statevector"|"mps"|...    How to simulate
+  shots=1000                        Measurement repetitions
+  params={...}                      Auto-bind parameters
+  target="device_name"              Auto-compile for hardware
+  tracker=tracker_obj               Explicit tracking
+
+sf.simulate(circuit, ...) -> State  Shortcut for sf.run().state
+
+sf.compile(circuit, ...) -> Circuit Hardware compilation
+  level=0|1|2                       Optimization aggressiveness
+  target=HardwareSpec               Target device specification
+
+sf.State                            Rust-native quantum state
+  .expectation(obs) -> float        Exact expectation value
+  .grad(obs, dag, params) -> dict   Adjoint differentiation
+  .sample(shots) -> list            Measurement sampling
+  .numpy() -> ndarray               Export to numpy
+  .entropy() -> float               Von Neumann entropy
+  .purity() -> float                State purity
+  .fidelity(other) -> float         State fidelity
+  .partial_trace(qubits) -> ndarray Partial trace
+  .probabilities() -> ndarray       Outcome probabilities
+  .qfim(dag, params) -> ndarray     Quantum Fisher Information Matrix
+  .n_qubits -> int                  Qubit count
+  .method -> str                    Simulation method used
+  .device -> str                    Device used
+  .shape -> tuple                   State shape
+  .from_numpy(arr) -> State         Import from numpy (classmethod)
+
+sf.RunResult                        Execution result container
+  .counts -> dict[str, int]         Measurement counts
+  .state -> State                   Quantum state
+  .shots -> int                     Number of shots
+  .circuit -> Circuit               Original circuit
+  .metadata -> object               Execution metadata
+  .statevector -> ndarray           State amplitudes
+  .expectation(obs) -> float        Expectation from counts
+  .grad(obs, dag, params) -> dict   Gradient from state
+  .plot(kind)                       Plot results
+  .to_dict() -> dict                Serialize
+
+sf.experiment(name, tracker=None)   Context manager for tracking
+sf.param(name) -> SymbolicParameter Symbolic parameter factory
+sf.Hamiltonian(terms)               Observable from PauliString list
+sf.PauliString(str, coeff=1.0)      Single Pauli term
+sf.SparsePauliOp                    Sparse sum of Pauli terms
+sf.expval(statevector, observable)  Compute expectation value
+sf.NoiseModel()                     Noise model for density matrix sim
+sf.DeviceExecutor                   Protocol for device targets
+sf.LocalTracker                     File-based experiment tracker
+```

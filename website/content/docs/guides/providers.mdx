@@ -1,0 +1,180 @@
+---
+title: "QPU Providers"
+description: "Run circuits on real quantum hardware: IBM Quantum, IonQ, AWS Braket, and OpenQuantum."
+---
+
+Superfermion uses a protocol-based provider model. Any object satisfying the `DeviceExecutor` protocol works with `sf.run()` — no registries, no magic strings.
+
+## Provider Model
+
+```
+sf.run(circuit, device=provider("device_name"))
+                                │
+                    ┌───────────┼───────────┐
+                    ▼           ▼           ▼
+               IBMDevice   IonQDevice   BraketDevice
+```
+
+Each provider is instantiated with credentials, then called with a device name to produce a `DeviceExecutor`.
+
+## IBM Quantum
+
+```bash
+pip install "superfermion[qpu]"
+```
+
+```python
+from superfermion.devices.ibm import IBMDevice
+import superfermion as sf
+
+# Connect
+ibm = IBMDevice(token="your-ibm-token")
+
+# List available devices
+print(ibm.list_devices())
+
+# Run on real hardware
+qc = sf.Circuit(2).h(0).cnot(0, 1).measure_all()
+result = sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
+
+print(result.counts)
+print(result.metadata.execution_time)
+print(result.metadata.device_properties)
+```
+
+### IBM-Specific Options
+
+```python
+# With error mitigation
+from superfermion.mitigation import readout_correction, zne
+
+# Readout error correction
+result = sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
+corrected_counts = readout_correction(result)
+
+# Zero-noise extrapolation
+result = zne(qc, device=ibm("ibm_brisbane"), noise_levels=[1, 2, 3])
+```
+
+## IonQ
+
+```bash
+pip install "superfermion[qpu]"
+```
+
+```python
+from superfermion.devices.ionq import IonQDevice
+import superfermion as sf
+
+# Connect
+ionq = IonQDevice(api_key="your-ionq-key")
+
+# Run on trapped-ion hardware
+qc = sf.Circuit(3).h(0).cnot(0, 1).cnot(1, 2)
+result = sf.run(qc, device=ionq("aria-1"), shots=1000)
+
+print(result.counts)
+```
+
+IonQ devices have native all-to-all connectivity — no SWAP routing needed. The compiler skips qubit mapping automatically.
+
+## AWS Braket
+
+```bash
+pip install "superfermion[qpu]"
+```
+
+```python
+from superfermion.devices.braket import BraketDevice
+import superfermion as sf
+
+# Connect (uses AWS credentials from environment or ~/.aws)
+braket = BraketDevice(s3_bucket="my-braket-results")
+
+# Run on AWS hardware
+qc = sf.Circuit(2).h(0).cnot(0, 1).measure_all()
+result = sf.run(qc, device=braket("sv1"), shots=1000)  # simulator
+# result = sf.run(qc, device=braket("rigetti_aspen_m3"), shots=1000)  # hardware
+
+print(result.counts)
+```
+
+### Available Braket Devices
+
+```python
+# List available devices
+devices = braket.list_devices()
+for d in devices:
+    print(f"{d.name}: {d.n_qubits} qubits, {d.status}")
+
+# Simulators
+result = sf.run(qc, device=braket("sv1"))    # statevector simulator
+result = sf.run(qc, device=braket("tn1"))    # tensor network simulator
+result = sf.run(qc, device=braket("dm1"))    # density matrix simulator
+
+# Hardware (requires appropriate AWS region access)
+# braket("rigetti_aspen_m3")   # Rigetti
+# braket("ionq_harmony")       # IonQ via Braket
+# braket("oqc_lucy")           # Oxford Quantum Circuits
+```
+
+## OpenQuantum
+
+```python
+from superfermion.devices.openquantum import OpenQuantumDevice
+import superfermion as sf
+
+# Connect to any OpenQuantum-compatible device
+oq = OpenQuantumDevice(endpoint="https://api.example.com", api_key="...")
+result = sf.run(qc, device=oq("device_01"), shots=1000)
+```
+
+## Local Simulation vs QPU
+
+| Feature | `device="cpu"` | Provider Device |
+|---------|---------------|-----------------|
+| No credentials | ✅ | — |
+| Instant execution | ✅ | — (queue wait) |
+| Shot limit | Unlimited | Per-device |
+| Cost | Free | Per-shot pricing |
+| Noise model | Optional | Real hardware noise |
+| Circuit constraints | None | Basis gates, topology |
+
+## Experiment Tracking with QPU
+
+Track QPU jobs alongside local runs:
+
+```python
+with sf.experiment("qpu-benchmark") as tracker:
+    # Local baseline
+    sf.run(qc, device="cpu", shots=10000)
+
+    # QPU runs
+    sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
+    sf.run(qc, device=ionq("aria-1"), shots=1000)
+
+# All runs logged in ~/.superfermion/runs/qpu-benchmark/
+for run in tracker.runs:
+    print(f"{run['device']}: {run['counts']}")
+```
+
+## Adding a New Provider
+
+Providers implement the `DeviceExecutor` protocol — a class with an `execute()` method. No registration required:
+
+```python
+from superfermion.devices import DeviceExecutor
+
+class MyCustomDevice:
+    """Any class with execute() works as a device."""
+    def execute(self, dag, shots, **kwargs):
+        # Submit circuit (dag), get results
+        counts = my_backend.run(dag.to_qasm3(), shots=shots)
+        return counts  # dict[str, int]
+
+# Use directly — no registration needed
+my_device = MyCustomDevice()
+result = sf.run(qc, device=my_device, shots=1000)
+```
+
+The protocol requires only one method: `execute(dag, shots) -> dict`. Return a counts dictionary `{"00": 512, "11": 512}` and it works with `sf.run()`.

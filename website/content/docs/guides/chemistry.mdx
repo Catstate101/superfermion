@@ -1,0 +1,133 @@
+---
+title: "Chemistry"
+description: "Molecular Hamiltonians, fermion-to-qubit mappings, UCCSD ansatz, and PySCF integration."
+---
+
+Superfermion's chemistry module handles molecular electronic structure: building Hamiltonians, mapping fermions to qubits, and constructing chemistry-inspired ansatze.
+
+## Quick Start
+
+```python
+from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian
+from superfermion.chemistry.ansatz import uccsd_ansatz
+import superfermion as sf
+
+# Get a pre-built molecular Hamiltonian
+H = get_molecular_hamiltonian("H2", bond_length=0.7414)
+print(f"H2 Hamiltonian: {len(H)} terms")
+
+# Build a UCCSD ansatz
+n_qubits = H.n_qubits
+ansatz = uccsd_ansatz(n_qubits, n_electrons=2, excitation_level="sd")
+
+# Run VQE
+from superfermion.algorithms.variational import VQE
+params = {f"t{i}": 0.0 for i in range(ansatz.n_parameters)}
+vqe = VQE(ansatz, H.to_sparse_list())
+result = vqe.optimize(params, max_iterations=100)
+print(f"H2 ground state energy: {result.energy:.6f} Hartree")
+```
+
+## Molecular Hamiltonians
+
+### Pre-built Library
+
+```python
+from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian
+
+# Built-in molecules
+h2 = get_molecular_hamiltonian("H2", bond_length=0.7414)
+lih = get_molecular_hamiltonian("LiH", bond_length=1.595)
+h2o = get_molecular_hamiltonian("H2O", bond_length=0.958)
+nh3 = get_molecular_hamiltonian("NH3", bond_length=1.012)
+ch4 = get_molecular_hamiltonian("CH4", bond_length=1.087)
+n2 = get_molecular_hamiltonian("N2", bond_length=1.098)
+```
+
+### PySCF Bridge — Custom Molecules
+
+For any molecule, use the PySCF bridge:
+
+```python
+from superfermion.chemistry.pyscf_bridge import molecule_to_hamiltonian
+
+# Define any molecule via PySCF
+hamiltonian, metadata = molecule_to_hamiltonian(
+    atom="H 0 0 0; H 0 0 0.7414",
+    basis="sto-3g",
+    charge=0,
+    spin=0,
+)
+print(f"Active space: {metadata['n_qubits']} qubits, {metadata['n_electrons']} electrons")
+```
+
+## Fermion-to-Qubit Mappings
+
+```python
+from superfermion.chemistry.hamiltonians import FermionicOperator
+import superfermion as sf
+
+# Jordan-Wigner transform
+fermion_op = FermionicOperator("0^ 1^ 2 3")  # excitation operator
+jw_qubit_op = fermion_op.to_qubit_operator(mapping="jordan_wigner")
+
+# Bravyi-Kitaev transform
+bk_qubit_op = fermion_op.to_qubit_operator(mapping="bravyi_kitaev")
+```
+
+| Mapping | Qubit Scaling | Locality | Best For |
+|---------|--------------|----------|----------|
+| Jordan-Wigner | O(N) | O(N) weight | Small molecules |
+| Bravyi-Kitaev | O(N) | O(log N) weight | Larger molecules |
+
+## UCCSD Ansatz
+
+The Unitary Coupled Cluster Singles and Doubles ansatz is the standard choice for molecular VQE:
+
+```python
+from superfermion.chemistry.ansatz import uccsd_ansatz
+
+# Single excitations only
+uccs = uccsd_ansatz(n_qubits=4, n_electrons=2, excitation_level="s")
+print(f"UCCS: {uccs.n_parameters} parameters, {uccs.gate_count} gates")
+
+# Singles + doubles (standard)
+uccsd = uccsd_ansatz(n_qubits=4, n_electrons=2, excitation_level="sd")
+print(f"UCCSD: {uccsd.n_parameters} parameters, {uccsd.gate_count} gates")
+```
+
+## Full VQE Workflow
+
+End-to-end VQE with a custom molecule:
+
+```python
+from superfermion.chemistry.pyscf_bridge import molecule_to_hamiltonian
+from superfermion.chemistry.ansatz import uccsd_ansatz
+from superfermion.algorithms.variational import VQE
+import numpy as np
+
+# 1. Build molecular Hamiltonian
+H, meta = molecule_to_hamiltonian(
+    atom="H 0 0 0; H 0 0 1.5",
+    basis="sto-3g",
+)
+
+# 2. Build ansatz
+ansatz = uccsd_ansatz(H.n_qubits, n_electrons=meta["n_electrons"])
+
+# 3. Initialize parameters
+init_params = {f"t{i}": 0.01 * np.random.randn() for i in range(ansatz.n_parameters)}
+
+# 4. Run VQE
+vqe = VQE(ansatz, H.to_sparse_list())
+result = vqe.optimize(init_params, max_iterations=200)
+print(f"Ground state energy: {result.energy:.8f} Hartree")
+print(f"Exact (FCI): {meta.get('fci_energy', 'N/A')} Hartree")
+```
+
+## Performance Notes
+
+- **Hamiltonian construction** — runs in Python using PySCF's integral engine
+- **Expectation values** — computed in Rust via `sf.State.expectation()`
+- **Gradients** — adjoint method in Rust, O(1) scaling regardless of parameter count
+- **Recommendation** — for molecules < 20 qubits, combine UCCSD + adjoint gradient for fastest convergence

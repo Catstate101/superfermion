@@ -1,0 +1,163 @@
+---
+title: "Machine Learning Integration"
+description: "Use Superfermion circuits as differentiable layers in PyTorch, Flax/JAX, and TensorFlow."
+---
+
+Superfermion provides quantum layers for all three major ML frameworks. Each is a thin adapter (~20 lines) that wires `sf.State.grad()` into the framework's autograd mechanism.
+
+## Architecture
+
+```
+Framework autograd (PyTorch / JAX / TF)
+         │
+         ▼
+  QuantumLayer wrapper (~20 lines)
+         │
+         ▼
+  sf.simulate() + sf.State.grad()  (Rust)
+```
+
+The quantum layer:
+1. **Forward pass** — calls `sf.simulate()` + `state.expectation()`
+2. **Backward pass** — calls `state.grad()` (adjoint or parameter-shift)
+
+## Flax / JAX
+
+```python
+from superfermion.nn.quantum_layer import QuantumLayer
+import jax
+import jax.numpy as jnp
+import superfermion as sf
+
+# Build a parameterized circuit
+theta = sf.param("theta")
+phi = sf.param("phi")
+circuit = sf.Circuit(2).ry(theta, 0).ry(phi, 1).cnot(0, 1).rz(theta, 1)
+
+# Define observable
+obs = [([3, 3], 1.0, 0.0)]  # ZZ
+
+# Create layer
+layer = QuantumLayer(circuit, obs, device="cpu")
+
+# Initialize
+key = jax.random.PRNGKey(0)
+params = layer.init(key)
+
+# Forward pass (custom_vjp routes backward to sf.State.grad)
+output = layer.apply(params)
+print(f"Output: {output}")
+
+# Gradient via JAX autograd
+grad_fn = jax.grad(lambda p: layer.apply(p).sum())
+grads = grad_fn(params)
+print(f"Gradients: {grads}")
+```
+
+JAX integration uses `jax.custom_vjp` — the backward pass calls `sf.State.grad()` in Rust for exact parameter-shift or adjoint gradients.
+
+## PyTorch
+
+```python
+from superfermion.nn.torch_layer import TorchQuantumLayer
+import torch
+import superfermion as sf
+
+# Build circuit and observable
+circuit = sf.Circuit(2).ry(sf.param("t0"), 0).ry(sf.param("t1"), 1).cnot(0, 1)
+obs = [([3, 3], 1.0, 0.0)]
+
+# Create layer
+layer = TorchQuantumLayer(circuit, obs, device="cpu")
+
+# Forward pass
+params = torch.tensor([0.5, 1.2], requires_grad=True)
+output = layer(params)
+print(f"Output: {output.item():.6f}")
+
+# Backward pass (sf.State.grad via autograd.Function)
+output.backward()
+print(f"Gradients: {params.grad}")
+```
+
+PyTorch integration uses `torch.autograd.Function`. The backward pass calls `sf.State.grad()` for exact gradients.
+
+## TensorFlow
+
+```python
+from superfermion.nn.tf_layer import TFQuantumLayer
+import tensorflow as tf
+import superfermion as sf
+
+# Build circuit and observable
+circuit = sf.Circuit(2).ry(sf.param("t0"), 0).ry(sf.param("t1"), 1).cnot(0, 1)
+obs = [([3, 3], 1.0, 0.0)]
+
+# Create layer
+layer = TFQuantumLayer(circuit, obs, device="cpu")
+
+# Forward + backward (tf.custom_gradient routes to sf.State.grad)
+params = tf.Variable([0.5, 1.2], dtype=tf.float64)
+with tf.GradientTape() as tape:
+    output = layer(params)
+    loss = output  # or any function of output
+
+grads = tape.gradient(loss, params)
+print(f"Gradients: {grads.numpy()}")
+```
+
+TensorFlow integration uses `tf.custom_gradient`. Note: TensorFlow support requires Python < 3.13 and `tensorflow>=2.15`.
+
+## Batch Evaluation
+
+All three layers support batched parameter evaluation:
+
+```python
+# PyTorch batch
+params_batch = torch.randn(32, 4, requires_grad=True)
+outputs = torch.stack([layer(p) for p in params_batch])
+
+# JAX vmap
+import jax
+batched_apply = jax.vmap(lambda p: layer.apply(p).squeeze())
+outputs = batched_apply(params_batch)
+```
+
+## Gradient Methods
+
+The gradient engine is selected via the layer or directly:
+
+| Method | Mechanism | Speed | Best For |
+|--------|-----------|-------|----------|
+| Adjoint | `state.grad()` with adjoint flag | O(1) vs params | Deep circuits, many params |
+| Parameter-shift | `state.grad()` with shift rules | O(N) | Shallow circuits |
+| SPSA | Stochastic perturbation | O(1) stochastic | Noisy, many params |
+| QNG | Quantum Fisher metric | O(N²) | Fast convergence |
+
+## Custom Training Loop
+
+For full control, bypass the layer wrappers:
+
+```python
+import superfermion as sf
+import numpy as np
+
+ansatz = sf.Circuit(2).ry(sf.param("t0"), 0).ry(sf.param("t1"), 1).cnot(0, 1)
+obs = [([3, 3], 1.0, 0.0)]
+
+params = {"t0": 0.5, "t1": 1.2}
+lr = 0.1
+
+for step in range(100):
+    state = sf.simulate(ansatz, params=params)
+    energy = state.expectation(obs)
+
+    dag = ansatz.bind(params).to_ir()
+    grads = state.grad(obs, dag, params)
+
+    for k in params:
+        params[k] -= lr * grads.get(k, 0.0)
+
+    if step % 20 == 0:
+        print(f"Step {step}: energy = {energy:.6f}")
+```

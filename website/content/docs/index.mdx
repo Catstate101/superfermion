@@ -1,25 +1,66 @@
 ---
-title: "Superfermion Documentation"
-description: "A high-performance quantum computing framework with a Python API and a Rust simulation core."
+title: "Superfermion"
+description: "High-performance quantum computing with a Python API and Rust simulation core."
 ---
 
-Superfermion is a quantum computing framework that combines a Python-native API with a Rust acceleration core (Rayon multithreading + in-place statevector).
+```bash
+pip install superfermion
+```
 
-- **4 simulation methods** — statevector (CPU/GPU), MPS tensor network, stabilizer (Aaronson-Gottesman tableau), density matrix (Kraus channels)
-- **Adjoint differentiation** — 1 forward + 1 backward pass regardless of parameter count; up to 200x faster than parameter-shift for deep circuits
-- **MPS tensor networks** — Rust MPS with faer-based QR decomposition and lazy SWAP routing; scales to 200+ qubits for low-entanglement circuits
-- **Stabilizer simulator** — word-packed tableau; Clifford circuits at poly-time to ~1000 qubits
-- **Quantum Error Correction** — 10 codes (Repetition, Shor, Steane, Bacon-Shor, Surface, Toric, Color, Honeycomb, Hypercube, CSS) + 4 decoders (MWPM, Union-Find, BP+OSD, Neural)
-- **Multi-framework ML** — `QuantumLayer` (Flax), `TorchQuantumLayer` (PyTorch), `TFQuantumLayer` (TensorFlow)
-- **5 gradient methods** — adjoint, parameter-shift, SPSA, QNG, Riemannian
-- **Quantum algorithms** — VQE, QAOA, Grover, QPE, HHL, Amplitude Estimation
-- **Chemistry module** — Jordan-Wigner + Bravyi-Kitaev transformations, UCCSD ansatz, PySCF bridge, molecular Hamiltonian library
-- **Hardware compilation** — gate decomposition, rotation merging, SABRE qubit routing, Pauli twirling; targets IBM, Rigetti, IonQ, IQM
-- **QPU providers** — IBM Quantum, IonQ, AWS Braket, OpenQuantum
-- **Cross-framework bridges** — Qiskit, Cirq, PennyLane, OpenQASM 2/3
+Superfermion is a high-performance quantum computing framework. A fluent Python API for everything you write, a Rust simulation core for everything the computer runs. **3–5x faster** than Qiskit Aer, **21–33x for MPS**, up to **800x for adjoint gradients** vs PennyLane.
 
-## Start here
+## Choose your path
 
-1. **[Getting Started](/docs/getting-started)** — install, build the Rust extension, run your first circuit.
-2. **[Usage Guide](/docs/usage-guide)** — the canonical reference for the implemented API surface: circuits, execution, compilation, observables, gradients, VQE, experiment tracking, QPU providers, ML integration.
-3. **[Architecture](/docs/architecture)** — the Hexagonal Architecture (Ports & Adapters) design, Python/Rust boundary, and how adapters plug in.
+<Cards>
+  <Card title="I'm new here" href="/docs/getting-started">
+    Install, run a Bell state, understand the basics in 5 minutes.
+  </Card>
+  <Card title="I want to build circuits" href="/docs/guides/circuits">
+    Circuit construction, parameterized gates, gate library reference.
+  </Card>
+  <Card title="I want to run simulations" href="/docs/guides/execution">
+    sf.run(), sf.simulate(), 4 simulation methods, noise models.
+  </Card>
+  <Card title="I want to compile for hardware" href="/docs/guides/compiler">
+    Gate optimization, SABRE routing, basis translation, noise suppression.
+  </Card>
+  <Card title="I want to do ML / VQE" href="/docs/guides/gradients">
+    Adjoint gradients, VQE, QAOA, 5 gradient methods, ML layers.
+  </Card>
+  <Card title="I want to run on real QPUs" href="/docs/guides/providers">
+    IBM Quantum, IonQ, AWS Braket, OpenQuantum. Protocol-based, no registries.
+  </Card>
+  <Card title="I want the API reference" href="/docs/reference/api">
+    Every class, method, and parameter. Cross-referenced from source.
+  </Card>
+  <Card title="I want to see benchmarks" href="/docs/reference/performance">
+    MPS 33x vs Qiskit Aer. Adjoint gradient 800x vs PennyLane.
+  </Card>
+</Cards>
+
+## What's inside
+
+| Capability | What you get |
+|---|---|
+| **Simulation** | Statevector (CPU/GPU), MPS (200+ qubits), Stabilizer (1000+), Density Matrix |
+| **Gradients** | Adjoint (O(1)), Parameter-shift, SPSA, QNG, Riemannian — 5 methods |
+| **Chemistry** | Jordan-Wigner, Bravyi-Kitaev, UCCSD, PySCF bridge, molecular library |
+| **Compilation** | Gate cancellation, rotation merge, SABRE routing, Pauli twirling, DD |
+| **QEC** | 10 codes + 4 decoders: Surface, Color, Toric, MWPM, Union-Find, BP+OSD |
+| **ML** | Quantum layers for PyTorch, Flax/JAX, TensorFlow |
+| **Providers** | IBM Quantum, IonQ, AWS Braket, OpenQuantum |
+| **Interop** | Qiskit, Cirq, PennyLane, OpenQASM 2/3 import/export |
+
+```python
+import superfermion as sf
+
+# Bell state — 3 lines
+qc = sf.Circuit(2).h(0).cx(0, 1)
+result = sf.run(qc, shots=1024)
+print(result.counts)  # {'00': ~512, '11': ~512}
+
+# Gradient — exact, O(1) scaling
+ansatz = sf.Circuit(2).ry(sf.param("t"), 0).cnot(0, 1).ry(sf.param("p"), 1)
+state = sf.simulate(ansatz, params={"t": 0.5, "p": 1.2})
+grads = state.grad(obs, ansatz.bind({"t": 0.5, "p": 1.2}).to_ir(), {"t": 0.5, "p": 1.2})
+```

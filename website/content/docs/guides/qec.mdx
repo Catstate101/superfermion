@@ -1,0 +1,117 @@
+---
+title: "Quantum Error Correction"
+description: "10 stabilizer codes + 4 decoders for quantum error correction in Superfermion."
+---
+
+Superfermion provides a comprehensive QEC toolkit: 10 quantum error correction codes and 4 decoders, all backed by Rust performance.
+
+## Codes
+
+All codes are in `superfermion.qec`:
+
+```python
+from superfermion.qec import (
+    RepetitionCode,
+    ShorCode,
+    SteaneCode,
+    BaconShorCode,
+    SurfaceCode2D,
+    ToricCode2D,
+    ColorCode,
+    HoneycombCode,
+    HypercubeCode4D,
+    GenericCSSCode,
+)
+```
+
+| Code | Qubits | Type | Description |
+|------|--------|------|-------------|
+| `RepetitionCode` | configurable | 1D | Bit-flip or phase-flip repetition |
+| `ShorCode` | 9 | CSS | 9-qubit code concatenating 3-qubit bit/phase flip |
+| `SteaneCode` | 7 | CSS | 7-qubit CSS code from Hamming [7,4,3] |
+| `BaconShorCode` | configurable | Subsystem | Subsystem code, gauge qubits tolerate errors |
+| `SurfaceCode2D` | configurable | Topological | Planar surface code on 2D grid |
+| `ToricCode2D` | configurable | Topological | Toric code with periodic boundaries |
+| `ColorCode` | configurable | Topological | 2D color code with transversal T gate |
+| `HoneycombCode` | configurable | Floquet | Dynamical code with weight-2 checks |
+| `HypercubeCode4D` | configurable | LDPC | 4D hypercube product code |
+| `GenericCSSCode` | configurable | CSS | Custom CSS code from X/Z check matrices |
+
+### Usage
+
+```python
+from superfermion.qec import SurfaceCode2D, MWPMDecoder
+
+# Create a distance-3 surface code
+code = SurfaceCode2D(distance=3)
+
+# Get stabilizer generators
+stabilizers = code.stabilizers()
+print(f"Code parameters: n={code.n_qubits}, k={code.n_logical}, d={code.distance}")
+
+# Get the syndrome measurement circuit
+syndrome_circuit = code.syndrome_circuit()
+
+# Decode errors
+decoder = MWPMDecoder(code)
+syndrome = [1, 0, 0, 1, 0, 1, 0, 0]  # example syndrome
+correction = decoder.decode(syndrome)
+corrected_circuit = code.apply_correction(correction)
+```
+
+## Decoders
+
+| Decoder | Algorithm | Best For |
+|---------|-----------|----------|
+| `MWPMDecoder` | Minimum-Weight Perfect Matching | Surface/Toric codes |
+| `UnionFindDecoder` | Union-Find clustering | Fast decoding with good threshold |
+| `BPOSD_Decoder` | Belief Propagation + Ordered Statistics Decoding | LDPC codes, generic CSS |
+| `NeuralDecoder` | Neural network based | Custom training, noisy syndromes |
+
+### Decoder Comparison
+
+```python
+from superfermion.qec import SurfaceCode2D, MWPMDecoder, UnionFindDecoder
+
+code = SurfaceCode2D(distance=5)
+
+# MWPM — accurate, moderate speed
+mwpm = MWPMDecoder(code)
+
+# Union-Find — fast, slightly lower threshold
+uf = UnionFindDecoder(code)
+
+# Both return a correction operator
+syndrome = code.random_error(p=0.01).syndrome()
+mwpm_correction = mwpm.decode(syndrome)
+uf_correction = uf.decode(syndrome)
+```
+
+## QEC Manager
+
+The `QECManager` orchestrates the full QEC pipeline:
+
+```python
+from superfermion.qec import QECManager, SurfaceCode2D, MWPMDecoder
+
+code = SurfaceCode2D(distance=3)
+decoder = MWPMDecoder(code)
+manager = QECManager(code, decoder)
+
+# Simulate a noisy circuit with error correction
+noisy_circuit = manager.protect(my_logical_circuit, noise_level=0.01)
+result = manager.run(noisy_circuit, shots=1000)
+
+# Analyze logical error rate
+logical_errors = manager.logical_error_rate(num_rounds=100, p_phys=0.001)
+print(f"Logical error rate: {logical_errors:.2e}")
+```
+
+## Rust Backend
+
+All QEC operations run in Rust (`sf-qec` crate). The Rust implementation:
+
+- **Stabilizer tableau** — word-packed representation for fast Clifford simulation
+- **Syndrome extraction circuits** — generated in Rust for each code
+- **Decoder algorithms** — MWPM (Blossom V), Union-Find (Delfosse-Nickerson), BP+OSD (Panteleev-Kalachev)
+- **Performance** — syndrome decoding at microsecond scale for distance < 10

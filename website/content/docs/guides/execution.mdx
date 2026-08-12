@@ -1,0 +1,196 @@
+---
+title: "Running Simulations"
+description: "Execute circuits: sf.run(), sf.simulate(), 4 simulation methods, sf.State, noise models, and RunResult."
+---
+
+## Two Entry Points
+
+`sf.run()` returns a `RunResult` (counts + state + metadata). `sf.simulate()` returns `sf.State` directly.
+
+```python
+import superfermion as sf
+
+qc = sf.Circuit(2).h(0).cnot(0, 1)
+
+# Run: counts + state + metadata
+result = sf.run(qc, device="cpu", shots=1024)
+print(result.counts)   # {'00': 512, '11': 512}
+print(result.state)    # sf.State
+
+# Simulate: state only (shots=0 implied)
+state = sf.simulate(qc, device="cpu")
+print(state.numpy())   # [0.707+0j, 0, 0, 0.707+0j]
+```
+
+## Devices
+
+```python
+# Local simulation
+sf.run(qc, device="cpu")    # Rust CPU — Rayon multithreading
+sf.run(qc, device="gpu")    # Rust GPU — CUDA (requires sf-gpu)
+
+# Cloud QPUs
+from superfermion.devices.ibm import IBMDevice
+from superfermion.devices.ionq import IonQDevice
+
+ibm = IBMDevice(token="...")
+sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
+
+ionq = IonQDevice(api_key="...")
+sf.run(qc, device=ionq("aria-1"), shots=1000)
+```
+
+## Simulation Methods
+
+Change `method=` — the API doesn't change.
+
+### Statevector (default)
+
+Exact simulation. Up to ~25 qubits CPU, ~30 GPU.
+
+```python
+result = sf.run(qc, method="statevector", shots=1024)
+state = sf.simulate(qc, method="statevector")
+```
+
+### MPS (Tensor Network)
+
+For low-entanglement circuits. Scales to **200+ qubits**.
+
+```python
+result = sf.run(qc, method="mps", bond_dim=64, shots=1024)
+```
+
+Higher bond dimension = more accuracy, more memory. Start at 64.
+
+### Stabilizer
+
+Clifford-only circuits. **Polynomial time**, scales to ~1000 qubits.
+
+```python
+clifford = sf.Circuit(100).h(0)
+for i in range(99):
+    clifford = clifford.cnot(i, i + 1)
+
+result = sf.run(clifford, method="stabilizer", shots=1024)
+```
+
+Non-Clifford gates (T, RZ, etc.) raise an error. Use statevector for those.
+
+### Density Matrix
+
+Noisy simulation with Kraus channels. Up to ~12 qubits.
+
+```python
+noise = sf.NoiseModel().add_depolarizing(0.001).add_amplitude_damping(0.002)
+result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
+```
+
+### Method comparison
+
+| Method | Max Qubits | Exact | Supports Gradients | Supports Noise |
+|--------|-----------|-------|-------------------|----------------|
+| `statevector` | ~25 | Yes | Yes | No |
+| `mps` | 200+ | Approximate | No | No |
+| `stabilizer` | ~1000 | Yes (Clifford) | No | No |
+| `density_matrix` | ~12 | Yes | No | Yes |
+
+## `sf.State` — the Rust quantum state
+
+`sf.State` wraps a Rust quantum state object. All methods dispatch to compiled Rust.
+
+```python
+state = sf.simulate(qc)
+
+# Basic properties
+print(state.n_qubits)       # 2
+print(state.shape)          # (4,)
+print(state.method)         # "statevector"
+print(state.device)         # "cpu"
+
+# Extract data
+sv = state.numpy()          # complex ndarray
+samples = state.sample(1000)  # list[int] — measurement outcomes
+
+# Derived quantities
+print(state.entropy())          # Von Neumann entropy (0 = pure)
+print(state.purity())           # 1.0 = pure, <1 = mixed
+print(state.probabilities())    # Outcome probability distribution
+
+# Expectation values
+obs = [([3, 3], 1.0, 0.0)]    # ZZ observable
+energy = state.expectation(obs)
+
+# Gradients
+dag = qc.to_ir()
+params = {"theta": 0.5}
+grads = state.grad(obs, dag, params)
+
+# Operations on states
+print(state.fidelity(state))         # 1.0 (self-fidelity)
+rdm = state.partial_trace([0])       # Reduced density matrix
+qfim = state.qfim(dag, params)      # Quantum Fisher Information Matrix
+
+# Create from numpy
+import numpy as np
+vec = np.array([1, 0, 0, 0], dtype=complex)
+state2 = sf.State.from_numpy(vec)
+```
+
+## `RunResult` — execution result
+
+```python
+result = sf.run(qc, device="cpu", shots=8192)
+
+# Primary outputs
+print(result.counts)           # {'00': 4096, '11': 4096}
+print(result.state)            # sf.State
+print(result.shots)            # 8192
+
+# Derived
+print(result.probabilities)    # {'00': 0.5, '11': 0.5}
+print(result.statevector)      # ndarray
+print(result.circuit)          # original circuit
+print(result.metadata)         # execution metadata
+
+# Methods
+energy = result.expectation(obs)       # expectation from counts
+grads = result.grad(obs, dag, params)  # gradient from state
+result.plot(kind="histogram")          # plot results
+```
+
+## Noise Models
+
+```python
+noise = (sf.NoiseModel()
+    .add_depolarizing(rate=0.001)           # symmetric depolarizing
+    .add_amplitude_damping(gamma=0.002)     # T1 relaxation
+    .add_phase_damping(gamma=0.001)         # pure dephasing
+    .add_thermal_relaxation(                # combined T1 + T2
+        t1=50e-6, t2=70e-6, gate_time=35e-9
+    ))
+
+result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
+```
+
+## Auto-Bind Parameters
+
+```python
+ansatz = sf.Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+
+# Both forms are equivalent:
+state = sf.simulate(ansatz, params={"t": 0.5})
+state = sf.simulate(ansatz.bind({"t": 0.5}))
+```
+
+## Error Handling
+
+```python
+from superfermion import MethodError
+
+try:
+    # T gate on a stabilizer circuit
+    sf.run(sf.Circuit(1).t(0), method="stabilizer")
+except MethodError as e:
+    print(f"Method not applicable: {e}")
+```

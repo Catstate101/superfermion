@@ -1,9 +1,12 @@
 {
   "title": "Superfermion",
+  "root": true,
   "pages": [
     "index",
     "getting-started",
-    "usage-guide",
-    "architecture"
+    "---Guides---",
+    "guides",
+    "---Reference---",
+    "reference"
   ]
 }
