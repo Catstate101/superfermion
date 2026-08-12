@@ -6,6 +6,8 @@ through the ``DeviceExecutor`` protocol.
 
 Requires: ``pip install amazon-braket-sdk boto3``
 """
+from __future__ import annotations
+
 
 from __future__ import annotations
 

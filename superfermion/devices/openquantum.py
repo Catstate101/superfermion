@@ -6,6 +6,8 @@ it through the ``DeviceExecutor`` protocol.
 
 Requires: ``pip install openquantum-sdk``
 """
+from __future__ import annotations
+
 
 from __future__ import annotations
 

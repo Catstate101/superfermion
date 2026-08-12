@@ -7,6 +7,8 @@ synchronous (blocks until the job completes).
 
 Requires: ``pip install qiskit-ibm-runtime``
 """
+from __future__ import annotations
+
 
 from __future__ import annotations
 

@@ -5,6 +5,8 @@ Implements:
 - Zero Noise Extrapolation (ZNE)
 - Measurement Error Mitigation (readout correction)
 """
+from __future__ import annotations
+
 
 from __future__ import annotations
 

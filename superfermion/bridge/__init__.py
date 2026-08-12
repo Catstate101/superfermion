@@ -5,6 +5,8 @@ Usage:
     from superfermion.bridge import from_qiskit, from_pennylane, from_cirq
     sf_circuit = from_qiskit(qiskit_circuit)
 """
+from __future__ import annotations
+
 
 from __future__ import annotations
 

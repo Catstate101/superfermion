@@ -44,7 +44,7 @@ def _controlled_unitary(
 
     # Apply each gate as controlled
     for gate in sub._gates:
-        gate_qubits = [control] + [target_qubits[q] for q in gate.qubits]
+        _gate_qubits = [control] + [target_qubits[q] for q in gate.qubits]  # noqa: F841
         if gate.name.upper() in ("H",):
             circuit.ch(control, target_qubits[gate.qubits[0]])
         elif gate.name.upper() in ("X",):

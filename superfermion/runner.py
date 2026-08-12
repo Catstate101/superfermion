@@ -95,7 +95,7 @@ def run(
         exec_circuit = _compile_for_target(circuit, target)
 
     # 4. Gate fusion is handled in Rust during simulation
-    caps = executor.capabilities()
+    _caps = executor.capabilities()  # noqa: F841 — validated during dispatch
 
     # 5. Resolve tracker (explicit > context > None)
     active_tracker = tracker

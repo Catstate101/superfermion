@@ -800,7 +800,7 @@ class Circuit:
                 grid[q][step] = f"[{label}]"
             elif len(gate.qubits) == 2:
                 q0, q1 = gate.qubits
-                grid[q0][step] = f"●" if gname in ("CNOT", "CZ", "CY") else f"[{gate.name}]"
+                grid[q0][step] = "●" if gname in ("CNOT", "CZ", "CY") else f"[{gate.name}]"
                 if gname == "CNOT":
                     grid[q1][step] = "⊕"
                 elif gname == "CZ":

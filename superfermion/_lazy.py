@@ -39,7 +39,7 @@ class LazyModule(ModuleType):
 
         submods = getattr(self, "_LAZY_SUBMODULES", {})
         attrs = getattr(self, "_LAZY_ATTRS", {})
-        __all__ = getattr(self, "__all__", [])
+        getattr(self, "__all__", [])  # __all__ set on module via __init__.py
 
         # 1. Submodule (e.g. sf.qml)
         mod_name = submods.get(name)

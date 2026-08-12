@@ -109,7 +109,7 @@ class FermionicOperator:
         for ops, coeff in self.terms.items():
             sites = [idx for idx, _ in ops]
             otypes = [ot for _, ot in ops]
-            n = len(ops)
+            _n = len(ops)  # kept for clarity — number of fermionic operators
 
             # Build JW representation iteratively: multiply each fermionic
             # operator's 2-term Pauli expansion with the accumulated product

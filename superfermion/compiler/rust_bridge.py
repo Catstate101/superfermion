@@ -9,6 +9,8 @@ Usage:
     >>> from superfermion.compiler.rust_bridge import compile_rust
     >>> compiled = compile_rust(circuit, level=2)
 """
+from __future__ import annotations
+
 
 from __future__ import annotations
 import re

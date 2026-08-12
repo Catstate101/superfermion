@@ -9,6 +9,8 @@ Resolution rules (used by ``sf.run()``):
     - ``"gpu"`` → RustDevice (CUDA GPU statevector simulation)
     - Any ``DeviceExecutor`` object → used directly (IBMDevice, IonQDevice, etc.)
 """
+from __future__ import annotations
+
 
 from __future__ import annotations
 

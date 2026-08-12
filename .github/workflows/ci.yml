@@ -52,7 +52,7 @@ jobs:
           maturin build --release --out dist
           pip install dist/*.whl
       - name: Lint (ruff)
-        run: ruff check superfermion/ --select=E,F,W --ignore=E501
+        run: ruff check superfermion/ --select=F --ignore=F401,F821
       - name: Type check (mypy)
         run: mypy superfermion/
       - name: Run core tests

@@ -7,6 +7,8 @@ completes (polling the IonQ REST API).
 
 Requires: ``pip install requests``
 """
+from __future__ import annotations
+
 
 from __future__ import annotations
 
