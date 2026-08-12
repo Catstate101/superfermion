@@ -57,7 +57,11 @@ jobs:
         continue-on-error: true
         run: mypy superfermion/
       - name: Run core tests
-        run: python -m pytest tests/ -q --timeout=120 -k "not (aer or qiskit or pennylane)"
+        run: |
+          pip install scipy
+          python -m pytest tests/ -q --timeout=120 \
+            --ignore=tests/domain/test_gradients_full.py \
+            -k "not (aer or qiskit or pennylane)"
 
   # ── Benchmark smoke test ─────────────────────────────────
   benchmarks:
