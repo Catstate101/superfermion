@@ -98,6 +98,8 @@ jobs:
         run: |
           pip install pytest pytest-timeout numpy
           pip install dist/*linux*.whl
+          pip show -f superfermion | head -30
+          python -c "import superfermion._sf_core; print('OK:', superfermion._sf_core.__file__)"
           python -m pytest tests/ -q --timeout=120 -k "not (aer or qiskit or pennylane)"
 
   # ---- Publish to PyPI ---- 
