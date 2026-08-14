@@ -13,19 +13,18 @@ from superfermion.chemistry.ansatz import uccsd_ansatz
 import superfermion as sf
 
 # Get a pre-built molecular Hamiltonian
-H = get_molecular_hamiltonian("H2", bond_length=0.7414)
-print(f"H2 Hamiltonian: {len(H)} terms")
+H = get_molecular_hamiltonian("H2", basis="sto-3g")
+print(f"H2 Hamiltonian: {len(H.terms)} terms")
 
-# Build a UCCSD ansatz
-n_qubits = H.n_qubits
-ansatz = uccsd_ansatz(n_qubits, n_electrons=2, excitation_level="sd")
+# Build a UCCSD ansatz (minimal 2-qubit H2 ansatz)
+ansatz = uccsd_ansatz(n_qubits=2, n_electrons=2)
+print(f"Ansatz: {ansatz.n_parameters} parameter, {ansatz.gate_count} gates")
 
 # Run VQE
 from superfermion.algorithms.variational import VQE
-params = {f"t{i}": 0.0 for i in range(ansatz.n_parameters)}
-vqe = VQE(ansatz, H.to_sparse_list())
-result = vqe.optimize(params, max_iterations=100)
-print(f"H2 ground state energy: {result.energy:.6f} Hartree")
+vqe = VQE(ansatz, H)
+result = vqe.minimize(iterations=100)
+print(f"H2 ground state energy: {result.optimal_value:.6f} Hartree")
 ```
 
 ## Molecular Hamiltonians
@@ -35,13 +34,12 @@ print(f"H2 ground state energy: {result.energy:.6f} Hartree")
 ```python
 from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian
 
-# Built-in molecules
-h2 = get_molecular_hamiltonian("H2", bond_length=0.7414)
-lih = get_molecular_hamiltonian("LiH", bond_length=1.595)
-h2o = get_molecular_hamiltonian("H2O", bond_length=0.958)
-nh3 = get_molecular_hamiltonian("NH3", bond_length=1.012)
-ch4 = get_molecular_hamiltonian("CH4", bond_length=1.087)
-n2 = get_molecular_hamiltonian("N2", bond_length=1.098)
+# Built-in molecules (pre-computed at equilibrium geometry)
+h2 = get_molecular_hamiltonian("H2", basis="sto-3g")
+print(f"H2: {len(h2.terms)} terms")
+
+# Additional molecules (LiH, H2O, ...) require PySCF — install with:
+#   pip install "superfermion[chemistry]"
 ```
 
 ### PySCF Bridge — Custom Molecules
@@ -49,30 +47,44 @@ n2 = get_molecular_hamiltonian("N2", bond_length=1.098)
 For any molecule, use the PySCF bridge:
 
 ```python
-from superfermion.chemistry.pyscf_bridge import molecule_to_hamiltonian
+from superfermion.chemistry.pyscf_bridge import molecule_from_geometry
 
-# Define any molecule via PySCF
-hamiltonian, metadata = molecule_to_hamiltonian(
-    atom="H 0 0 0; H 0 0 0.7414",
-    basis="sto-3g",
-    charge=0,
-    spin=0,
-)
-print(f"Active space: {metadata['n_qubits']} qubits, {metadata['n_electrons']} electrons")
+# Define any molecule via an XYZ geometry string
+mol = molecule_from_geometry("H 0 0 0; H 0 0 0.7414", basis="sto-3g", name="H2")
+
+# With PySCF installed this computes HF + integrals; otherwise it falls
+# back to the pre-computed molecule library
+summary = mol.summary()
+print(f"{summary['name']}: {summary['n_electrons']} electrons, "
+      f"{summary['n_orbitals']} orbitals, {summary['n_qubits']} qubits, "
+      f"pyscf={'available' if summary['pyscf_available'] else 'library fallback'}")
+
+# Build the qubit Hamiltonian
+H = mol.to_hamiltonian(active_space=(2, 2))
+print(f"Qubit Hamiltonian: {len(H.terms)} terms")
 ```
 
 ## Fermion-to-Qubit Mappings
 
 ```python
 from superfermion.chemistry.hamiltonians import FermionicOperator
-import superfermion as sf
+import numpy as np
+
+# One-body integrals h1 (spin-orbital basis) — a two-site model
+h1 = np.zeros((2, 2))
+h1[0, 0] = -1.0
+h1[1, 1] = -0.5
+h1[0, 1] = h1[1, 0] = 0.2
+
+fermion_op = FermionicOperator.from_coeffs(h1)
 
 # Jordan-Wigner transform
-fermion_op = FermionicOperator("0^ 1^ 2 3")  # excitation operator
-jw_qubit_op = fermion_op.to_qubit_operator(mapping="jordan_wigner")
+jw_qubit_op = fermion_op.jordan_wigner(n_qubits=2)
+print(f"Jordan-Wigner: {len(jw_qubit_op.terms)} terms")
 
 # Bravyi-Kitaev transform
-bk_qubit_op = fermion_op.to_qubit_operator(mapping="bravyi_kitaev")
+bk_qubit_op = fermion_op.bravyi_kitaev(n_qubits=2)
+print(f"Bravyi-Kitaev: {len(bk_qubit_op.terms)} terms")
 ```
 
 | Mapping | Qubit Scaling | Locality | Best For |
@@ -87,13 +99,13 @@ The Unitary Coupled Cluster Singles and Doubles ansatz is the standard choice fo
 ```python
 from superfermion.chemistry.ansatz import uccsd_ansatz
 
-# Single excitations only
-uccs = uccsd_ansatz(n_qubits=4, n_electrons=2, excitation_level="s")
-print(f"UCCS: {uccs.n_parameters} parameters, {uccs.gate_count} gates")
+# Minimal 2-qubit H2 ansatz (single parameter, O'Malley et al. 2016)
+h2_ansatz = uccsd_ansatz(n_qubits=2, n_electrons=2)
+print(f"H2 ansatz: {h2_ansatz.n_parameters} parameter, {h2_ansatz.gate_count} gates")
 
-# Singles + doubles (standard)
-uccsd = uccsd_ansatz(n_qubits=4, n_electrons=2, excitation_level="sd")
-print(f"UCCSD: {uccsd.n_parameters} parameters, {uccsd.gate_count} gates")
+# Hardware-efficient UCC-style ansatz for larger active spaces
+uccsd = uccsd_ansatz(n_qubits=4, n_electrons=2)
+print(f"4-qubit ansatz: {uccsd.n_parameters} parameters, {uccsd.gate_count} gates")
 ```
 
 ## Full VQE Workflow
@@ -101,28 +113,25 @@ print(f"UCCSD: {uccsd.n_parameters} parameters, {uccsd.gate_count} gates")
 End-to-end VQE with a custom molecule:
 
 ```python
-from superfermion.chemistry.pyscf_bridge import molecule_to_hamiltonian
+from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian
 from superfermion.chemistry.ansatz import uccsd_ansatz
 from superfermion.algorithms.variational import VQE
 import numpy as np
 
-# 1. Build molecular Hamiltonian
-H, meta = molecule_to_hamiltonian(
-    atom="H 0 0 0; H 0 0 1.5",
-    basis="sto-3g",
-)
+# 1. Build molecular Hamiltonian (pre-computed H2 library entry)
+H = get_molecular_hamiltonian("H2", basis="sto-3g")
 
 # 2. Build ansatz
-ansatz = uccsd_ansatz(H.n_qubits, n_electrons=meta["n_electrons"])
+ansatz = uccsd_ansatz(2, 2)
 
-# 3. Initialize parameters
-init_params = {f"t{i}": 0.01 * np.random.randn() for i in range(ansatz.n_parameters)}
+# 3. Initial parameters (array, ordered as ansatz.parameters)
+init_params = np.zeros(ansatz.n_parameters)
 
 # 4. Run VQE
-vqe = VQE(ansatz, H.to_sparse_list())
-result = vqe.optimize(init_params, max_iterations=200)
-print(f"Ground state energy: {result.energy:.8f} Hartree")
-print(f"Exact (FCI): {meta.get('fci_energy', 'N/A')} Hartree")
+vqe = VQE(ansatz, H)
+result = vqe.minimize(initial_params=init_params, iterations=200)
+print(f"Ground state energy: {result.optimal_value:.8f} Hartree")
+print(f"Optimal parameters: {result.optimal_params}")
 ```
 
 ## Performance Notes

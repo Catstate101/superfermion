@@ -62,5 +62,7 @@ print(result.counts)  # {'00': ~512, '11': ~512}
 # Gradient — exact, O(1) scaling
 ansatz = sf.Circuit(2).ry(sf.param("t"), 0).cnot(0, 1).ry(sf.param("p"), 1)
 state = sf.simulate(ansatz, params={"t": 0.5, "p": 1.2})
-grads = state.grad(obs, ansatz.bind({"t": 0.5, "p": 1.2}).to_ir(), {"t": 0.5, "p": 1.2})
+obs = [([3, 3], 1.0, 0.0)]      # Pauli ZZ (Rust format: 0=I 1=X 2=Y 3=Z)
+grads = state.grad(obs, ansatz.to_ir(), {"t": 0.5, "p": 1.2})
+print(grads)  # {'t': ~0.0, 'p': -0.932...}
 ```

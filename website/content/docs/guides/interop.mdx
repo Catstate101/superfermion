@@ -14,6 +14,7 @@ description: "Import and export circuits between Superfermion, Qiskit, Cirq, Pen
 
 ```python
 from superfermion.bridge import from_qiskit, to_qiskit
+from qiskit import QuantumCircuit
 import superfermion as sf
 
 # Qiskit → Superfermion
@@ -28,7 +29,9 @@ qiskit_qc = to_qiskit(sf_qc)
 
 # Run on Qiskit Aer from Superfermion
 from qiskit_aer import AerSimulator
-result = AerSimulator().run(to_qiskit(sf_qc)).result()
+qiskit_qc.measure_all()   # measurements so get_counts() has results
+result = AerSimulator().run(qiskit_qc).result()
+print(result.get_counts())
 ```
 
 ## Cirq
@@ -50,6 +53,7 @@ cirq_qc = to_cirq(sf_qc)
 ```python
 from superfermion.bridge import from_pennylane, to_pennylane
 import pennylane as qml
+import superfermion as sf
 
 # PennyLane → Superfermion
 dev = qml.device("default.qubit", wires=2)
@@ -60,12 +64,20 @@ def circuit(x):
     qml.CNOT(wires=[0, 1])
     return qml.state()
 
-# Extract and convert
-pl_tape = circuit.tape
+# Extract the tape and convert
+pl_tape = qml.workflow.construct_tape(circuit)(0.5)
 sf_qc = from_pennylane(pl_tape)
+print(sf.run(sf_qc.bind({"x": 0.5}), shots=100).counts)
 
-# Superfermion → PennyLane
-pl_tape = to_pennylane(sf_qc)
+# Superfermion → PennyLane (returns a quantum function for a QNode)
+qfunc = to_pennylane(sf.Circuit(2).h(0).cnot(0, 1))
+
+@qml.qnode(dev)
+def pl_circuit():
+    qfunc()
+    return qml.state()
+
+print(len(pl_circuit()))  # 4 amplitudes
 ```
 
 ## OpenQASM 2.0
@@ -102,11 +114,17 @@ sf_qc = from_qasm3(qasm3_str)
 
 ```python
 from superfermion.bridge import to_braket
+import superfermion as sf
 
-# Export Superfermion circuit to Braket format
-braket_task = to_braket(sf_qc)
-# Submit directly to AWS Braket
-# braket_task.submit(device_arn="...", shots=1000)
+# Export Superfermion circuit to AWS Braket format
+sf_qc = sf.Circuit(2).h(0).cnot(0, 1)
+braket_circuit = to_braket(sf_qc)
+print(type(braket_circuit).__name__)  # braket.circuits.Circuit
+
+# Submit to AWS Braket (requires AWS credentials)
+# from braket.aws import AwsDevice
+# device = AwsDevice("arn:aws:braket:::device/quantum-simulator/amazon/sv1")
+# device.run(braket_circuit, shots=1000)
 ```
 
 ## IonQ
@@ -133,13 +151,13 @@ assert restored.gate_count == 2
 
 ```python
 gates = sf.Circuit(2).h(0).cnot(0, 1).to_gate_list()
-# [{"name": "h", "qubits": [0], "params": []},
-#  {"name": "cnot", "qubits": [0, 1], "params": []}]
+# [{"name": "H", "qubits": [0]}, {"name": "CNOT", "qubits": [0, 1]}]
 
-# Rebuild from gate list
+# Rebuild from gate list (names are uppercase, lowercase the method name)
 qc = sf.Circuit(2)
 for g in gates:
-    qc = qc.__getattr__(g["name"])(*g["params"], *g["qubits"])
+    qc = getattr(qc, g["name"].lower())(*g.get("params", []), *g["qubits"])
+print(qc.gate_count)  # 2
 ```
 
 ## Caveats

@@ -160,21 +160,27 @@ for run in tracker.runs:
 
 ## Adding a New Provider
 
-Providers implement the `DeviceExecutor` protocol — a class with an `execute()` method. No registration required:
+Providers implement the `DeviceExecutor` protocol — a class with an `execute()` and a `capabilities()` method. No registration required:
 
 ```python
-from superfermion.devices import DeviceExecutor
+import superfermion as sf
+from superfermion.devices import DeviceExecutor, DeviceCapabilities
 
 class MyCustomDevice:
-    """Any class with execute() works as a device."""
-    def execute(self, dag, shots, **kwargs):
-        # Submit circuit (dag), get results
-        counts = my_backend.run(dag.to_qasm3(), shots=shots)
-        return counts  # dict[str, int]
+    """Any class with execute() + capabilities() satisfies the protocol."""
+    def execute(self, circuit, shots, **kwargs):
+        # Simulate the submitted circuit locally and return a RunResult
+        return sf.run(circuit, device="cpu", shots=shots)
+
+    def capabilities(self):
+        return DeviceCapabilities()
 
 # Use directly — no registration needed
+qc = sf.Circuit(2).h(0).cnot(0, 1)
 my_device = MyCustomDevice()
+assert isinstance(my_device, DeviceExecutor)   # structural check
 result = sf.run(qc, device=my_device, shots=1000)
+print(result.counts)
 ```
 
-The protocol requires only one method: `execute(dag, shots) -> dict`. Return a counts dictionary `{"00": 512, "11": 512}` and it works with `sf.run()`.
+The protocol requires two methods: `execute(circuit, shots) -> RunResult` and `capabilities() -> DeviceCapabilities`. `sf.run()` validates the object against the protocol and calls `execute()` to run the circuit.
