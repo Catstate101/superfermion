@@ -27,13 +27,17 @@ pip install "superfermion[ml]"         # PyTorch + TensorFlow + Cirq
 
 ```python
 import superfermion as sf
-print(sf.__version__)  # 0.1.0
+print(sf.__version__)  # e.g. '0.1.5'
 ```
 
 ## 3. Build a circuit
 
 ```python
 import superfermion as sf
+import sys
+
+# Unicode diagrams on Windows consoles: reconfigure stdout first
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # Bell state: entangle two qubits
 qc = sf.Circuit(2).h(0).cx(0, 1)
@@ -70,8 +74,11 @@ print(state.purity())          # 1.0
 from superfermion import Hamiltonian, PauliString
 
 H = Hamiltonian([PauliString("ZZ", coeff=1.0)])
-energy = state.expectation(H.to_sparse_list())
+energy = H.expectation(state.numpy())
 print(energy)  # 1.0
+
+# Or pass the Rust observable format directly to State:
+# state.expectation([([3, 3], 1.0, 0.0)])   # ZZ: 0=I 1=X 2=Y 3=Z (LSB-first)
 ```
 
 ## 7. Take a gradient
@@ -82,7 +89,7 @@ qc = sf.Circuit(1).ry(theta, 0)
 
 state = sf.simulate(qc, params={"theta": 0.5})
 obs = [([3], 1.0, 0.0)]      # Pauli Z
-dag = qc.bind({"theta": 0.5}).to_ir()
+dag = qc.to_ir()  # keep parameters symbolic — .bind() would erase them
 grads = state.grad(obs, dag, {"theta": 0.5})
 
 print(grads)  # {"theta": -0.479...}
@@ -94,14 +101,24 @@ The adjoint method computes gradients in one backward pass regardless of paramet
 
 ```python
 # MPS — for weakly entangled circuits, scales to 200+ qubits
-result = sf.run(qc, method="mps", bond_dim=64, shots=1024)
+qc_mps = sf.Circuit(8).h(0)
+for i in range(7):
+    qc_mps = qc_mps.cnot(i, i + 1)
+result = sf.run(qc_mps, method="mps", bond_dim=64, shots=1024)
+print(result.counts)  # {'00000000': ~512, '11111111': ~512}
 
 # Stabilizer — for Clifford-only circuits, scales to 1000+ qubits
-result = sf.run(qc, method="stabilizer", shots=1024)
+qc_stab = sf.Circuit(100).h(0)
+for i in range(99):
+    qc_stab = qc_stab.cnot(i, i + 1)
+result = sf.run(qc_stab, method="stabilizer", shots=1024)
+print(list(result.counts.items())[:2])
 
 # Density matrix — for noisy simulation
+qc_noisy = sf.Circuit(1).x(0)
 noise = sf.NoiseModel().add_depolarizing(0.01)
-result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
+result = sf.run(qc_noisy, method="density_matrix", noise_model=noise, shots=0)
+print(f"purity = {result.metadata['purity']:.4f}")
 ```
 
 ## Where next

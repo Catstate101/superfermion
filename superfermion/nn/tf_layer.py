@@ -99,11 +99,16 @@ class TFQuantumLayer(tf.keras.layers.Layer):
             state = sf.simulate(bound, device=self._device, method=self._method)
             val = state.expectation(self._rust_obs)
 
-            def _grad(upstream):
+            def _grad(upstream, variables=None):
                 dag = self._circuit.to_ir()
                 grads = state.grad(self._rust_obs, dag, p_dict)
                 grad_np = np.array([grads.get(k, 0.0) for k in self._param_names])
-                return upstream * tf.constant(grad_np, dtype=w.dtype)
+                grad_tensor = upstream * tf.constant(grad_np, dtype=w.dtype)
+                if variables is not None and variables:
+                    # tf.custom_gradient requires gradients for watched
+                    # variables in addition to the function inputs.
+                    return grad_tensor, [grad_tensor for _ in variables]
+                return grad_tensor
 
             return tf.constant(val, dtype=w.dtype), _grad
 

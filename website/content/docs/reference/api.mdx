@@ -29,6 +29,8 @@ sf.NoiseModel()        Noise model for density matrix sim
 `sf.Circuit` is a fluent builder. Each gate call returns the circuit for chaining.
 
 ```python
+import sys
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import superfermion as sf
 
 qc = sf.Circuit(2).h(0).cnot(0, 1)
@@ -293,11 +295,16 @@ H = sf.Hamiltonian([
 
 # Exact expectation from state
 state = sf.simulate(sf.Circuit(2).h(0).cnot(0, 1))
-energy = state.expectation(H.to_sparse_list())
+energy = H.expectation(state.numpy())
+print(f"Exact <H> = {energy:.6f}")
 
 # Estimate from measurement counts
 result = sf.run(sf.Circuit(2).h(0).cnot(0, 1), shots=10000)
-energy = result.expectation(H.to_sparse_list())
+obs = [([3, 3], 0.5, 0.0),   # ZZ
+       ([1, 0], 0.3, 0.0),   # XI
+       ([0, 3], 0.2, 0.0)]   # IZ
+energy = result.expectation(obs)
+print(f"Counts <H> = {energy:.6f}")
 ```
 
 ### Observable API
@@ -305,24 +312,25 @@ energy = result.expectation(H.to_sparse_list())
 ```python
 # PauliString
 p = sf.PauliString("XZ", coeff=0.5)
-print(p.pauli)   # "XZ"
-print(p.coeff)   # 0.5
+print(p.pauli_str)   # "XZ"
+print(p.coeffs)      # 0.5
 
 # Hamiltonian
 H = sf.Hamiltonian([p, sf.PauliString("II", coeff=-1.0)])
-print(H.n_terms)        # 2
-print(H.n_qubits)       # 2
-sparse = H.to_sparse_list()  # [(pauli_indices, coeff_real, coeff_imag), ...]
+print(len(H.terms))        # 2
+sparse = H.to_sparse_pauli_op()
 
 # SparsePauliOp
-op = sf.SparsePauliOp.from_list(["ZZ", "XI"], [0.5, 0.3])
+op = sf.SparsePauliOp.from_dict({"ZZ": 0.5, "XI": 0.3})
 
 # Convenience Pauli matrices
 from superfermion.observables import I, X, Y, Z
 
 # expval shortcut
 from superfermion import expval
-val = expval(state.numpy(), H.to_sparse_list())
+state = sf.simulate(sf.Circuit(2).h(0).cnot(0, 1))
+val = expval(state.numpy(), H)
+print(f"<H> = {val:.6f}")
 ```
 
 ### Observable Format (Rust)
@@ -358,9 +366,9 @@ params = {"theta": 0.5, "phi": 1.2}
 state = sf.simulate(ansatz, params=params)
 
 obs = [([3, 3], 1.0, 0.0)]  # ZZ
-dag = ansatz.bind(params).to_ir()
+dag = ansatz.to_ir()  # keep parameters symbolic — .bind() would erase them
 grads = state.grad(obs, dag, params)
-print(grads)  # {"theta": -0.23..., "phi": 0.41...}
+print(grads)  # {'theta': ~0.0, 'phi': -0.932...}
 ```
 
 ### 5 Gradient Methods
@@ -397,14 +405,18 @@ ansatz = (sf.Circuit(2)
     .ry(sf.param("t3"), 1))
 
 params = {f"t{i}": np.random.uniform(0, np.pi) for i in range(4)}
-obs = H.to_sparse_list()
+obs = [([0, 0], -1.0523, 0.0),   # II
+       ([0, 3], 0.3979, 0.0),    # IZ
+       ([3, 0], -0.3979, 0.0),   # ZI
+       ([3, 3], -0.0112, 0.0),   # ZZ
+       ([1, 1], 0.1809, 0.0)]    # XX
 lr = 0.1
 
 for step in range(50):
     state = sf.simulate(ansatz, params=params)
     energy = state.expectation(obs)
 
-    dag = ansatz.bind(params).to_ir()
+    dag = ansatz.to_ir()  # keep parameters symbolic — .bind() would erase them
     grads = state.grad(obs, dag, params)
 
     for key in params:
@@ -417,12 +429,30 @@ for step in range(50):
 ### Built-in VQE Class
 
 ```python
-from superfermion.algorithms.variational import VQE, QAOA
+import superfermion as sf
+import numpy as np
+from superfermion.algorithms.variational import VQE
+
+H = sf.Hamiltonian([
+    sf.PauliString("II", coeff=-1.0523),
+    sf.PauliString("IZ", coeff=0.3979),
+    sf.PauliString("ZI", coeff=-0.3979),
+    sf.PauliString("ZZ", coeff=-0.0112),
+    sf.PauliString("XX", coeff=0.1809),
+])
+
+ansatz = (sf.Circuit(2)
+    .ry(sf.param("t0"), 0)
+    .ry(sf.param("t1"), 1)
+    .cnot(0, 1)
+    .ry(sf.param("t2"), 0)
+    .ry(sf.param("t3"), 1))
 
 # Use the built-in VQE class
-vqe = VQE(ansatz, obs)
-result = vqe.optimize(init_params, max_iterations=100)
-print(f"Energy: {result.energy}")
+vqe = VQE(ansatz, H)
+result = vqe.minimize(iterations=100)
+print(f"Energy: {result.optimal_value:.8f}")
+print(f"Optimal params: {result.optimal_params}")
 ```
 
 ---
@@ -439,22 +469,24 @@ from superfermion.pulse import (
 # Build a pulse schedule
 s = Schedule()
 
-# Add a Gaussian pulse on the drive channel
-gaussian = GaussianPulse(amplitude=0.5, sigma=16e-9, duration=64e-9)
-s.add_pulse(gaussian, channel=Channel(0, ChannelType.DRIVE), start=0)
+# Add a Gaussian pulse on the drive channel (duration/sigma in dt units)
+gaussian = GaussianPulse(duration=64, sigma=16, amp=0.5)
+s.add(gaussian, channel="d0", t0=0)
 
 # Add a DRAG pulse for reduced leakage
-drag = DRAGPulse(amplitude=0.5, sigma=16e-9, duration=64e-9, beta=0.1)
-s.add_pulse(drag, channel=Channel(0, ChannelType.DRIVE), start=100e-9)
+drag = DRAGPulse(duration=64, sigma=16, amp=0.5, beta=0.1)
+s.add(drag, channel="d0", t0=100)
 
 # Add a square pulse for measurement
-square = SquarePulse(amplitude=1.0, duration=500e-9)
-s.add_pulse(square, channel=Channel(0, ChannelType.MEASURE), start=200e-9)
+square = SquarePulse(duration=200, amp=1.0)
+s.add(square, channel="m0", t0=200)
+print(s)
 
 # Compile a circuit to a schedule
 from superfermion.compiler import schedule_circuit
 qc = sf.Circuit(1).rx(0.5, 0)
-scheduled = schedule_circuit(qc, calibration=my_calibration)
+scheduled = schedule_circuit(qc)
+print(scheduled)
 ```
 
 ---
@@ -462,6 +494,7 @@ scheduled = schedule_circuit(qc, calibration=my_calibration)
 ## 10. Quantum Error Correction
 
 ```python
+import numpy as np
 from superfermion.qec import (
     SurfaceCode2D, SteaneCode, RepetitionCode,
     MWPMDecoder, UnionFindDecoder, BPOSD_Decoder, NeuralDecoder,
@@ -470,13 +503,17 @@ from superfermion.qec import (
 
 # Create a surface code
 code = SurfaceCode2D(distance=3)
+syndrome_qubit_map = [[i, (i + 1) % code.n_data] for i in range(code.n_ancilla)]
 
 # Decode errors
-decoder = MWPMDecoder(code)
+decoder = MWPMDecoder(code.n_data, syndrome_qubit_map)
+correction = decoder.decode(np.zeros(code.n_ancilla, dtype=int))
+print(f"Correction: {correction}")
 
 # Full QEC pipeline
-manager = QECManager(code, decoder)
-protected = manager.protect(my_logical_circuit, noise_level=0.01)
+manager = QECManager()
+result = manager.run_logical_lifecycle("surface_2d")
+print(f"Logical state: {result['logical_state']}")
 ```
 
 See the **[QEC Guide](/docs/qec)** for all 10 codes and 4 decoders.
@@ -486,22 +523,22 @@ See the **[QEC Guide](/docs/qec)** for all 10 codes and 4 decoders.
 ## 11. Chemistry
 
 ```python
+import numpy as np
 from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian, FermionicOperator
 from superfermion.chemistry.ansatz import uccsd_ansatz
-from superfermion.chemistry.pyscf_bridge import molecule_to_hamiltonian
 
-# Pre-built molecule
-h2 = get_molecular_hamiltonian("H2", bond_length=0.7414)
+# Pre-built molecule (cached H2 data — no PySCF needed)
+h2 = get_molecular_hamiltonian("H2", basis="sto-3g")
+print(f"Terms: {len(h2.terms)}")
 
-# Custom molecule via PySCF
-H, meta = molecule_to_hamiltonian(atom="H 0 0 0; H 0 0 0.7414", basis="sto-3g")
-
-# Build UCCSD ansatz
-ansatz = uccsd_ansatz(H.n_qubits, n_electrons=meta["n_electrons"])
+# Build UCCSD ansatz (n_qubits, n_electrons)
+ansatz = uccsd_ansatz(2, n_electrons=2)
+print(f"Ansatz: {ansatz.gate_count} gates, params: {ansatz.parameters}")
 
 # Fermionic operators
-fop = FermionicOperator("0^ 1^ 2 3")  # excitation
-qubit_op = fop.to_qubit_operator(mapping="jordan_wigner")
+fop = FermionicOperator.from_coeffs(np.array([[0.0, 1.0], [1.0, 0.0]]))  # example h1
+qubit_op = fop.jordan_wigner(n_qubits=2)
+print(f"JW terms: {len(qubit_op.terms)}")
 ```
 
 See the **[Chemistry Guide](/docs/chemistry)** for full details.
@@ -538,6 +575,8 @@ from superfermion.bridge import (
 )
 from superfermion.serialization import to_qasm3, from_qasm3
 
+sf_circuit = sf.Circuit(2).h(0).cnot(0, 1)
+
 # Qiskit interop
 qiskit_circuit = to_qiskit(sf_circuit)
 sf_circuit = from_qiskit(qiskit_circuit)
@@ -546,9 +585,18 @@ sf_circuit = from_qiskit(qiskit_circuit)
 cirq_circuit = to_cirq(sf_circuit)
 sf_circuit = from_cirq(cirq_circuit)
 
-# PennyLane interop
-pl_circuit = to_pennylane(sf_circuit)
-sf_circuit = from_pennylane(pl_circuit)
+# PennyLane interop — to_pennylane() returns a qfunc; build a tape for the reverse
+import pennylane as qml
+dev = qml.device("default.qubit", wires=2)
+
+@qml.qnode(dev)
+def pl_qnode(x):
+    qml.RX(x, wires=0)
+    qml.CNOT(wires=[0, 1])
+
+pl_tape = qml.workflow.construct_tape(pl_qnode)(0.5)
+sf_circuit = from_pennylane(pl_tape)
+qfunc = to_pennylane(sf_circuit)
 
 # OpenQASM 2.0
 qasm_str = to_qasm(sf_circuit)
@@ -559,12 +607,13 @@ qasm3_str = sf_circuit.to_qasm3()
 sf_circuit = from_qasm3(qasm3_str)
 
 # Braket + IonQ export
-braket_task = to_braket(sf_circuit)
+braket_circuit = to_braket(sf_circuit)
 ionq_circuit = to_ionq(sf_circuit)
 
 # JSON round-trip
 json_str = sf_circuit.to_json()
 sf_circuit = sf.Circuit.from_json(json_str)
+print(sf_circuit.gate_count)
 ```
 
 ---
@@ -579,16 +628,24 @@ from superfermion.mitigation import (
     calibration_based_noise_model,
 )
 
+qc = sf.Circuit(2).h(0).cnot(0, 1)
+
 # Readout error correction
 result = sf.run(qc, device="cpu", shots=8192)
-corrected = readout_correction(result)
+corrected = readout_correction(result.counts)
+print(corrected)
 
 # Zero-noise extrapolation
-mitigated = zne(qc, noise_levels=[1.0, 2.0, 3.0], device="cpu")
+def energy(sv):
+    return sf.expval(sv, sf.PauliString("ZZ", coeff=1.0))
+
+mitigated = zne(qc, energy, scale_factors=[1, 2, 3])
+print(f"ZNE <ZZ> = {mitigated:.6f}")
 
 # Build noise model from calibration data
-noise_model = calibration_based_noise_model(backend_properties)
-result = sf.run(qc, method="density_matrix", noise_model=noise_model)
+noise_model = calibration_based_noise_model("ibm_like")
+result = sf.run(qc, method="density_matrix", noise_model=noise_model, shots=1000)
+print(result.counts)
 ```
 
 ---

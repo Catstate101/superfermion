@@ -40,23 +40,25 @@ from superfermion.qec import (
 ### Usage
 
 ```python
+import numpy as np
 from superfermion.qec import SurfaceCode2D, MWPMDecoder
 
 # Create a distance-3 surface code
 code = SurfaceCode2D(distance=3)
+print(f"Code parameters: data={code.n_data}, ancilla={code.n_ancilla}, distance={code.d}")
 
-# Get stabilizer generators
-stabilizers = code.stabilizers()
-print(f"Code parameters: n={code.n_qubits}, k={code.n_logical}, d={code.distance}")
+# Build the syndrome-extraction circuit (data + ancilla qubits)
+syndrome_circuit = code.build()
+print(f"Syndrome circuit qubits: {syndrome_circuit.n_qubits}")
 
-# Get the syndrome measurement circuit
-syndrome_circuit = code.syndrome_circuit()
+# Decode errors: decoders need the data-qubit count and the map of which
+# data qubits each syndrome (ancilla) qubit touches
+syndrome_qubit_map = [[i, (i + 1) % code.n_data] for i in range(code.n_ancilla)]
+decoder = MWPMDecoder(code.n_data, syndrome_qubit_map)
 
-# Decode errors
-decoder = MWPMDecoder(code)
-syndrome = [1, 0, 0, 1, 0, 1, 0, 0]  # example syndrome
+syndrome = np.zeros(code.n_ancilla, dtype=int)   # example syndrome (no error)
 correction = decoder.decode(syndrome)
-corrected_circuit = code.apply_correction(correction)
+print(f"Correction: {correction}")
 ```
 
 ## Decoders
@@ -71,20 +73,25 @@ corrected_circuit = code.apply_correction(correction)
 ### Decoder Comparison
 
 ```python
+import numpy as np
 from superfermion.qec import SurfaceCode2D, MWPMDecoder, UnionFindDecoder
 
 code = SurfaceCode2D(distance=5)
+syndrome_qubit_map = [[i, (i + 1) % code.n_data] for i in range(code.n_ancilla)]
 
 # MWPM — accurate, moderate speed
-mwpm = MWPMDecoder(code)
+mwpm = MWPMDecoder(code.n_data, syndrome_qubit_map)
 
 # Union-Find — fast, slightly lower threshold
-uf = UnionFindDecoder(code)
+uf = UnionFindDecoder(code.n_data, syndrome_qubit_map)
 
-# Both return a correction operator
-syndrome = code.random_error(p=0.01).syndrome()
+# Both return a list of (qubit_index, pauli_type) corrections
+syndrome = np.zeros(code.n_ancilla, dtype=int)
+syndrome[[0, 3]] = 1                    # example syndrome bits
 mwpm_correction = mwpm.decode(syndrome)
 uf_correction = uf.decode(syndrome)
+print(f"MWPM correction: {mwpm_correction}")
+print(f"UF correction:   {uf_correction}")
 ```
 
 ## QEC Manager
@@ -92,19 +99,21 @@ uf_correction = uf.decode(syndrome)
 The `QECManager` orchestrates the full QEC pipeline:
 
 ```python
-from superfermion.qec import QECManager, SurfaceCode2D, MWPMDecoder
+from superfermion.qec import QECManager
 
-code = SurfaceCode2D(distance=3)
-decoder = MWPMDecoder(code)
-manager = QECManager(code, decoder)
+manager = QECManager()
 
-# Simulate a noisy circuit with error correction
-noisy_circuit = manager.protect(my_logical_circuit, noise_level=0.01)
-result = manager.run(noisy_circuit, shots=1000)
+# Simulate the full logical-qubit lifecycle: encode → noise → syndrome → recovery
+result = manager.run_logical_lifecycle("surface_2d")
+print(f"Phase: {result['phase']}")
+print(f"Logical state: {result['logical_state']}")
+print(f"Syndrome detected: {result['syndrome_detected']}")
+print(f"Error corrected: {result['error_corrected']}")
 
-# Analyze logical error rate
-logical_errors = manager.logical_error_rate(num_rounds=100, p_phys=0.001)
-print(f"Logical error rate: {logical_errors:.2e}")
+# Simulate a fault-tolerant workflow
+workflow = manager.simulate_fault_tolerant_workflow("surface_2d")
+print(f"Code: {workflow['code']}, qubits: {workflow['qubits']}")
+print(f"Fidelity estimate: {workflow['fidelity_estimate']}")
 ```
 
 ## Rust Backend

@@ -43,7 +43,7 @@ qc = qc.rx(0.5, 0)                       # RX rotation
 qc = qc.ry(pi / 2, 0)                    # RY rotation
 qc = qc.rz(0.3, 0)                       # RZ rotation
 qc = qc.p(pi / 4, 0)                     # Phase gate
-qc = qc.u(theta=0.5, phi=0.3, lam=0.2, q=0)  # Arbitrary U(2)
+qc = qc.u(0.5, 0.3, 0.2, 0)              # Arbitrary U(2) — u(theta, phi, lam, q)
 ```
 
 ### Two-Qubit
@@ -63,11 +63,11 @@ qc = qc.ecr(0, 1)         # Echoed Cross-Resonance
 
 ```python
 qc = sf.Circuit(2)
-qc = qc.cp(theta=0.5, c=0, t=1)            # Controlled phase
-qc = qc.cu(theta=0.5, phi=0.3, lam=0.2, gamma=0.1, c=0, t=1)  # Controlled U
-qc = qc.rzz(theta=0.5, q0=0, q1=1)         # ZZ rotation
-qc = qc.rxx(theta=0.3, q0=0, q1=1)         # XX rotation
-qc = qc.ryy(theta=0.4, q0=0, q1=1)         # YY rotation
+qc = qc.cp(0.5, 0, 1)             # Controlled phase — cp(phi, control, target)
+qc = qc.cu(0.5, 0.3, 0.2, 0, 1)  # Controlled U3 — cu(theta, phi, lam, c, t)
+qc = qc.rzz(0.5, 0, 1)           # ZZ rotation
+qc = qc.rxx(0.3, 0, 1)           # XX rotation
+qc = qc.ryy(0.4, 0, 1)           # YY rotation
 ```
 
 ### Three-Qubit
@@ -87,11 +87,11 @@ import numpy as np
 
 # Custom 1Q unitary
 U1 = np.array([[1, 0], [0, 1j]])  # S gate matrix
-qc = sf.Circuit(1).unitary(U1, 0)
+qc = sf.Circuit(1).unitary(U1, [0])
 
 # Custom 2Q unitary (4x4 matrix)
 U2 = np.eye(4)
-qc = sf.Circuit(2).unitary(U2, 0, 1)
+qc = sf.Circuit(2).unitary(U2, [0, 1])
 ```
 
 ### Special Operations
@@ -144,6 +144,11 @@ print(qc.count_ops())    # {'h': 1, 'cnot': 2, 'measure': 3}
 ## Visualization
 
 ```python
+import sys
+
+# Unicode diagrams on Windows consoles: reconfigure stdout first
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 print(qc.draw())
 # q0: ─── H ─── ● ─────── M ───
 # q1: ───────── X ─── ● ─ M ───
@@ -156,9 +161,9 @@ print(qc.draw())
 # OpenQASM 3.0
 print(qc.to_qasm3())
 
-# Gate list (for serialization)
+# Gate list (for serialization) — names are uppercase, no params key when empty
 gates = qc.to_gate_list()
-# [{"name": "h", "qubits": [0], "params": []}, ...]
+# [{"name": "H", "qubits": [0]}, ...]
 
 # JSON round-trip
 json_str = qc.to_json()
@@ -184,7 +189,7 @@ gates = [
 ]
 qc = sf.Circuit(2)
 for g in gates:
-    qc = qc.__getattr__(g["name"])(*g["params"], *g["qubits"])
+    qc = getattr(qc, g["name"])(*g["params"], *g["qubits"])
 ```
 
 ## Combinatorial Helpers

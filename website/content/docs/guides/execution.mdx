@@ -120,26 +120,33 @@ print(state.probabilities())    # Outcome probability distribution
 # Expectation values
 obs = [([3, 3], 1.0, 0.0)]    # ZZ observable
 energy = state.expectation(obs)
+print(energy)                  # 1.0
 
-# Gradients
-dag = qc.to_ir()
-params = {"theta": 0.5}
-grads = state.grad(obs, dag, params)
+# Gradients — on a parameterized ansatz
+ansatz = sf.Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+state_p = sf.simulate(ansatz, params={"t": 0.5})
+dag = ansatz.to_ir()  # keep parameters symbolic — .bind() would erase them
+params = {"t": 0.5}
+grads = state_p.grad(obs, dag, params)
+print(grads)                   # {'t': 0.0}
 
 # Operations on states
 print(state.fidelity(state))         # 1.0 (self-fidelity)
 rdm = state.partial_trace([0])       # Reduced density matrix
-qfim = state.qfim(dag, params)      # Quantum Fisher Information Matrix
+qfim = state_p.qfim(dag, params)     # Quantum Fisher Information Matrix
+print(qfim)
 
 # Create from numpy
 import numpy as np
 vec = np.array([1, 0, 0, 0], dtype=complex)
-state2 = sf.State.from_numpy(vec)
+state2 = sf.State.from_numpy(vec, n_qubits=2)
+print(state2.numpy())
 ```
 
 ## `RunResult` — execution result
 
 ```python
+obs = [([3, 3], 1.0, 0.0)]    # ZZ observable
 result = sf.run(qc, device="cpu", shots=8192)
 
 # Primary outputs
@@ -148,29 +155,31 @@ print(result.state)            # sf.State
 print(result.shots)            # 8192
 
 # Derived
-print(result.probabilities)    # {'00': 0.5, '11': 0.5}
+print(result.get_probabilities())    # {'00': 0.5, '11': 0.5}
 print(result.statevector)      # ndarray
 print(result.circuit)          # original circuit
 print(result.metadata)         # execution metadata
 
 # Methods
-energy = result.expectation(obs)       # expectation from counts
-grads = result.grad(obs, dag, params)  # gradient from state
-result.plot(kind="histogram")          # plot results
+energy = result.expectation(obs)       # expectation from state
+print(energy)
+result.plot()                          # histogram plot (saves to file)
 ```
 
 ## Noise Models
 
 ```python
 noise = (sf.NoiseModel()
-    .add_depolarizing(rate=0.001)           # symmetric depolarizing
-    .add_amplitude_damping(gamma=0.002)     # T1 relaxation
-    .add_phase_damping(gamma=0.001)         # pure dephasing
-    .add_thermal_relaxation(                # combined T1 + T2
-        t1=50e-6, t2=70e-6, gate_time=35e-9
-    ))
+    .add_depolarizing(0.001)           # symmetric depolarizing
+    .add_amplitude_damping(0.002)      # T1 relaxation
+    .add_phase_damping(0.001)          # pure dephasing
+    .add_bit_flip(0.0005)              # bit flip
+    .add_two_qubit_depolarizing(0.001) # correlated two-qubit noise
+)
 
+qc = sf.Circuit(1).x(0)
 result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
+print(f"purity = {result.metadata['purity']:.4f}")
 ```
 
 ## Auto-Bind Parameters
@@ -191,6 +200,8 @@ from superfermion import MethodError
 try:
     # T gate on a stabilizer circuit
     sf.run(sf.Circuit(1).t(0), method="stabilizer")
-except MethodError as e:
+except RuntimeError as e:
+    # Non-Clifford gates cannot be simulated with the stabilizer method.
+    # (Other backends may raise superfermion.MethodError instead.)
     print(f"Method not applicable: {e}")
 ```

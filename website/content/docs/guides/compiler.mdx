@@ -45,12 +45,13 @@ compiled = sf.compile(qc, level=2, target=ibm_target)
 Adjacent inverse gates cancel: `HH → ∅`, `CNOT CNOT → ∅`, `CZ CZ → ∅`.
 
 ```python
-from superfermion.compiler import PassManager
-from superfermion.compiler.passes import GateCancellationPass
+import superfermion as sf
 
-pm = PassManager([GateCancellationPass()])
+# Gate cancellation is part of level-1 optimization
 qc = sf.Circuit(2).h(0).h(0).cnot(0, 1).cnot(0, 1)
-result = pm.run(qc)
+print(f"Before: {qc.gate_count} gates")
+
+result = sf.compile(qc, level=1)
 print(f"After cancellation: {result.gate_count} gates")  # 0
 ```
 
@@ -124,8 +125,8 @@ linear = HardwareSpec(
     coupling_map=[(i, i+1) for i in range(4)] + [(i+1, i) for i in range(4)],
 )
 
-# Grid topology (heavy-hex, like IBM)
-qc = sf.Circuit(10).h(0).cnot(0, 5).cnot(1, 8).swap(3, 7)
+# Route onto the linear topology
+qc = sf.Circuit(5).h(0).cnot(0, 4).cnot(1, 3).swap(2, 3)
 compiled = sf.compile(qc, level=2, target=linear)
 print(f"SWAPs inserted for routing: {compiled.gate_count - qc.gate_count}")
 ```
@@ -133,21 +134,24 @@ print(f"SWAPs inserted for routing: {compiled.gate_count - qc.gate_count}")
 ## Built-in Device Specifications
 
 ```python
-from superfermion.compiler.specs import HardwareSpec
+from superfermion.compiler.specs import get_spec, HardwareSpec
 
-# IBM-like heavy-hex
-ibm = HardwareSpec.ibm_like(n_qubits=27)
+# IBM Eagle (127 qubits, heavy-hex)
+ibm = get_spec("ibm_eagle")
+print(f"ibm_eagle: {ibm.n_qubits} qubits, {len(ibm.coupling_map)} couplings")
 
-# Rigetti-like grid
-rigetti = HardwareSpec.rigetti_like(n_qubits=16)
+# Rigetti Ankaa (84 qubits, grid)
+rigetti = get_spec("rigetti_ankaa")
+print(f"rigetti_ankaa: {rigetti.n_qubits} qubits, {len(rigetti.coupling_map)} couplings")
 
 # Custom topology
 custom = HardwareSpec(
     name="my_chip",
-    n_qubits=10,
+    n_qubits=4,
     native_gates=["rz", "sx", "x", "cz", "iswap"],
-    coupling_map=[...],
+    coupling_map=[(0, 1), (1, 2), (2, 3)],
 )
+print(f"custom: {custom.n_qubits} qubits, {len(custom.coupling_map)} couplings")
 ```
 
 ## Noise Model
@@ -157,19 +161,25 @@ Attach a noise model to simulate realistic hardware:
 ```python
 import superfermion as sf
 
+qc = sf.Circuit(1).x(0)
+
 noise = sf.NoiseModel() \
-    .add_depolarizing(rate=0.001) \
-    .add_amplitude_damping(gamma=0.002) \
-    .add_thermal_relaxation(t1=50e-6, t2=70e-6, gate_time=35e-9)
+    .add_depolarizing(0.001) \
+    .add_amplitude_damping(0.002) \
+    .add_phase_damping(0.001)
 
 result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
+print(f"purity = {result.metadata['purity']:.4f}")
 ```
 
 ## Auto-Compilation via `sf.run()`
 
 ```python
+qc = sf.Circuit(5).h(0).cnot(0, 1)
+
 # Let sf.run() handle compilation automatically
-result = sf.run(qc, target="heavy_hex_127", shots=4096)
+result = sf.run(qc, target="linear_5", shots=4096)
+print(result.counts)  # {'00000': ~2048, '00011': ~2048}
 ```
 
 Internally, `sf.run()` with a `target=` string resolves the device spec, compiles the circuit at level 2, and executes.

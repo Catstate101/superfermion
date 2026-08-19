@@ -34,8 +34,8 @@ theta = sf.param("theta")
 phi = sf.param("phi")
 circuit = sf.Circuit(2).ry(theta, 0).ry(phi, 1).cnot(0, 1).rz(theta, 1)
 
-# Define observable
-obs = [([3, 3], 1.0, 0.0)]  # ZZ
+# Define observable (pass a PauliString — Flax converts plain lists to tuples)
+obs = sf.PauliString("ZZ", coeff=1.0)
 
 # Create layer
 layer = QuantumLayer(circuit, obs, device="cpu")
@@ -65,19 +65,18 @@ import superfermion as sf
 
 # Build circuit and observable
 circuit = sf.Circuit(2).ry(sf.param("t0"), 0).ry(sf.param("t1"), 1).cnot(0, 1)
-obs = [([3, 3], 1.0, 0.0)]
+obs = [([3, 3], 1.0, 0.0)]  # ZZ
 
-# Create layer
+# Create layer — parameters live inside the module (layer.weights)
 layer = TorchQuantumLayer(circuit, obs, device="cpu")
 
 # Forward pass
-params = torch.tensor([0.5, 1.2], requires_grad=True)
-output = layer(params)
+output = layer()
 print(f"Output: {output.item():.6f}")
 
 # Backward pass (sf.State.grad via autograd.Function)
 output.backward()
-print(f"Gradients: {params.grad}")
+print(f"Gradients: {layer.weights.grad}")
 ```
 
 PyTorch integration uses `torch.autograd.Function`. The backward pass calls `sf.State.grad()` for exact gradients.
@@ -91,36 +90,50 @@ import superfermion as sf
 
 # Build circuit and observable
 circuit = sf.Circuit(2).ry(sf.param("t0"), 0).ry(sf.param("t1"), 1).cnot(0, 1)
-obs = [([3, 3], 1.0, 0.0)]
+obs = [([3, 3], 1.0, 0.0)]  # ZZ
 
-# Create layer
+# Create layer — weights live inside the layer (layer.weights_var)
 layer = TFQuantumLayer(circuit, obs, device="cpu")
 
-# Forward + backward (tf.custom_gradient routes to sf.State.grad)
-params = tf.Variable([0.5, 1.2], dtype=tf.float64)
-with tf.GradientTape() as tape:
-    output = layer(params)
-    loss = output  # or any function of output
+# Forward pass
+output = layer()
+print(f"Output: {output.numpy():.6f}")
 
-grads = tape.gradient(loss, params)
+# Backward pass (tf.custom_gradient routes to sf.State.grad)
+with tf.GradientTape() as tape:
+    loss = layer()
+
+grads = tape.gradient(loss, layer.weights_var)
 print(f"Gradients: {grads.numpy()}")
 ```
 
-TensorFlow integration uses `tf.custom_gradient`. Note: TensorFlow support requires Python < 3.13 and `tensorflow>=2.15`.
+TensorFlow integration uses `tf.custom_gradient` — the backward pass calls `sf.State.grad()` for exact gradients.
 
 ## Batch Evaluation
 
 All three layers support batched parameter evaluation:
 
 ```python
-# PyTorch batch
-params_batch = torch.randn(32, 4, requires_grad=True)
-outputs = torch.stack([layer(p) for p in params_batch])
-
-# JAX vmap
 import jax
-batched_apply = jax.vmap(lambda p: layer.apply(p).squeeze())
-outputs = batched_apply(params_batch)
+import torch
+import superfermion as sf
+from superfermion.nn.quantum_layer import QuantumLayer
+from superfermion.nn.torch_layer import TorchQuantumLayer
+
+circuit = sf.Circuit(2).ry(sf.param("t0"), 0).ry(sf.param("t1"), 1).cnot(0, 1)
+obs = sf.PauliString("ZZ", coeff=1.0)
+
+# JAX/Flax: evaluate a batch of weight vectors
+flax_layer = QuantumLayer(circuit, obs, device="cpu")
+params = flax_layer.init(jax.random.PRNGKey(0))
+weights_batch = [params["params"]["weights"], params["params"]["weights"] * 2]
+outputs = [flax_layer.apply({"params": {"weights": w}}) for w in weights_batch]
+print(f"JAX batch outputs: {outputs}")
+
+# PyTorch: stack repeated evaluations (weights live inside the module)
+torch_layer = TorchQuantumLayer(circuit, obs, device="cpu")
+outputs = torch.stack([torch_layer() for _ in range(4)])
+print(f"PyTorch batch outputs: {outputs}")
 ```
 
 ## Gradient Methods
@@ -152,7 +165,7 @@ for step in range(100):
     state = sf.simulate(ansatz, params=params)
     energy = state.expectation(obs)
 
-    dag = ansatz.bind(params).to_ir()
+    dag = ansatz.to_ir()  # keep parameters symbolic — .bind() would erase them
     grads = state.grad(obs, dag, params)
 
     for k in params:

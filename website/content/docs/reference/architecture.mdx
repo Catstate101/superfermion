@@ -120,11 +120,13 @@ All methods dispatch to Rust. Python never touches raw state data.
 Two entry points for circuit execution:
 
 ```python
-result = sf.run(circuit, device="cpu", method="statevector", shots=1024)
-# result.counts, result.state, result.metadata
+qc = sf.Circuit(2).h(0).cx(0, 1)
 
-state = sf.simulate(circuit, device="cpu", method="statevector")
-# Returns sf.State directly (shots=0 implied)
+result = sf.run(qc, device="cpu", method="statevector", shots=1024)
+print(result.counts)  # result.counts, result.state, result.metadata
+
+state = sf.simulate(qc, device="cpu", method="statevector")
+print(state.numpy())  # Returns sf.State directly (shots=0 implied)
 ```
 
 `sf.run()` returns a `RunResult` with counts, state, and metadata. `sf.simulate()` is shorthand for zero-shot execution that returns the `sf.State` directly.

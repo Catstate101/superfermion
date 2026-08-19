@@ -8,9 +8,16 @@ description: "5 gradient methods, VQE optimization, QAOA, and custom training lo
 **Fast path** — `sf.State.grad()` in Rust:
 
 ```python
+import superfermion as sf
+
+ansatz = sf.Circuit(2).ry(sf.param("t0"), 0).ry(sf.param("t1"), 1).cnot(0, 1)
+obs = [([3, 3], 1.0, 0.0)]          # ZZ observable
+params = {"t0": 0.5, "t1": 1.2}
+
 state = sf.simulate(ansatz, params=params)
-dag = ansatz.bind(params).to_ir()
+dag = ansatz.to_ir()  # keep parameters symbolic — .bind() would erase them
 grads = state.grad(obs, dag, params)
+print(grads)
 ```
 
 **Framework path** — through PyTorch, JAX, or TensorFlow autograd (see [ML Frameworks](/docs/guides/ml-frameworks)).
@@ -31,8 +38,12 @@ One forward + one backward pass regardless of parameter count. The default — f
 
 ```python
 from superfermion.qml.gradient.adjoint import adjoint_grad_vector
+import numpy as np
 
-grads = adjoint_grad_vector(ansatz, params, obs)
+# Observable: str / dict / SparsePauliOp / Hamiltonian all work
+H = sf.Hamiltonian([sf.PauliString("ZZ", coeff=1.0)])
+grads = adjoint_grad_vector(ansatz, H, ["t0", "t1"], np.array([0.5, 1.2]))
+print(grads)
 ```
 
 Up to **800x faster** than parameter-shift for deep circuits (UCCSD, deep SU(2)).
@@ -44,7 +55,8 @@ Evaluates the circuit at shifted parameter values. O(N) scaling but exact.
 ```python
 from superfermion.qml.gradient.parameter_shift import parameter_shift_grad_vector
 
-grads = parameter_shift_grad_vector(ansatz, params, obs)
+grads = parameter_shift_grad_vector(ansatz, H, ["t0", "t1"], np.array([0.5, 1.2]))
+print(grads)
 ```
 
 ### SPSA (Simultaneous Perturbation Stochastic Approximation)
@@ -52,9 +64,15 @@ grads = parameter_shift_grad_vector(ansatz, params, obs)
 Stochastic gradient estimation. O(1) scaling, noise-robust.
 
 ```python
-from superfermion.qml.gradient.spsa import spsa_gradient
+from superfermion.qml.gradient.spsa import spsa_grad
+import numpy as np
 
-grads = spsa_gradient(ansatz, params, obs, num_samples=100)
+def energy_fn(p):
+    state = sf.simulate(ansatz, params=dict(zip(["t0", "t1"], p)))
+    return state.expectation(obs)
+
+grads = spsa_grad(energy_fn, np.array([0.5, 1.2]), seed=42, delta=0.01)
+print(grads)
 ```
 
 ### Quantum Natural Gradient
@@ -62,9 +80,12 @@ grads = spsa_gradient(ansatz, params, obs, num_samples=100)
 Uses the Quantum Fisher Information Matrix for metric-aware optimization. Converges in fewer iterations.
 
 ```python
-from superfermion.qml.gradient.qng import quantum_natural_gradient
+from superfermion.qml.gradient.qng import qng_step
 
-grads = quantum_natural_gradient(ansatz, params, obs)
+state = sf.simulate(ansatz, params=params)
+dag = ansatz.to_ir()   # unbound DAG for the QFIM metric
+new_params = qng_step(state, dag, obs, ["t0", "t1"], params, learning_rate=0.1)
+print(new_params)
 ```
 
 ### Riemannian Gradient
@@ -73,8 +94,16 @@ Natural gradient on the Riemannian manifold of quantum states.
 
 ```python
 from superfermion.qml.gradient.riemannian import riemannian_gradient
+import numpy as np
 
-grads = riemannian_gradient(ansatz, params, obs)
+state = sf.simulate(ansatz, params=params)
+dag = ansatz.to_ir()
+metric = state.qfim(dag, params)                       # QFIM as metric tensor
+
+grad = adjoint_grad_vector(ansatz, H, ["t0", "t1"], np.array([params["t0"], params["t1"]]))
+
+natural_grad = riemannian_gradient(grad, metric)
+print(natural_grad)
 ```
 
 ## VQE — Variational Quantum Eigensolver
@@ -99,14 +128,18 @@ ansatz = (sf.Circuit(2)
     .ry(sf.param("t2"), 0).ry(sf.param("t3"), 1))
 
 params = {f"t{i}": np.random.uniform(0, np.pi) for i in range(4)}
-obs = H.to_sparse_list()
+obs = [([0, 0], -1.0523, 0.0),   # II
+       ([0, 3], 0.3979, 0.0),    # IZ
+       ([3, 0], -0.3979, 0.0),   # ZI
+       ([3, 3], -0.0112, 0.0),   # ZZ
+       ([1, 1], 0.1809, 0.0)]    # XX
 lr = 0.1
 
 for step in range(100):
     state = sf.simulate(ansatz, params=params)
     energy = state.expectation(obs)
 
-    dag = ansatz.bind(params).to_ir()
+    dag = ansatz.to_ir()  # keep parameters symbolic — .bind() would erase them
     grads = state.grad(obs, dag, params)
 
     for k in params:
@@ -123,14 +156,9 @@ print(f"Final energy: {energy:.8f}")
 ```python
 from superfermion.algorithms.variational import VQE
 
-vqe = VQE(ansatz, obs)
-result = vqe.optimize(
-    init_params=params,
-    max_iterations=100,
-    method="L-BFGS-B",    # scipy optimizer
-    grad_method="adjoint",
-)
-print(f"Energy: {result.energy:.8f}")
+vqe = VQE(ansatz, H)
+result = vqe.minimize(iterations=100)
+print(f"Energy: {result.optimal_value:.8f}")
 print(f"Optimal params: {result.optimal_params}")
 ```
 
@@ -140,12 +168,13 @@ print(f"Optimal params: {result.optimal_params}")
 from superfermion.algorithms.variational import QAOA
 import networkx as nx
 
-# MaxCut on a random graph
+# MaxCut on a random 8-node graph
 G = nx.random_regular_graph(3, 8)
 
-qaoa = QAOA(G, p=3)  # p = number of layers
-result = qaoa.optimize(max_iterations=100)
-print(f"MaxCut approximation ratio: {result.energy / nx.maxcut_value(G):.4f}")
+qaoa = QAOA(n_qubits=8, edges=list(G.edges()), p_layers=2)
+result = qaoa.minimize(iterations=100)
+print(f"MaxCut value: {result.metadata['max_cut_value']}")
+print(f"Best bitstring: {result.metadata['best_bitstring']}")
 ```
 
 ## Custom Training Loop with SciPy
@@ -165,9 +194,11 @@ print(f"Optimal: {result.fun:.8f} at {result.x}")
 ## Quantum Fisher Information Matrix
 
 ```python
+import numpy as np
+
 state = sf.simulate(ansatz, params=params)
-dag = ansatz.bind(params).to_ir()
-qfim = state.qfim(dag, params)  # n_params × n_params matrix
+dag = ansatz.to_ir()               # unbound DAG — needed for QFIM
+qfim = state.qfim(dag, params)     # n_params × n_params matrix
 
 print(qfim.shape)
 print(f"Condition number: {np.linalg.cond(qfim):.2f}")
