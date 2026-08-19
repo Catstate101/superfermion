@@ -98,7 +98,11 @@ class TopologyFactory:
 
 def _build_edges(shape: str, n: int, **kwargs) -> List[Tuple[int, int]]:
     try:
-        import _sf_core
+        # NOTE: must import through the package - the bare ``import _sf_core``
+        # silently fails for wheel installs (ImportError swallowed below) and
+        # heavy_hex has no fallback, yielding an EMPTY coupling map that (a)
+        # makes SF compile without routing and (b) crashes Qiskit transpile.
+        from superfermion import _sf_core
         CM = _sf_core.CouplingMap
         if shape == "heavy_hex":
             return CM.heavy_hex(n).edges()
