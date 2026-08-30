@@ -46,7 +46,9 @@ class TestCompile:
         if original.probabilities and optimized.probabilities:
             assert abs(original.probabilities.get("00", 0) - 0.5) < 0.01
             padded_00 = format(0, f"0{compiled.n_qubits}b")
-            padded_11 = "1" * 2 + "0" * (compiled.n_qubits - 2)
+            # Little-endian: qubit q lives at bit position q, so the Bell
+            # |11> part on (q0, q1) is index 3 -> rightmost "11".
+            padded_11 = format(3, f"0{compiled.n_qubits}b")
             assert abs(optimized.probabilities.get(padded_00, 0) - 0.5) < 0.01
             assert abs(optimized.probabilities.get(padded_11, 0) - 0.5) < 0.01
 

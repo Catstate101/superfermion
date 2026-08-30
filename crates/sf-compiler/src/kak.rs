@@ -420,21 +420,22 @@ fn decompose_u3(u: &Matrix2<Complex64>) -> (f64, f64, f64) {
     let theta = 2.0 * abs_u00.acos();
 
     if theta < TOLERANCE {
-        let phase = u11.arg();
-        if phase.abs() < TOLERANCE {
+        // Near-identity: sin(theta/2) ~ 0 so phi is unconstrained; fix phi = 0.
+        let lambda = u11.arg() - u00.arg();
+        if lambda.abs() < TOLERANCE {
             return (0.0, 0.0, 0.0);
         }
-        return (0.0, 0.0, phase);
+        return (0.0, 0.0, lambda);
     }
 
-    if (theta - PI).abs() < TOLERANCE {
-        let phi = u10.arg();
-        let lambda = -u01.arg();
-        return (PI, phi, lambda);
-    }
-
-    let phi = u10.arg() - u00.arg();
-    let lambda = -(u01.arg() - u00.arg());
+    // U(theta,phi,lambda) = [[c, -e^{i*lambda}s], [e^{i*phi}s, e^{i*(phi+lambda)}c]]
+    // with c = cos(theta/2), s = sin(theta/2). Writing u00 = e^{i*alpha}*c:
+    //   phi = arg(u10) - alpha
+    //   lambda = arg(u01) - alpha - PI  (the -PI absorbs the minus sign on u01)
+    // At theta = PI, arg(0) = 0 so alpha vanishes and the formula stays exact.
+    let alpha = u00.arg();
+    let phi = u10.arg() - alpha;
+    let lambda = u01.arg() - alpha - PI;
 
     (theta, phi, lambda)
 }

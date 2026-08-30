@@ -36,23 +36,21 @@ impl GateFusionPass {
         let theta = 2.0 * abs_u00.acos();
 
         if theta < 1e-6 {
-            // Near-identity: theta~0, phi+lambda = arg(u11)
-            let phase = u11.arg();
-            if phase.abs() < 1e-6 {
+            // Near-identity: theta~0, sin(theta/2)~0 so phi is unconstrained; fix phi = 0.
+            let lambda = u11.arg() - u00.arg();
+            if lambda.abs() < 1e-6 {
                 return (0.0, 0.0, 0.0);
             }
-            return (0.0, 0.0, phase);
+            return (0.0, 0.0, lambda);
         }
 
-        if (theta - std::f64::consts::PI).abs() < 1e-6 {
-            // Near X-like: theta~pi
-            let phi = u10.arg();
-            let lambda = -u01.arg();
-            return (std::f64::consts::PI, phi, lambda);
-        }
-
-        let phi = u10.arg() - u00.arg();
-        let lambda = -(u01.arg() - u00.arg());
+        // U(t,p,l) = [[c, -e^{il}s], [e^{ip}s, e^{i(p+l)}c]] with c = cos(t/2), s = sin(t/2).
+        // Writing u00 = e^{i*alpha}*c: phi = arg(u10) - alpha and
+        // lambda = arg(u01) - alpha - pi (the -pi absorbs the minus sign on u01).
+        // At theta ~ pi, alpha = arg(0) = 0 and the formula remains exact.
+        let alpha = u00.arg();
+        let phi = u10.arg() - alpha;
+        let lambda = u01.arg() - alpha - std::f64::consts::PI;
 
         (theta, phi, lambda)
     }
