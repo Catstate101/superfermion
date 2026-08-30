@@ -565,7 +565,7 @@ impl MPSState {
                 let t = &self.tensors[idx];
                 let (d_l_rows, d_r) = t.shape();
                 let d_l = d_l_rows / 2;
-                let bit = (i >> (self.n_qubits - 1 - idx)) & 1;
+                let bit = (i >> idx) & 1;
 
                 let mut next_vec = nalgebra::DVector::zeros(d_r);
                 for r in 0..d_r {
@@ -652,7 +652,10 @@ impl MPSState {
                 }
                 left_vec = next_vec;
             }
-            *counts.entry(bitstring).or_insert(0) += 1;
+            // Emit bitstrings q0-last (qubit 0 = rightmost char), matching the
+            // statevector backend's sample() convention.
+            let key: String = bitstring.chars().rev().collect();
+            *counts.entry(key).or_insert(0) += 1;
         }
         counts
     }
@@ -665,7 +668,17 @@ impl MPSState {
     /// because the inner per-site contraction is in Rust without Python
     /// per-site overhead.
     pub fn pauli_expval(&self, pauli: &[u8]) -> Complex64 {
-        assert_eq!(pauli.len(), self.n_qubits, "pauli string length mismatch");
+        assert!(
+            pauli.len() <= self.n_qubits,
+            "pauli string length {} exceeds n_qubits {}",
+            pauli.len(),
+            self.n_qubits
+        );
+        // Prefix semantics (statevector-compatible): a shorter Pauli string
+        // acts on the first len(pauli) qubits; the remaining sites are I.
+        let mut pauli_full = vec![0u8; self.n_qubits];
+        pauli_full[..pauli.len()].copy_from_slice(pauli);
+        let pauli = pauli_full.as_slice();
 
         // Carry a complex matrix L of shape (D_top, D_bot) where:
         //   D_top = bond at top of bra

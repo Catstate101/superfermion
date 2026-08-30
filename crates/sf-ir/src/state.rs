@@ -69,7 +69,6 @@ impl StatevectorState {
     }
 
     fn compute_expval(&self, observable: &[PauliTerm]) -> f64 {
-        let n = self.num_qubits;
         let dim = self.data.len();
         let mut total = Complex64::new(0.0, 0.0);
 
@@ -80,7 +79,8 @@ impl StatevectorState {
                 let mut target_idx = i;
 
                 for (q, &pauli_op) in term.paulis.iter().enumerate() {
-                    let bit_pos = if q < n { n - 1 - q } else { q };
+                    // Qubit q lives at bit position q (little-endian statevector).
+                    let bit_pos = q;
                     match pauli_op {
                         1 => {
                             target_idx ^= 1 << bit_pos;
@@ -159,7 +159,7 @@ impl QuantumStateImpl for StatevectorState {
         dag: &QuantumDAG,
         param_values: &HashMap<String, f64>,
     ) -> Result<Vec<f64>, MethodError> {
-        let result = adjoint_grad(dag, observable, param_values);
+        let result = adjoint_grad(dag, observable, param_values)?;
         Ok(result.gradients)
     }
 
@@ -368,7 +368,8 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
                 let mut target_idx = i;
 
                 for (q, &pauli_op) in term.paulis.iter().enumerate() {
-                    let bit_pos = if q < n { n - 1 - q } else { q };
+                    // Qubit q lives at bit position q (little-endian statevector).
+                    let bit_pos = q;
                     match pauli_op {
                         1 => {
                             target_idx ^= 1 << bit_pos;
@@ -726,17 +727,17 @@ impl QuantumStateImpl for StabilizerStateWrapper {
                 if q >= n {
                     break;
                 }
-                let bit_pos = n - 1 - q;
+                // Tableau qubit index q corresponds to qubit q.
                 match p {
                     1 => {
-                        px[bit_pos] = 1;
+                        px[q] = 1;
                     } // X
                     2 => {
-                        px[bit_pos] = 1;
-                        pz[bit_pos] = 1;
+                        px[q] = 1;
+                        pz[q] = 1;
                     } // Y = iXZ
                     3 => {
-                        pz[bit_pos] = 1;
+                        pz[q] = 1;
                     } // Z
                     _ => {}
                 }

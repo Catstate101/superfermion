@@ -195,7 +195,8 @@ def _estimate_expval_from_counts(
             for q, p in enumerate(paulis):
                 if p in (1, 2, 3):  # X, Y, Z all flip parity
                     if q < n:
-                        parity ^= int(bitstring[q])
+                        # bitstrings are q0-last: qubit q is bit n-1-q
+                        parity ^= int(bitstring[n - 1 - q])
             eigenvalue = 1.0 - 2.0 * parity
             term_val += eigenvalue * count
         result += coef_re * term_val / total_shots

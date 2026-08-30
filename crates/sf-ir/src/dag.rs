@@ -460,15 +460,18 @@ impl QuantumDAG {
         if is_identity_perm {
             return raw;
         }
-        // Un-permute: sample() returns bitstrings in physical-site order,
-        // but callers expect virtual-qubit order.
+        // Un-permute: sample() returns bitstrings q0-last in physical-site
+        // order (char j = physical site n-1-j).  Map each char to its virtual
+        // qubit and emit q0-last in virtual-qubit order.
         let mut out = std::collections::HashMap::new();
         for (phys_bits, count) in raw {
             let chars: Vec<u8> = phys_bits.bytes().collect();
             let mut virt = vec![b'0'; self.n_qubits];
-            for (phys, &ch) in chars.iter().enumerate() {
+            for (j, &ch) in chars.iter().enumerate() {
+                let phys = self.n_qubits - 1 - j;
                 virt[state.perm_inv[phys]] = ch;
             }
+            virt.reverse();
             let key = String::from_utf8(virt).unwrap();
             *out.entry(key).or_insert(0) += count;
         }

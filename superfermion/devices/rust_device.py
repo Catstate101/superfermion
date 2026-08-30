@@ -98,6 +98,7 @@ class RustDevice:
             counts = dag.simulate_and_sample(shots, seed)
             return RunResult(
                 counts=counts,
+                probabilities={k: v / shots for k, v in counts.items()},
                 state=None,
                 statevector=None,
                 shots=shots,
@@ -121,8 +122,15 @@ class RustDevice:
         else:
             counts = {}
 
+        probabilities = {
+            format(i, f"0{n_qubits}b"): float(p)
+            for i, p in enumerate(np.abs(final_state) ** 2)
+            if p > 1e-15
+        }
+
         return RunResult(
             counts=counts,
+            probabilities=probabilities,
             state=state,
             statevector=final_state,
             shots=shots,
@@ -149,13 +157,32 @@ class RustDevice:
 
         sv = None
         if shots == 0:
+            if circuit.n_qubits > 26:
+                raise MemoryError(
+                    "MPS simulation with shots=0 densifies the state into a full "
+                    f"2^{circuit.n_qubits}-amplitude statevector "
+                    f"(≈ {2 ** circuit.n_qubits * 16 / 2**30:.1f} GiB). "
+                    "Use shots>0 to sample directly from the tensor network instead."
+                )
             try:
                 sv = state.numpy()
             except Exception:
                 pass
 
+        if shots > 0:
+            probabilities = {k: v / shots for k, v in counts.items()}
+        elif sv is not None:
+            probabilities = {
+                format(i, f"0{circuit.n_qubits}b"): float(p)
+                for i, p in enumerate(np.abs(sv) ** 2)
+                if p > 1e-15
+            }
+        else:
+            probabilities = {}
+
         return RunResult(
             counts=counts,
+            probabilities=probabilities,
             state=state,
             statevector=sv,
             shots=shots,
@@ -196,6 +223,10 @@ class RustDevice:
 
         probs = _dm_to_probs(rho)
         purity = float(np.real(np.trace(rho @ rho)))
+        probabilities = {
+            format(i, f'0{n}b'): float(p)
+            for i, p in enumerate(probs) if p > 1e-12
+        }
 
         counts: Dict[str, int] = {}
         if shots > 0:
@@ -205,6 +236,7 @@ class RustDevice:
 
         return RunResult(
             counts=counts,
+            probabilities=probabilities,
             state=state,
             statevector=None,
             shots=shots,
@@ -215,10 +247,7 @@ class RustDevice:
                 "purity": purity,
                 "density_matrix": rho,
                 "n_qubits": n,
-                "probabilities": {
-                    format(i, f'0{n}b'): float(p)
-                    for i, p in enumerate(probs) if p > 1e-12
-                },
+                "probabilities": probabilities,
             },
         )
 
@@ -242,6 +271,7 @@ class RustDevice:
 
         return RunResult(
             counts=counts,
+            probabilities={k: v / shots for k, v in counts.items()} if shots > 0 else {},
             state=state,
             statevector=None,
             shots=shots,
