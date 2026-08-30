@@ -13,6 +13,7 @@
 
 use crate::dag::{QuantumDAG, QuantumOp};
 use crate::ops::{OpType, Parameter};
+use crate::state::MethodError;
 use num_complex::Complex64;
 
 /// A Pauli term in an observable: coefficient * pauli_string.
@@ -212,11 +213,14 @@ impl GateOp {
 ///
 /// Memory-efficient variant: O(2^n) memory, 2M gate applications.
 /// No intermediate state caching — recomputes from |0> during backward pass.
+///
+/// Errors with `MethodError` when `param_values` omits any parameter that
+/// appears in the circuit (including variables nested in expressions).
 pub fn adjoint_grad(
     dag: &QuantumDAG,
     observable_terms: &[PauliTerm],
     param_values: &std::collections::HashMap<String, f64>,
-) -> AdjointGradResult {
+) -> Result<AdjointGradResult, MethodError> {
     let n_qubits = dag.n_qubits;
     let dim = 1usize << n_qubits;
 
@@ -239,6 +243,25 @@ pub fn adjoint_grad(
             })
         })
         .collect();
+
+    // Any variable still symbolic after bind() has no value in
+    // `param_values`; evaluating it would panic in ops.rs. Fail with a
+    // catchable error instead. variable_names() also sees variables nested
+    // in parameter expressions, which dag.parameter_names() does not.
+    let mut missing: Vec<String> = ops
+        .iter()
+        .flat_map(|g| g.op_type.parameters())
+        .flat_map(|p| p.variable_names())
+        .collect();
+    if !missing.is_empty() {
+        missing.sort();
+        missing.dedup();
+        return Err(MethodError(format!(
+            "no value provided for parameter(s): {}. Pass all parameter \
+             values via param_values= (the dag itself stays unbound)",
+            missing.join(", ")
+        )));
+    }
 
     let orig_order = dag.topological_order();
     let orig_ops: Vec<&QuantumOp> = orig_order
@@ -439,10 +462,10 @@ pub fn adjoint_grad(
         }
     }
 
-    AdjointGradResult {
+    Ok(AdjointGradResult {
         param_names,
         gradients: grad,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -468,7 +491,7 @@ mod tests {
         }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
-        let result = adjoint_grad(&dag, &obs, &params);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
         let expected = -theta.sin();
         assert!(
             (result.gradients[0] - expected).abs() < 1e-10,
@@ -495,7 +518,7 @@ mod tests {
         }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
-        let result = adjoint_grad(&dag, &obs, &params);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
         let expected = -theta.sin();
         assert!((result.gradients[0] - expected).abs() < 1e-10);
     }
@@ -518,7 +541,7 @@ mod tests {
         }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
-        let result = adjoint_grad(&dag, &obs, &params);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
         let expected = -theta.sin();
         assert!((result.gradients[0] - expected).abs() < 1e-10);
     }
@@ -549,7 +572,7 @@ mod tests {
         let mut params = std::collections::HashMap::new();
         params.insert("t0".into(), t0);
         params.insert("t1".into(), t1);
-        let result = adjoint_grad(&dag, &obs, &params);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
         assert_eq!(result.param_names.len(), 2);
         assert!(result.gradients[0].is_finite());
         assert!(result.gradients[1].is_finite());
@@ -574,7 +597,7 @@ mod tests {
         }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
-        let result = adjoint_grad(&dag, &obs, &params);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
         let expected = -(theta).sin();
         assert!((result.gradients[0] - expected).abs() < 1e-8);
     }
@@ -602,7 +625,7 @@ mod tests {
         ];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
-        let result = adjoint_grad(&dag, &obs, &params);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
         let expected = -0.5 * theta.sin();
         assert!((result.gradients[0] - expected).abs() < 1e-10);
     }
@@ -631,7 +654,7 @@ mod tests {
         }];
         let mut params = std::collections::HashMap::new();
         params.insert("theta".into(), theta);
-        let result = adjoint_grad(&dag, &obs, &params);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
         let expected = -theta.sin();
         assert!((result.gradients[0] - expected).abs() < 1e-10);
     }

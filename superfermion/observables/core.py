@@ -2,7 +2,7 @@
 Observables — measurement operators for expected values.
 
 Hot-path expectation values are computed in Rust via ``_sf_core.hamiltonian_expval``
-(MSB-convention statevector, weighted Pauli sum, single FFI call).
+(little-endian statevector, weighted Pauli sum, single FFI call).
 
 The NumPy ``_apply_pauli_string_np`` function is kept as a reference/fallback
 and for the ``_apply`` method, but all ``_fast_expval`` paths route through Rust.
@@ -30,7 +30,8 @@ def _apply_pauli_string_np(sv: np.ndarray, pauli_str: str) -> np.ndarray:
     """Apply a tensor-product Pauli string to a statevector.
 
     Uses index arithmetic rather than Kronecker products.
-    SuperFermion convention: qubit 0 = MSB (leftmost bit in binary index).
+    SuperFermion convention: qubit q lives at bit position q (little-endian),
+    so qubit 0 is the least-significant bit of the binary index.
 
     Returns the modified statevector (new array, does not modify sv).
     """
@@ -42,8 +43,8 @@ def _apply_pauli_string_np(sv: np.ndarray, pauli_str: str) -> np.ndarray:
     for k, p in enumerate(pauli_str):
         if p == 'I':
             continue
-        # SF MSB-first: qubit k corresponds to bit position (n-1-k) in the index
-        bit_pos = n - 1 - k
+        # SF little-endian: qubit k corresponds to bit position k in the index
+        bit_pos = k
         if p == 'Z':
             bit_vals = (indices >> bit_pos) & 1  # 0 or 1
             result *= np.where(bit_vals == 1, -1, 1)

@@ -36,13 +36,13 @@ def _observable_to_rust_terms(
     from superfermion.observables.core import SparsePauliOp
 
     if isinstance(obs, str):
-        paulis = [_PAULI_MAP[ch] for ch in reversed(obs.upper())]
+        paulis = [_PAULI_MAP[ch] for ch in obs.upper()]
         return [(paulis, 1.0, 0.0)]
 
     if isinstance(obs, dict):
         terms = []
         for pauli_str, coef in obs.items():
-            paulis = [_PAULI_MAP[ch] for ch in reversed(pauli_str.upper())]
+            paulis = [_PAULI_MAP[ch] for ch in pauli_str.upper()]
             c = complex(coef)
             terms.append((paulis, c.real, c.imag))
         return terms
@@ -50,7 +50,7 @@ def _observable_to_rust_terms(
     if isinstance(obs, SparsePauliOp):
         terms = []
         for pauli_str, coef in obs._terms:
-            paulis = [_PAULI_MAP[ch] for ch in reversed(pauli_str.upper())]
+            paulis = [_PAULI_MAP[ch] for ch in pauli_str.upper()]
             c = complex(coef)
             terms.append((paulis, c.real, c.imag))
         return terms
@@ -58,7 +58,7 @@ def _observable_to_rust_terms(
     if hasattr(obs, "terms"):
         terms = []
         for ps in obs.terms:
-            paulis = [_PAULI_MAP[ch] for ch in reversed(ps.pauli_str.upper())]
+            paulis = [_PAULI_MAP[ch] for ch in ps.pauli_str.upper()]
             c = complex(ps.coeffs)
             terms.append((paulis, c.real, c.imag))
         return terms
