@@ -132,11 +132,7 @@ pub struct PyState {
 
 #[pymethods]
 impl PyState {
-    fn expectation(
-        &self,
-        py: Python<'_>,
-        observable: Vec<(Vec<u8>, f64, f64)>,
-    ) -> PyResult<f64> {
+    fn expectation(&self, py: Python<'_>, observable: Vec<(Vec<u8>, f64, f64)>) -> PyResult<f64> {
         let terms = Self::parse_observable(&observable);
         self.inner
             .expectation(&terms)
