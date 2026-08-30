@@ -35,7 +35,6 @@ def _apply_pauli_string_np(sv: np.ndarray, pauli_str: str) -> np.ndarray:
 
     Returns the modified statevector (new array, does not modify sv).
     """
-    n = len(pauli_str)
     result = sv.astype(np.complex128, copy=True)
     dim = len(sv)
     indices = np.arange(dim, dtype=np.int64)
