@@ -38,11 +38,14 @@ class UnboundParameterError(ParameterError):
         )
 
 
-class MethodError(SuperfermionError):
+class MethodError(SuperfermionError, RuntimeError):
     """Operation not supported by the current simulation method.
 
     Raised when calling an sf.State method that isn't available for the
     underlying representation (e.g. grad() on a stabilizer state).
+
+    Also subclasses ``RuntimeError`` so existing ``except RuntimeError``
+    handlers keep catching these errors.
     """
     pass
 

@@ -17,6 +17,8 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::needless_range_loop)]
 
+use std::sync::OnceLock;
+
 use numpy::{PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use sf_ir::gate_list::GateSequence;
@@ -25,6 +27,32 @@ use sf_ir::state::{
     StatevectorState,
 };
 use sf_ir::{MPSState, OpType, Parameter, QuantumDAG, SerializedCircuit};
+
+// ═══════════════════════════════════════════════════════════
+// Error mapping — Rust MethodError -> Python MethodError
+// ═══════════════════════════════════════════════════════════
+
+/// Map a Rust `MethodError` to the Python `MethodError` class from
+/// `superfermion.utils.exceptions` (which subclasses RuntimeError), so
+/// unsupported-method calls surface as the documented exception type.
+/// Falls back to RuntimeError if the class cannot be imported (e.g. when
+/// `_sf_core` is used standalone).
+static METHOD_ERROR_TYPE: OnceLock<Py<PyAny>> = OnceLock::new();
+
+fn method_error(py: Python<'_>, msg: String) -> PyErr {
+    let cls = METHOD_ERROR_TYPE
+        .get_or_init(|| {
+            py.import("superfermion.utils.exceptions")
+                .and_then(|m| m.getattr("MethodError"))
+                .unwrap_or_else(|_| py.get_type::<pyo3::exceptions::PyRuntimeError>().into_any())
+                .unbind()
+        })
+        .bind(py);
+    match cls.call1((msg,)) {
+        Ok(instance) => PyErr::from_value(instance),
+        Err(e) => e,
+    }
+}
 
 // ═══════════════════════════════════════════════════════════
 // MPS State Bindings
@@ -104,26 +132,32 @@ pub struct PyState {
 
 #[pymethods]
 impl PyState {
-    fn expectation(&self, observable: Vec<(Vec<u8>, f64, f64)>) -> PyResult<f64> {
+    fn expectation(
+        &self,
+        py: Python<'_>,
+        observable: Vec<(Vec<u8>, f64, f64)>,
+    ) -> PyResult<f64> {
         let terms = Self::parse_observable(&observable);
         self.inner
             .expectation(&terms)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| method_error(py, e.to_string()))
     }
 
     #[pyo3(signature = (shots, seed=42))]
     fn sample(
         &self,
+        py: Python<'_>,
         shots: usize,
         seed: u64,
     ) -> PyResult<std::collections::HashMap<String, usize>> {
         self.inner
             .sample(shots, seed)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| method_error(py, e.to_string()))
     }
 
     fn grad(
         &self,
+        py: Python<'_>,
         observable: Vec<(Vec<u8>, f64, f64)>,
         dag: &PyQuantumDAG,
         param_values: std::collections::HashMap<String, f64>,
@@ -132,7 +166,7 @@ impl PyState {
         let gradients = self
             .inner
             .grad(&terms, &dag.inner, &param_values)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| method_error(py, e.to_string()))?;
         let names = dag.inner.parameter_names();
         let mut result = std::collections::HashMap::new();
         for (name, grad) in names.into_iter().zip(gradients) {
@@ -141,22 +175,22 @@ impl PyState {
         Ok(result)
     }
 
-    fn entropy(&self) -> PyResult<f64> {
+    fn entropy(&self, py: Python<'_>) -> PyResult<f64> {
         self.inner
             .entropy()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| method_error(py, e.to_string()))
     }
 
-    fn purity(&self) -> PyResult<f64> {
+    fn purity(&self, py: Python<'_>) -> PyResult<f64> {
         self.inner
             .purity()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| method_error(py, e.to_string()))
     }
 
-    fn fidelity(&self, other: &PyState) -> PyResult<f64> {
+    fn fidelity(&self, py: Python<'_>, other: &PyState) -> PyResult<f64> {
         self.inner
             .fidelity(other.inner.as_ref())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| method_error(py, e.to_string()))
     }
 
     fn qfim<'py>(
@@ -168,7 +202,7 @@ impl PyState {
         let matrix = self
             .inner
             .qfim(&dag.inner, &param_values)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| method_error(py, e.to_string()))?;
         let n = matrix.len();
         if n == 0 {
             return Ok(numpy::PyArray2::from_vec2(py, &[]).unwrap());
@@ -183,7 +217,7 @@ impl PyState {
         let v = self
             .inner
             .to_vec()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| method_error(py, e.to_string()))?;
         Ok(numpy::PyArray1::from_vec(py, v))
     }
 
@@ -191,15 +225,15 @@ impl PyState {
         let p = self
             .inner
             .probabilities()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| method_error(py, e.to_string()))?;
         Ok(numpy::PyArray1::from_vec(py, p))
     }
 
-    fn partial_trace(&self, keep_qubits: Vec<usize>) -> PyResult<Self> {
+    fn partial_trace(&self, py: Python<'_>, keep_qubits: Vec<usize>) -> PyResult<Self> {
         let new_state = self
             .inner
             .partial_trace(&keep_qubits)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| method_error(py, e.to_string()))?;
         Ok(PyState { inner: new_state })
     }
 
@@ -524,7 +558,10 @@ impl PyQuantumDAG {
                 ))))
             }
             "mps" => {
-                let mps = self.inner.evolve_mps(bond_dim);
+                let mut mps = self.inner.evolve_mps(bond_dim);
+                // Canonicalize so boundary contraction (expval) and per-site
+                // sampling are numerically stable right after construction.
+                mps.canonicalize_right();
                 Ok(PyState::new(Box::new(MPSStateWrapper::new(mps, device))))
             }
             "stabilizer" => {
@@ -596,6 +633,7 @@ impl PyQuantumDAG {
     /// Returns: dict mapping parameter name -> gradient value.
     fn adjoint_grad(
         &self,
+        py: Python<'_>,
         observable: Vec<(Vec<u8>, f64, f64)>,
         param_values: std::collections::HashMap<String, f64>,
     ) -> PyResult<std::collections::HashMap<String, f64>> {
@@ -607,7 +645,8 @@ impl PyQuantumDAG {
             })
             .collect();
 
-        let result = sf_ir::adjoint_grad(&self.inner, &terms, &param_values);
+        let result = sf_ir::adjoint_grad(&self.inner, &terms, &param_values)
+            .map_err(|e| method_error(py, e.to_string()))?;
         let mut out = std::collections::HashMap::new();
         for (name, grad) in result.param_names.iter().zip(result.gradients.iter()) {
             out.insert(name.clone(), *grad);
@@ -1599,18 +1638,18 @@ fn reverse_bits(val: usize, n_bits: usize) -> usize {
 
 /// Compute weighted Pauli expectation value on an existing statevector.
 ///
-/// Takes an MSB-convention statevector and a list of (paulis_u8, coef_re, coef_im)
+/// Takes a little-endian statevector and a list of (paulis_u8, coef_re, coef_im)
 /// terms, and returns the real part of sum_k coef_k * <sv|P_k|sv>.
 ///
 /// Pauli encoding per qubit: 0=I, 1=X, 2=Y, 3=Z.
-/// The qubit ordering in each Pauli list is MSB-first (q0 first).
+/// The qubit ordering in each Pauli list is q0-first (paulis[q] = qubit q,
+/// and qubit q lives at bit position q of the statevector index).
 #[pyfunction]
 fn hamiltonian_expval(
     sv: numpy::PyReadonlyArray1<num_complex::Complex64>,
     terms: Vec<(Vec<u8>, f64, f64)>,
 ) -> f64 {
     let sv = sv.as_slice().unwrap();
-    let n_qubits = (sv.len() as f64).log2() as usize;
     let dim = sv.len();
     let mut total = num_complex::Complex64::new(0.0, 0.0);
 
@@ -1623,7 +1662,7 @@ fn hamiltonian_expval(
             let mut target_idx = i;
 
             for (q, &pauli_op) in paulis.iter().enumerate() {
-                let bit_pos = n_qubits - 1 - q;
+                let bit_pos = q;
                 match pauli_op {
                     1 => {
                         // X
