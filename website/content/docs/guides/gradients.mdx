@@ -20,6 +20,8 @@ grads = state.grad(obs, dag, params)
 print(grads)
 ```
 
+Observable labels are q0-leftmost: `"ZI"` means Z on qubit 0 (first character = qubit 0). All gradient paths — `State.grad()`, adjoint, parameter-shift — agree with each other and with finite differences of `sf.expval()` on the same convention.
+
 **Framework path** — through PyTorch, JAX, or TensorFlow autograd (see [ML Frameworks](/docs/guides/ml-frameworks)).
 
 ## 5 Gradient Methods

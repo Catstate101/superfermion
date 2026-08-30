@@ -172,7 +172,7 @@ samples = state.sample(1000)    # fast Rust sampling
 | `result.shots` | `int` | Number of shots |
 | `result.circuit` | `Circuit` | Original circuit |
 | `result.metadata` | `object` | Execution metadata |
-| `result.probabilities` | `dict[str, float]` | Outcome probabilities |
+| `result.probabilities` | `dict[str, float]` | Outcome probabilities (populated on every backend; exact from the state when available, otherwise normalized counts) |
 | `result.statevector` | `ndarray` | State amplitudes |
 
 ### `RunResult` Methods
@@ -209,6 +209,8 @@ For weakly entangled circuits. Scales to 200+ qubits.
 result = sf.run(qc, method="mps", bond_dim=64, shots=1000)
 ```
 
+MPS `shots=0` densifies the tensor network into a full statevector. For more than 26 qubits this raises a `MemoryError` with guidance — pass `shots>0` to sample directly from the tensor network instead. MPS sampling and statevector output use the same little-endian qubit order as the statevector backend (`"001"` means qubit 0 is `|1⟩`).
+
 ### Stabilizer
 
 For Clifford-only circuits. Polynomial time, scales to ~1000 qubits.
@@ -220,6 +222,8 @@ for i in range(99):
 
 result = sf.run(clifford, method="stabilizer", shots=1000)
 ```
+
+State operations that the stabilizer backend does not support (`.numpy()`, `.partial_trace()`, `.fidelity()`, `.entropy()`, `.purity()`, `.probabilities()`, `.grad()`) raise `superfermion.MethodError`, which is a subclass of `RuntimeError` — catching either works.
 
 ### Density Matrix
 

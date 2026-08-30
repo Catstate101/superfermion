@@ -38,6 +38,8 @@ compiled = sf.compile(qc, level=2, target=ibm_target)
 | 1 | SWAP decomposition, gate cancellation, rotation merging, constant folding | Standard optimization |
 | 2 | Level 1 + repeated cancellation, Pauli twirling, dynamical decoupling | Full optimization (requires target) |
 
+Compilation preserves the input unitary (up to a global phase) at every level — checkable with `to_unitary()` or the built-in simulator. For example, a single `cz(0, 1)` compiles to an equivalent CNOT + U-gate decomposition with fidelity 1.0.
+
 ## Compiler Passes
 
 ### Gate Cancellation

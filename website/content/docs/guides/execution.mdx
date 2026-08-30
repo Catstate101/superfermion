@@ -63,6 +63,8 @@ result = sf.run(qc, method="mps", bond_dim=64, shots=1024)
 
 Higher bond dimension = more accuracy, more memory. Start at 64.
 
+MPS `shots=0` densifies the tensor network into a full statevector. For more than 26 qubits this raises a `MemoryError` with guidance — pass `shots>0` to sample directly from the tensor network instead. MPS sampling and statevector output use the same qubit order as the statevector backend.
+
 ### Stabilizer
 
 Clifford-only circuits. **Polynomial time**, scales to ~1000 qubits.
@@ -76,6 +78,8 @@ result = sf.run(clifford, method="stabilizer", shots=1024)
 ```
 
 Non-Clifford gates (T, RZ, etc.) raise an error. Use statevector for those.
+
+State operations the stabilizer backend does not support — `.numpy()`, `.partial_trace()`, `.fidelity()`, `.entropy()`, `.purity()`, `.probabilities()`, `.grad()` — raise `superfermion.MethodError` (a `RuntimeError` subclass).
 
 ### Density Matrix
 
@@ -155,6 +159,7 @@ print(result.state)            # sf.State
 print(result.shots)            # 8192
 
 # Derived
+print(result.probabilities)        # {'00': 0.5, '11': 0.5} (all backends)
 print(result.get_probabilities())    # {'00': 0.5, '11': 0.5}
 print(result.statevector)      # ndarray
 print(result.circuit)          # original circuit
@@ -202,6 +207,14 @@ try:
     sf.run(sf.Circuit(1).t(0), method="stabilizer")
 except RuntimeError as e:
     # Non-Clifford gates cannot be simulated with the stabilizer method.
-    # (Other backends may raise superfermion.MethodError instead.)
+    # MethodError is a RuntimeError subclass, so `except RuntimeError`
+    # also catches stabilizer methods like .numpy() / .partial_trace().
     print(f"Method not applicable: {e}")
 ```
+
+## Bit Order & Conventions
+
+- **Statevectors are little-endian**: qubit `q` lives at bit position `q` of the amplitude index, so `state.numpy()[3]` is the amplitude of `|q0=1, q1=1⟩`.
+- **Bitstring keys are q0-last**: in `counts` and `probabilities`, `"001"` means qubit 0 is `|1⟩` and qubits 1, 2 are `|0⟩`. This matches `format(index, f"0{n}b")` for the little-endian amplitude index.
+- **Observable labels are q0-leftmost**: in `SparsePauliOp.from_string("ZI")`, the first character acts on qubit 0 — `"ZI"` is `Z⊗I` (Z on qubit 0).
+- `counts`, `probabilities`, and `state.numpy()` all agree with each other and with the expectation-value paths (`sf.expval`, `state.expectation`, adjoint gradients).
