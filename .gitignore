@@ -45,6 +45,10 @@ scratch/
 reports/
 *.log
 
+# Graphify regenerable artifacts (rebuild with: graphify extract . --code-only)
+graphify-out/graph.json
+graphify-out/graph.html
+
 # Python bytecode
 __pycache__/
 *.py[cod]
@@ -69,3 +73,7 @@ Thumbs.db
 
 # Explicitly allow essential tracked files
 !.github/workflows/*.yml
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
