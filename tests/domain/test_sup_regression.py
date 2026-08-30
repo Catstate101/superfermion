@@ -1,0 +1,581 @@
+"""Regression tests for the SUP-5…SUP-14 fix batch (superfermion 0.1.5).
+
+Each class mirrors one per-fix verification script (see the repo-root
+``_fix_verify_*.py`` files) and pins the corrected contract:
+
+(a) MPS sampling TV vs exact on a random 10-qubit circuit      (SUP-13a)
+(b) cross-backend counts / vector / probability order          (SUP-13b)
+(c) grad vs finite-diff on asymmetric observables              (SUP-14)
+(d) expval vs dense reference for ``from_string("Z0")``        (SUP-14)
+(e) MethodError catchability as RuntimeError                   (SUP-7)
+(f) probabilities populated on every backend                   (SUP-5/11)
+(g) MPS short-Pauli padding == statevector                     (SUP-9)
+(h) MPS shots=0 MemoryError guard                              (SUP-10)
+(i) compiler U-convention fidelity suite                       (SUP-12)
+(j) bound/parameterless DAG grad/qfim warning (SUP-6, not silent)
+(k) missing param_values raise catchable MethodError (no Rust panic)
+
+Conventions assumed (documented in guides/execution.mdx):
+- numpy statevectors are little-endian: qubit q lives at bit q.
+- bitstrings / probabilities keys are q0-last ("001" = q0 is |1>).
+- observable labels are q0-leftmost ("ZI" = Z on qubit 0).
+"""
+
+import functools
+import warnings
+
+import numpy as np
+import pytest
+
+import superfermion as sf
+from superfermion.circuit import Circuit
+from superfermion.observables.core import _PAULI_ENCODE, SparsePauliOp
+from superfermion.utils.exceptions import MethodError, SuperfermionError
+
+
+pytestmark = pytest.mark.domain
+
+compile_circuit = pytest.importorskip(
+    "superfermion.compiler.manager",
+    reason="compiler module unavailable",
+).compile
+
+EPS = 1e-6
+SEED = 42
+
+
+# ── shared helpers ────────────────────────────────────────────────────────────
+
+def to_raw(op) -> list:
+    """Convert a SparsePauliOp to the raw FFI term format."""
+    return [
+        ([_PAULI_ENCODE[ch] for ch in label], complex(c).real, complex(c).imag)
+        for label, c in op._terms
+    ]
+
+
+_PAULI_MAT = {
+    "I": np.eye(2, dtype=complex),
+    "X": np.array([[0, 1], [1, 0]], dtype=complex),
+    "Y": np.array([[0, -1j], [1j, 0]], dtype=complex),
+    "Z": np.array([[1, 0], [0, -1]], dtype=complex),
+}
+
+
+def dense_pauli(label: str) -> np.ndarray:
+    """Dense 2^n × 2^n matrix for a q0-leftmost Pauli label.
+
+    Little-endian: qubit 0 is the least significant bit, i.e. the last
+    (rightmost) tensor factor, so the label is consumed right-to-left.
+    """
+    return functools.reduce(
+        np.kron, [_PAULI_MAT[ch] for ch in reversed(label)]
+    )
+
+
+def dense_expval(sv: np.ndarray, label: str) -> float:
+    """⟨ψ|O|ψ⟩ computed with an explicit dense matrix (independent reference)."""
+    sv = np.asarray(sv, dtype=np.complex128).ravel()
+    return float(np.real(np.vdot(sv, dense_pauli(label) @ sv)))
+
+
+# ── (a) + (b) SUP-13: MPS sampling & ordering == statevector ─────────────────
+
+class TestMpsSamplingAndOrdering:
+    def test_mps_sampling_tv_vs_exact_10q(self):
+        """(a) MPS sampling TV vs exact probabilities on a random 10-qubit circuit."""
+        rng = np.random.default_rng(7)
+        qc = Circuit(10)
+        for _ in range(5):
+            for i in range(10):
+                qc.ry(float(rng.uniform(0, 3.1416)), i)
+            for i in range(0, 9, 2):
+                qc.cnot(i, i + 1)
+            for i in range(1, 9, 2):
+                qc.cnot(i, i + 1)
+        p_sv = np.abs(np.asarray(sf.run(qc, method="statevector", shots=0).statevector)) ** 2
+        n = 40000
+        res = sf.run(qc, method="mps", shots=n, seed=SEED)
+        tv = 0.5 * sum(abs(c / n - p_sv[int(bs, 2)]) for bs, c in res.counts.items())
+        noise = np.sqrt(2**10 / n) / 2
+        assert tv < 3 * noise + 0.01, f"TV={tv:.4f} noise~{noise:.4f}"
+
+    def test_mps_vector_equals_statevector_directly(self):
+        """(b) MPS to_statevector must equal the statevector backend (no bitrev)."""
+        qc = Circuit(10)
+        rng = np.random.default_rng(7)
+        for _ in range(5):
+            for i in range(10):
+                qc.ry(float(rng.uniform(0, 3.1416)), i)
+            for i in range(0, 9, 2):
+                qc.cnot(i, i + 1)
+            for i in range(1, 9, 2):
+                qc.cnot(i, i + 1)
+        p_sv = np.abs(np.asarray(sf.run(qc, method="statevector", shots=0).statevector)) ** 2
+        p_mps = np.abs(np.asarray(sf.run(qc, method="mps", shots=0).statevector)) ** 2
+        assert float(np.max(np.abs(p_mps - p_sv))) < 1e-12
+
+    def test_mps_counts_q0_last(self):
+        """(b) H(0) probe: MPS counts keys are q0-last ('001'), like statevector."""
+        qc = Circuit(3).h(0)
+        p_sv = np.abs(np.asarray(sf.run(qc, method="statevector", shots=0).statevector)) ** 2
+        res = sf.run(qc, method="mps", shots=4000, seed=SEED)
+        assert res.counts.get("001", 0) > 0, f"keys={sorted(res.counts)}"
+        p_mps = np.abs(np.asarray(sf.run(qc, method="mps", shots=0).statevector)) ** 2
+        assert float(np.max(np.abs(p_mps - p_sv))) < 1e-12
+        sv_counts = sf.run(qc, method="statevector", shots=4000, seed=SEED).counts
+        assert set(sv_counts) == set(res.counts)
+
+    def test_sample_mps_api_q0_last(self):
+        """(b) dag.sample_mps also emits q0-last bitstrings."""
+        dag = Circuit(3).h(0).to_ir()
+        d = dag.sample_mps(bond_dim=64, shots=4000, seed=SEED)
+        assert d.get("001", 0) > 0, f"keys={sorted(d)}"
+
+    def test_ghz_cross_backend_support(self):
+        """(b) statevector / MPS / stabilizer all sample the same support."""
+        qc = Circuit(3).h(0).cnot(0, 1).cnot(1, 2)  # GHZ3: {000, 111}
+        for method in ("statevector", "mps", "stabilizer"):
+            res = sf.run(qc, method=method, shots=4000, seed=SEED)
+            keys = set(res.counts)
+            assert keys == {"000", "111"}, f"{method}: {sorted(keys)}"
+
+
+# ── (c) + (d) SUP-14: asymmetric observables — labels are q0-leftmost ────────
+
+class TestAsymmetricObservables:
+    _NAMES = ["t0", "t1", "t2", "t3"]
+    _X = np.array([1.72131662, -0.38403809, 2.25313718, 1.24009990])
+
+    @staticmethod
+    def _energy(xx, names, circ, H):
+        pv = dict(zip(names, xx))
+        res = sf.run(circ.bind(pv), method="statevector", shots=1)
+        return sf.expval(res.state.numpy(), H)
+
+    def _fd_grad(self, xx, names, circ, H):
+        return np.array([
+            (self._energy(xx + EPS * e, names, circ, H)
+             - self._energy(xx - EPS * e, names, circ, H)) / (2 * EPS)
+            for e in np.eye(len(names))
+        ])
+
+    def _adjoint_grad(self, xx, names, circ, dag, raw_terms):
+        pv = dict(zip(names, xx))
+        res = sf.run(circ.bind(pv), method="statevector", shots=1)
+        g = res.grad(raw_terms, dag=dag, param_values=pv)
+        return np.array([g[n] for n in names])
+
+    def _check_fd_vs_adjoint(self, H, circ, dag, names, xx):
+        fd = self._fd_grad(xx, names, circ, H)
+        ad = self._adjoint_grad(xx, names, circ, dag, to_raw(H))
+        assert np.max(np.abs(fd - ad)) < 1e-6, f"max|fd-adj|={np.max(np.abs(fd - ad)):.3e}"
+
+    def test_grad_matches_fd_asymmetric_iz(self):
+        """(c) Single asymmetric term 0.39*IZ: adjoint == finite-diff."""
+        p = [sf.param(n) for n in self._NAMES]
+        circ = Circuit(2).ry(p[0], 0).ry(p[1], 1).cnot(0, 1).ry(p[2], 0).ry(p[3], 1)
+        self._check_fd_vs_adjoint(
+            SparsePauliOp.from_dict({"IZ": 0.39}), circ, circ.to_ir(),
+            self._NAMES, self._X,
+        )
+
+    def test_grad_matches_fd_h2_like(self):
+        """(c) Multi-term asymmetric H2-like observable: adjoint == finite-diff."""
+        p = [sf.param(n) for n in self._NAMES]
+        circ = Circuit(2).ry(p[0], 0).ry(p[1], 1).cnot(0, 1).ry(p[2], 0).ry(p[3], 1)
+        H = SparsePauliOp.from_dict(
+            {"II": -1.05, "IZ": 0.39, "ZI": -0.39, "ZZ": -0.01, "XX": 0.18}
+        )
+        self._check_fd_vs_adjoint(H, circ, circ.to_ir(), self._NAMES, self._X)
+
+    def test_grad_matches_fd_3q_mixed(self):
+        """(c) Independent 3-qubit mixed-term observable."""
+        rng = np.random.default_rng(777)
+        names = ["a0", "a1", "a2", "a3"]
+        p = [sf.param(n) for n in names]
+        qc3 = Circuit(3)
+        qc3.ry(p[0], 0).rz(p[1], 1).ry(p[2], 2).cnot(0, 1).cnot(1, 2).ry(p[3], 0)
+        x3 = rng.uniform(0, 3.1416, size=4)
+        H3 = SparsePauliOp.from_dict({"XIZ": 0.7, "IZY": -0.4, "ZXZ": 0.25})
+        self._check_fd_vs_adjoint(H3, qc3, qc3.to_ir(), names, x3)
+
+    def test_expval_anchor_ry(self):
+        """(d) Anchor: <Z0> = cos(theta), <Z1> = 1 for Ry(theta) on qubit 0."""
+        theta = np.pi / 2
+        qc = Circuit(2).ry(sf.param("t0"), 0)
+        sv = np.asarray(sf.run(qc.bind({"t0": theta}), method="statevector", shots=0).statevector)
+        assert abs(sf.expval(sv, SparsePauliOp.from_string("Z0", n_qubits=2)) - 0.0) < 1e-12
+        assert abs(sf.expval(sv, SparsePauliOp.from_string("Z1", n_qubits=2)) - 1.0) < 1e-12
+
+    def test_expval_from_string_matches_dense(self):
+        """(d) from_string labels vs explicit dense-matrix reference (SUP-14)."""
+        rng = np.random.default_rng(11)
+        qc = Circuit(2)
+        qc.ry(float(rng.uniform(0, np.pi)), 0).rz(float(rng.uniform(0, 2 * np.pi)), 1)
+        qc.cnot(0, 1).rx(float(rng.uniform(0, np.pi)), 1)
+        sv = np.asarray(sf.run(qc, method="statevector", shots=0).statevector)
+        for label in ("Z0", "Z1", "X0", "X1", "Z0Z1", "Z1X0"):
+            op = SparsePauliOp.from_string(label, n_qubits=2)
+            v_ffi = sf.expval(sv, op)
+            v_dense = dense_expval(sv, op._terms[0][0])
+            assert abs(v_ffi - v_dense) < 1e-9, f"{label}: ffi={v_ffi:.12f} dense={v_dense:.12f}"
+
+    def test_cross_path_expval_consistent(self):
+        """(d) FFI expval == Rust state.expectation == counts estimate (q0-leftmost)."""
+        p = [sf.param(n) for n in self._NAMES]
+        circ = Circuit(2).ry(p[0], 0).ry(p[1], 1).cnot(0, 1).ry(p[2], 0).ry(p[3], 1)
+        H = SparsePauliOp.from_dict(
+            {"II": -1.05, "IZ": 0.39, "ZI": -0.39, "ZZ": -0.01, "XX": 0.18}
+        )
+        pv = dict(zip(self._NAMES, self._X))
+        res = sf.run(circ.bind(pv), method="statevector", shots=20000, seed=SEED)
+        v1 = sf.expval(res.state.numpy(), H)
+        v2 = res.state.expectation(to_raw(H))
+        v3 = res.expectation(to_raw(H))
+        assert abs(v1 - v2) < 1e-9
+        assert abs(v1 - v3) < 0.03, f"counts estimate off: {v1:.6f} vs {v3:.6f}"
+
+
+# ── (e) SUP-7: MethodError is a RuntimeError subclass ────────────────────────
+
+class TestMethodErrorMapping:
+    def test_method_error_hierarchy(self):
+        """(e) MethodError subclasses SuperfermionError and RuntimeError."""
+        assert issubclass(MethodError, SuperfermionError)
+        assert issubclass(MethodError, RuntimeError)
+
+    def test_stabilizer_unsupported_methods_raise_method_error(self):
+        """(e) Stabilizer state unsupported ops raise MethodError…"""
+        st = sf.run(Circuit(3).h(0).cnot(0, 1), method="stabilizer", shots=0).state
+        calls = [
+            ("numpy()", lambda: st.numpy()),
+            ("partial_trace()", lambda: st.partial_trace([0])),
+            ("fidelity()", lambda: st.fidelity(st)),
+            ("entropy()", lambda: st.entropy()),
+            ("purity()", lambda: st.purity()),
+            ("probabilities()", lambda: st.probabilities()),
+        ]
+        for name, call in calls:
+            with pytest.raises(MethodError, match="not supported"):
+                call()
+
+    def test_stabilizer_errors_catchable_as_runtime_error(self):
+        """(e) …and are still caught by ``except RuntimeError`` (back-compat)."""
+        st = sf.run(Circuit(3).h(0).cnot(0, 1), method="stabilizer", shots=0).state
+        try:
+            st.numpy()
+        except RuntimeError:
+            pass
+        else:
+            pytest.fail("stabilizer numpy() must be catchable as RuntimeError")
+
+
+# ── (f) SUP-5/11: probabilities populated on every backend ───────────────────
+
+class TestProbabilitiesPopulated:
+    _C3 = Circuit(3).h(0).cnot(0, 1).cnot(1, 2)
+
+    def test_statevector_paths(self):
+        """(f) statevector fast path (counts) and full path (exact |c|²)."""
+        r = sf.run(self._C3, method="statevector", shots=1000, seed=7,
+                   return_statevector=False)
+        assert r.probabilities
+        assert r.probabilities == {k: v / 1000 for k, v in r.counts.items()}
+        assert abs(sum(r.probabilities.values()) - 1.0) < 1e-12
+
+        r = sf.run(self._C3, method="statevector", shots=0, seed=7)
+        sv = np.asarray(r.statevector, dtype=np.complex128)
+        exact = {
+            format(i, "03b"): float(abs(sv[i]) ** 2)
+            for i in range(8) if abs(sv[i]) ** 2 > 1e-15
+        }
+        assert set(r.probabilities) == set(exact)
+        assert all(abs(r.probabilities[k] - exact[k]) < 1e-15 for k in exact)
+        assert abs(sum(r.probabilities.values()) - 1.0) < 1e-12
+
+    def test_mps_paths(self):
+        """(f) MPS shots>0 from counts; shots=0 (small) exact from state."""
+        r = sf.run(self._C3, method="mps", shots=1000, seed=7)
+        assert r.probabilities == {k: v / 1000 for k, v in r.counts.items()}
+        r = sf.run(self._C3, method="mps", shots=0, seed=7)
+        assert r.probabilities
+        assert abs(sum(r.probabilities.values()) - 1.0) < 1e-12
+
+    def test_density_matrix_paths(self):
+        """(f) density_matrix: exact from rho (pure-state == statevector)."""
+        r0 = sf.run(self._C3, method="density_matrix", shots=0, seed=7)
+        r1 = sf.run(self._C3, method="density_matrix", shots=1000, seed=7)
+        assert r0.probabilities and r1.probabilities
+        assert abs(sum(r0.probabilities.values()) - 1.0) < 1e-12
+        assert r0.metadata.get("probabilities") == r0.probabilities
+        sv = np.asarray(sf.run(self._C3, method="statevector", shots=0).statevector)
+        for k, p in r0.probabilities.items():
+            assert abs(p - abs(sv[int(k, 2)]) ** 2) < 1e-8
+
+    def test_stabilizer_path(self):
+        """(f) stabilizer shots>0 from counts; shots=0 stays empty (no counts)."""
+        r = sf.run(self._C3, method="stabilizer", shots=1000, seed=7)
+        assert r.probabilities == {k: v / 1000 for k, v in r.counts.items()}
+        r = sf.run(self._C3, method="stabilizer", shots=0, seed=7)
+        assert r.probabilities == {}
+
+    def test_get_probabilities_unchanged(self):
+        """(f) get_probabilities() semantics preserved."""
+        r = sf.run(self._C3, method="statevector", shots=5000, seed=7,
+                   return_statevector=False)
+        assert r.get_probabilities() == r.probabilities
+        assert abs(float(np.sum(r.probabilities_array)) - 1.0) < 1e-9
+        rp = sf.run(self._C3, method="statevector", shots=0, seed=7).get_probabilities()
+        assert abs(sum(rp.values()) - 1.0) < 1e-12
+
+
+# ── (g) SUP-9: MPS short-Pauli padding ───────────────────────────────────────
+
+class TestMpsShortPauli:
+    def test_short_pauli_equals_statevector(self):
+        """(g) MPS expval('Z') and ('ZI') == statevector; full-length unchanged."""
+        qc = Circuit(2).ry(0.7, 0).ry(1.1, 1)
+        for label in ("Z", "ZI", "ZZ"):
+            e_sv = sf.run(qc, method="statevector", shots=0).state.expectation(
+                to_raw(SparsePauliOp.from_string(label, n_qubits=2)))
+            e_mps = sf.run(qc, method="mps", shots=0).state.expectation(
+                to_raw(SparsePauliOp.from_string(label, n_qubits=2)))
+            assert abs(e_sv - e_mps) < 1e-12, f"{label}: sv={e_sv:.16f} mps={e_mps:.16f}"
+
+    def test_short_pauli_anchor(self):
+        """(g) |00> anchor: MPS expval('Z') == 1.0 (padding with identity)."""
+        e0 = sf.run(Circuit(2), method="mps", shots=0).state.expectation(
+            to_raw(SparsePauliOp.from_string("Z", n_qubits=2)))
+        assert abs(e0 - 1.0) < 1e-12
+
+
+# ── (h) SUP-10: MPS shots=0 MemoryError guard ────────────────────────────────
+
+class TestMpsShotsZeroGuard:
+    def test_large_circuit_raises_memory_error(self):
+        """(h) n=50 MPS shots=0 raises MemoryError with guidance before densifying."""
+        c50 = Circuit(50)
+        for q in range(50):
+            c50.h(q)
+        with pytest.raises(MemoryError, match="shots>0"):
+            sf.run(c50, method="mps", shots=0, seed=7)
+
+    def test_small_circuit_still_densifies(self):
+        """(h) n=16 MPS shots=0 still returns the exact statevector."""
+        c16 = Circuit(16)
+        for q in range(16):
+            c16.h(q)
+        r = sf.run(c16, method="mps", shots=0, seed=7)
+        assert r.statevector is not None and len(r.statevector) == 2**16
+        assert r.probabilities
+
+
+# ── (i) SUP-12: compiler U-convention fidelity suite ─────────────────────────
+
+class TestCompilerFidelity:
+    _PATTERNS = {
+        "lone CZ": Circuit(2).cz(0, 1),
+        "CX-CZ-CX": Circuit(2).cx(0, 1).cz(0, 1).cx(0, 1),
+        "CX-CX (control)": Circuit(2).cx(0, 1).cx(0, 1),
+        "CX-CZ (control)": Circuit(2).cx(0, 1).cz(0, 1),
+        "CZ-CX (control)": Circuit(2).cz(0, 1).cx(0, 1),
+        "lone CX (control)": Circuit(2).cx(0, 1),
+        "lone H (control)": Circuit(2).h(0),
+    }
+    _PREP_OK = {"U", "CX", "CNOT", "CZ", "RZ", "RY", "RX", "R1", "P", "X", "Y", "Z",
+                "H", "S", "SDG", "T", "SX", "ID", "BARRIER"}
+
+    @staticmethod
+    def _unit(c):
+        U = np.asarray(c.to_unitary())
+        if U.ndim == 1:
+            U = U.reshape(2 ** c.n_qubits, 2 ** c.n_qubits)
+        return np.asarray(U, dtype=complex)
+
+    @staticmethod
+    def _hsfid(U, V):
+        d = U.shape[0]
+        return float(np.abs(np.vdot(U.flatten(), V.flatten())) ** 2 / d**2)
+
+    def _sim_fid(self, c_ref, c_comp, prep_qubits):
+        def with_prep(c):
+            out = Circuit(c.n_qubits)
+            for q in prep_qubits:
+                out.x(q)
+            for g in c.to_gate_list():
+                name, qs = g["name"], g["qubits"]
+                if name not in self._PREP_OK:
+                    raise KeyError(f"cannot replay gate {name}")
+                if name in ("BARRIER", "ID"):
+                    continue
+                method = name.lower()
+                if name == "CNOT":
+                    method = "cnot"
+                elif name == "CX":
+                    method = "cx"
+                elif name == "SDG":
+                    method = "s"
+                getattr(out, method)(*g.get("params", []), *qs)
+            return out
+
+        sv_ref = np.asarray(sf.simulate(with_prep(c_ref), method="statevector").numpy())
+        sv_cmp = np.asarray(sf.simulate(with_prep(c_comp), method="statevector").numpy())
+        return float(np.abs(np.vdot(sv_ref, sv_cmp)) ** 2)
+
+    def test_explicit_patterns_preserve_unitary(self):
+        """(i) Lone-CZ / CX-CZ-CX / controls compile to the same unitary (L1, L2)."""
+        for name, qc in self._PATTERNS.items():
+            U_ref = self._unit(qc)
+            for level in (1, 2):
+                compiled = compile_circuit(qc, level=level)
+                U_c = self._unit(compiled)
+                md = float(np.max(np.abs(U_c - U_ref)))
+                assert md < 1e-6, f"{name} L{level}: maxdiff={md:.2e}"
+                for prep in ([], [0]):
+                    fid = self._sim_fid(qc, compiled, prep)
+                    assert abs(fid - 1.0) < 1e-9, (
+                        f"{name} L{level} prep={prep}: simulator fid={fid:.10f}"
+                    )
+
+    def test_random_circuits_preserve_unitary(self):
+        """(i) Random circuits compile to the same unitary up to global phase."""
+        rng = np.random.default_rng(20260830)
+        gate_pool = ["h", "x", "z", "rz", "rx", "ry", "u", "cz", "cx"]
+        for i in range(6):
+            n = int(rng.integers(2, 5))
+            qc = Circuit(n)
+            for _ in range(int(rng.integers(8, 20))):
+                g = gate_pool[rng.integers(len(gate_pool))]
+                if g == "u":
+                    q = int(rng.integers(n))
+                    qc.u(float(rng.uniform(0, 2 * np.pi)),
+                         float(rng.uniform(0, 2 * np.pi)),
+                         float(rng.uniform(0, 2 * np.pi)), q)
+                elif g in ("cz", "cx"):
+                    a, b = int(rng.integers(n)), int(rng.integers(n))
+                    while b == a:
+                        b = int(rng.integers(n))
+                    (qc.cz if g == "cz" else qc.cx)(a, b)
+                else:
+                    q = int(rng.integers(n))
+                    if g == "h":
+                        qc.h(q)
+                    elif g == "x":
+                        qc.x(q)
+                    elif g == "z":
+                        qc.z(q)
+                    else:
+                        getattr(qc, g)(float(rng.uniform(0, 2 * np.pi)), q)
+            U_ref = self._unit(qc)
+            for level in (1, 2):
+                compiled = compile_circuit(qc, level=level)
+                U_c = self._unit(compiled)
+                # KAK/magic-basis path is exact up to a global phase; remove it
+                # (fidelity is the phase-insensitive metric).
+                t = np.trace(U_ref.conj().T @ U_c)
+                ph = np.exp(1j * np.angle(t)) if abs(t) > 0 else 1.0
+                md_pc = float(np.max(np.abs(U_c - ph * U_ref)))
+                fid = self._hsfid(U_ref, U_c)
+                assert md_pc < 1e-6 and abs(fid - 1.0) < 1e-9, (
+                    f"random[{i}] n={n} L{level}: phase-corrected maxdiff={md_pc:.2e} "
+                    f"fid={fid:.10f}"
+                )
+
+
+# ── SUP-6: bound/parameterless DAG must not silently return {} ───────────────
+class TestBoundDagWarning:
+    """A DAG without symbolic parameters yields {} — now with a UserWarning."""
+
+    _OBS = [([3, 3], 1.0, 0.0)]  # ZZ
+
+    def _state(self, circuit):
+        return sf.simulate(circuit, params={"t": 0.5})
+
+    def test_bound_dag_grad_warns_and_returns_empty(self):
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        st = self._state(qc)
+        bound_dag = qc.bind({"t": 0.5}).to_ir()
+        with pytest.warns(UserWarning, match="symbolic"):
+            g = st.grad(self._OBS, bound_dag, {"t": 0.5})
+        assert g == {}
+
+    def test_unbound_dag_grad_stays_silent_and_correct(self):
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        st = self._state(qc)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            g = st.grad(self._OBS, qc.to_ir(), {"t": 0.5})
+        assert g == {"t": 0.0}  # <ZZ> identically 1.0 on this state
+
+    def test_parameterless_circuit_with_values_warns(self):
+        qc = Circuit(2).h(0).cnot(0, 1)
+        st = sf.simulate(qc)
+        with pytest.warns(UserWarning, match="no symbolic parameters"):
+            g = st.grad(self._OBS, qc.to_ir(), {"t": 0.5})
+        assert g == {}
+
+    def test_empty_param_values_stays_silent(self):
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        st = self._state(qc)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            g = st.grad(self._OBS, qc.bind({"t": 0.5}).to_ir(), {})
+        assert g == {}
+
+    def test_bound_dag_qfim_warns(self):
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        st = self._state(qc)
+        with pytest.warns(UserWarning, match="symbolic"):
+            qfim = st.qfim(qc.bind({"t": 0.5}).to_ir(), {"t": 0.5})
+        assert qfim.shape == (0, 0)
+
+    def test_runresult_grad_warns_via_state(self):
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        res = sf.run(qc.bind({"t": 0.5}), shots=0)
+        with pytest.warns(UserWarning, match="symbolic"):
+            g = res.grad(self._OBS, qc.bind({"t": 0.5}).to_ir(), {"t": 0.5})
+        assert g == {}
+
+
+# ── SUP-6: missing param_values raise a catchable error, not a panic ──────────
+class TestMissingParamValues:
+    """Missing values raise MethodError instead of a pyo3 PanicException."""
+
+    _OBS = [([3, 3], 1.0, 0.0)]  # ZZ
+
+    def _state(self, circuit):
+        return sf.simulate(circuit, params={"t": 0.5})
+
+    def test_grad_empty_values_raises_method_error(self):
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        st = self._state(qc)
+        with pytest.raises(MethodError, match="no value provided"):
+            st.grad(self._OBS, qc.to_ir(), {})
+
+    def test_grad_wrong_name_raises_method_error(self):
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        st = self._state(qc)
+        with pytest.raises(MethodError, match="no value provided"):
+            st.grad(self._OBS, qc.to_ir(), {"x": 1.0})
+
+    def test_grad_partial_values_names_missing_parameter(self):
+        qc = Circuit(1).ry(sf.param("t0"), 0).rz(sf.param("t1"), 0)
+        st = sf.simulate(qc, params={"t0": 0.2, "t1": 0.3})
+        with pytest.raises(MethodError, match="t1"):
+            st.grad([([3], 1.0, 0.0)], qc.to_ir(), {"t0": 0.2})
+
+    def test_missing_values_catchable_as_runtime_error(self):
+        # Regression: used to raise an uncatchable pyo3 PanicException
+        # ("Cannot evaluate unbound variable") from the Rust adjoint engine.
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        st = self._state(qc)
+        assert issubclass(MethodError, RuntimeError)
+        with pytest.raises(RuntimeError):
+            st.grad(self._OBS, qc.to_ir(), {})
+
+    def test_qfim_missing_values_raises_method_error(self):
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        st = self._state(qc)
+        with pytest.raises(MethodError, match="not found in param_values"):
+            st.qfim(qc.to_ir(), {})
