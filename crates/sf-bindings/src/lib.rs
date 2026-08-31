@@ -1728,7 +1728,7 @@ fn _sf_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Standalone compute on existing statevectors
     m.add_function(wrap_pyfunction!(hamiltonian_expval, m)?)?;
 
-    m.add("__version__", "0.1.0")?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
 
