@@ -134,6 +134,7 @@ class TestIonQDevice:
 
 class TestBraketDevice:
     def test_callable_returns_executor(self):
+        pytest.importorskip("boto3")
         from superfermion.devices.braket import BraketDevice, BraketDeviceExecutor
 
         with patch("boto3.Session"):
@@ -143,6 +144,7 @@ class TestBraketDevice:
         assert isinstance(executor, BraketDeviceExecutor)
 
     def test_resolve_device_arn_unknown_raises(self):
+        pytest.importorskip("boto3")
         from superfermion.devices.braket import BraketDevice
 
         with patch("boto3.Session"):

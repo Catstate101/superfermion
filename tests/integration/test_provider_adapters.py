@@ -50,6 +50,7 @@ class TestIBMDeviceAdapter:
         assert executor._backend_name == "ibm_fez"
 
     def test_execute_returns_run_result_with_mocked_runtime(self, bell_circuit):
+        pytest.importorskip("qiskit_ibm_runtime")
         from superfermion.devices.ibm import IBMDeviceExecutor
 
         mock_service = MagicMock()
@@ -118,6 +119,7 @@ class TestBraketDeviceAdapter:
                 BraketDevice(s3_bucket="test-bucket")
 
     def test_callable_returns_device_executor_with_mocked_boto3(self):
+        pytest.importorskip("boto3")
         from superfermion.devices.braket import BraketDevice, BraketDeviceExecutor
 
         with patch("boto3.Session"):
@@ -134,6 +136,7 @@ class TestBraketDeviceAdapter:
         assert isinstance(executor, DeviceExecutor)
 
     def test_unknown_device_raises_value_error(self):
+        pytest.importorskip("boto3")
         from superfermion.devices.braket import BraketDevice
 
         with patch("boto3.Session"):
