@@ -75,6 +75,7 @@ Thumbs.db
 !.github/workflows/*.yml
 !website/public/logo.png
 !website/app/icon.png
+!website/app/apple-icon.png
 
 # MemPalace per-project files (issue #185)
 mempalace.yaml
