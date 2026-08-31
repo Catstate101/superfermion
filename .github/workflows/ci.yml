@@ -58,6 +58,7 @@ jobs:
         continue-on-error: true
         run: mypy superfermion/
       - name: Run core tests
+        shell: bash
         run: |
           pip install scipy
           python -m pytest tests/ -q --timeout=120 \
