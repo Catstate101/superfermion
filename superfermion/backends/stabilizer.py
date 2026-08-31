@@ -70,13 +70,15 @@ def maybe_clifford_dispatch(
     import superfermion as sf
     return sf.run(circuit, method="stabilizer", shots=shots, seed=seed)
 
-def simplify_clifford(circuit: Circuit) -> "Circuit":
+def simplify_clifford(circuit: Circuit) -> "Circuit | None":
     """Simplify a Clifford circuit via tableau canonical form.
 
-    Returns None if the circuit is NOT Clifford.
+    Returns None when the circuit is NOT Clifford, or when no
+    simplification is available (Qiskit missing, Rust-stored gates):
+    callers must keep the original circuit in that case.
     """
     if getattr(circuit, '_use_rust', False) and getattr(circuit, '_gates_rust', None) is not None:
-        return Circuit(circuit.n_qubits)
+        return None
 
     if not is_clifford_circuit(circuit):
         return None
@@ -274,19 +276,29 @@ class _Tableau:
         self.r[a], self.r[b] = self.r[b], self.r[a]
 
         # --- Tableau to Circuit synthesis ---
-    def to_circuit(self) -> "Circuit":
+    def to_circuit(self) -> "Circuit | None":
         """Synthesize a canonical Clifford circuit from this tableau.
 
-        Uses Qiskit's proven Clifford synthesis when available,
-        falling back to a simple gate-by-gate reconstruction.
-        Produces at most O(n^2) gates in {H, S, CNOT, CZ}.
-
-        Returns a Circuit implementing the same Clifford operation.
+        Uses Qiskit's proven Clifford synthesis when available.
+        Without Qiskit only the identity tableau can be synthesized
+        (an empty circuit); any other tableau returns None so callers
+        skip simplification instead of silently dropping the circuit.
         """
         try:
             return self._to_circuit_qiskit()
-        except (ImportError, Exception):
-            return self._to_circuit_fallback()
+        except ImportError:
+            if self._is_identity():
+                return self._to_circuit_fallback()
+            return None
+
+    def _is_identity(self) -> bool:
+        """True when this tableau equals the identity tableau."""
+        ref = _Tableau(self.n)
+        return bool(
+            np.array_equal(self.x, ref.x)
+            and np.array_equal(self.z, ref.z)
+            and np.array_equal(self.r, ref.r)
+        )
 
     def _to_circuit_qiskit(self) -> "Circuit":
         """Synthesize via Qiskit's Clifford.decompose()."""
