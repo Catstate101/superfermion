@@ -73,6 +73,8 @@ Thumbs.db
 
 # Explicitly allow essential tracked files
 !.github/workflows/*.yml
+!website/public/logo.png
+!website/app/icon.png
 
 # MemPalace per-project files (issue #185)
 mempalace.yaml
