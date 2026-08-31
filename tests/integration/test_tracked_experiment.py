@@ -173,14 +173,15 @@ class TestTrackedExperiment:
         tracker = LifecycleTracker()
         assert isinstance(tracker, TrackerProtocol)
 
+        failing = FailingExecutor()
         with sf.experiment("lifecycle", tracker=tracker):
             sf.run(bell_circuit, device="cpu", shots=100)
             with pytest.raises(RuntimeError):
-                sf.run(bell_circuit, device=FailingExecutor(), shots=10)
+                sf.run(bell_circuit, device=failing, shots=10)
 
         assert tracker.events == [
             ("start", "cpu", 100),
             ("complete", 100),
-            ("start", repr(FailingExecutor()), 10),
+            ("start", repr(failing), 10),
             ("error", "RuntimeError"),
         ]

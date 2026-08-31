@@ -116,8 +116,11 @@ class TestLocalTracker:
         assert "sim failed" in record["error"]
 
     def test_experiment_creates_local_tracker_by_default(self, tmp_tracker_dir):
-        with patch(
-            "superfermion.experiment.local_tracker.LocalTracker",
+        from superfermion.experiment import local_tracker
+
+        with patch.object(
+            local_tracker,
+            "LocalTracker",
             side_effect=lambda name: LocalTracker(name, base_dir=str(tmp_tracker_dir)),
         ):
             with sf.experiment("auto-track") as tracker:
