@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="website/public/logo.png" alt="Superfermion" width="160" />
+</p>
+
 # Superfermion
 
 A high-performance quantum computing framework with a Python API and a
