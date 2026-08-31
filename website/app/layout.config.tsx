@@ -3,11 +3,15 @@ import type { BaseLayoutProps } from "fumadocs-ui/layouts/shared";
 export const baseOptions: BaseLayoutProps = {
   nav: {
     title: (
-      <span className="flex items-center gap-2 font-semibold">
-        <span className="flex h-6 w-6 items-center justify-center bg-violet-600/10 font-mono text-xs font-bold text-violet-600">
-          sf
-        </span>
-        Superfermion docs
+      <span className="group flex items-center gap-2 font-semibold">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/logo.png"
+          alt="Superfermion logo"
+          title="Superfermion"
+          className="h-10 w-auto origin-left rounded-md transition-transform duration-300 ease-out group-hover:scale-150 md:h-12"
+        />
+        <span className="hidden sm:inline">Superfermion docs</span>
       </span>
     ),
   },
