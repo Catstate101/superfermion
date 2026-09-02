@@ -23,12 +23,31 @@ class TestIBMDeviceAdapter:
         assert isinstance(executor, IBMDeviceExecutor)
         assert isinstance(executor, DeviceExecutor)
 
-    def test_missing_token_raises_on_call(self):
+    def test_missing_token_raises_on_call(self, monkeypatch):
         from superfermion.devices.ibm import IBMDevice
 
+        monkeypatch.delenv("QISKIT_IBM_TOKEN", raising=False)
         ibm = IBMDevice()
         with pytest.raises(ValueError, match="requires a token"):
             ibm("ibm_fez")
+
+    def test_env_token_used_when_no_token_passed(self, monkeypatch):
+        from superfermion.devices.ibm import IBMDevice
+
+        monkeypatch.setenv("QISKIT_IBM_TOKEN", "env-token")
+        mock_service_cls = MagicMock()
+        mock_service_cls.return_value = MagicMock()
+
+        with patch.dict(
+            "sys.modules",
+            {"qiskit_ibm_runtime": MagicMock(QiskitRuntimeService=mock_service_cls)},
+        ):
+            executor = IBMDevice()("ibm_fez")
+
+        mock_service_cls.assert_called_once_with(
+            channel="ibm_quantum_platform", token="env-token",
+        )
+        assert executor._backend_name == "ibm_fez"
 
     def test_service_created_with_token(self):
         from superfermion.devices.ibm import IBMDevice
@@ -76,6 +95,34 @@ class TestIBMDeviceAdapter:
         assert result.counts == {"00": 512, "11": 512}
         assert result.shots == 1024
         assert result.metadata["provider"] == "ibm"
+
+    def test_execute_forwards_shots_to_sampler(self, bell_circuit):
+        pytest.importorskip("qiskit_ibm_runtime")
+        from superfermion.devices.ibm import IBMDeviceExecutor
+
+        mock_service = MagicMock()
+        mock_pub = MagicMock()
+        mock_pub.data.meas.get_counts.return_value = {"00": 2000, "11": 2000}
+        mock_result = MagicMock()
+        mock_result.__getitem__.return_value = mock_pub
+
+        mock_sampler = MagicMock()
+        mock_sampler.run.return_value.result.return_value = mock_result
+        mock_service.backend.return_value = MagicMock()
+
+        executor = IBMDeviceExecutor(mock_service, "ibm_fez")
+
+        with patch("superfermion.bridge.to_qiskit", return_value=MagicMock()):
+            with patch(
+                "qiskit.transpiler.preset_passmanagers.generate_preset_pass_manager",
+            ) as mock_pm:
+                mock_pm.return_value.run.return_value = MagicMock()
+                with patch("qiskit_ibm_runtime.SamplerV2", return_value=mock_sampler):
+                    executor.execute(bell_circuit, shots=4000)
+
+        mock_sampler.run.assert_called_once()
+        _, call_kwargs = mock_sampler.run.call_args
+        assert call_kwargs.get("shots") == 4000
 
 
 class TestIonQDeviceAdapter:
