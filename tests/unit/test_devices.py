@@ -108,12 +108,48 @@ class TestIBMDevice:
             executor = ibm("ibm_fez")
         assert isinstance(executor, IBMDeviceExecutor)
 
-    def test_missing_token_raises(self):
+    def test_missing_token_raises(self, monkeypatch):
         from superfermion.devices.ibm import IBMDevice
 
+        monkeypatch.delenv("QISKIT_IBM_TOKEN", raising=False)
         ibm = IBMDevice()
         with pytest.raises(ValueError, match="requires a token"):
             ibm("ibm_fez")
+
+    def test_env_token_used_when_no_token_passed(self, monkeypatch):
+        from superfermion.devices.ibm import IBMDevice
+
+        monkeypatch.setenv("QISKIT_IBM_TOKEN", "env-token")
+        mock_service_cls = MagicMock()
+        mock_service_cls.return_value = MagicMock()
+
+        with patch.dict(
+            "sys.modules",
+            {"qiskit_ibm_runtime": MagicMock(QiskitRuntimeService=mock_service_cls)},
+        ):
+            executor = IBMDevice()("ibm_fez")
+
+        mock_service_cls.assert_called_once_with(
+            channel="ibm_quantum_platform", token="env-token",
+        )
+        assert executor._backend_name == "ibm_fez"
+
+    def test_explicit_token_preferred_over_env(self, monkeypatch):
+        from superfermion.devices.ibm import IBMDevice
+
+        monkeypatch.setenv("QISKIT_IBM_TOKEN", "env-token")
+        mock_service_cls = MagicMock()
+        mock_service_cls.return_value = MagicMock()
+
+        with patch.dict(
+            "sys.modules",
+            {"qiskit_ibm_runtime": MagicMock(QiskitRuntimeService=mock_service_cls)},
+        ):
+            IBMDevice(token="explicit-token")("ibm_fez")
+
+        mock_service_cls.assert_called_once_with(
+            channel="ibm_quantum_platform", token="explicit-token",
+        )
 
 
 class TestIonQDevice:

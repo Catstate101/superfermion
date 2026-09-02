@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from __future__ import annotations
 
+import os
+
 from typing import Any, Dict, Optional
 
 from superfermion.devices import DeviceCapabilities, DeviceExecutor
@@ -42,7 +44,7 @@ class IBMDeviceExecutor:
 
         from qiskit_ibm_runtime import SamplerV2 as Sampler
         sampler = Sampler(mode=ibmq_backend)
-        raw_job = sampler.run([isa_circuit])
+        raw_job = sampler.run([isa_circuit], shots=shots)
         remote_res = raw_job.result()
 
         try:
@@ -86,14 +88,15 @@ class IBMDevice:
 
     def _ensure_service(self) -> Any:
         if self._service is None:
-            if self._token is None:
+            token = self._token or os.getenv("QISKIT_IBM_TOKEN")
+            if token is None:
                 raise ValueError(
                     "IBMDevice requires a token. Pass token= or set "
                     "QISKIT_IBM_TOKEN in your environment."
                 )
             from qiskit_ibm_runtime import QiskitRuntimeService
             self._service = QiskitRuntimeService(
-                channel="ibm_quantum_platform", token=self._token,
+                channel="ibm_quantum_platform", token=token,
             )
         return self._service
 
