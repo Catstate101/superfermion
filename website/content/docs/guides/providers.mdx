@@ -42,6 +42,8 @@ print(result.metadata.execution_time)
 print(result.metadata.device_properties)
 ```
 
+`token` is optional — if omitted, `IBMDevice()` reads the `QISKIT_IBM_TOKEN` environment variable instead.
+
 ### IBM-Specific Options
 
 ```python
@@ -55,6 +57,8 @@ corrected_counts = readout_correction(result)
 # Zero-noise extrapolation
 result = zne(qc, device=ibm("ibm_brisbane"), noise_levels=[1, 2, 3])
 ```
+
+**Transpilation & mitigation:** Superfermion submits raw ISA circuits — it transpiles with Qiskit's preset pass manager at `optimization_level=3` (the executor default) and applies no error mitigation on the device path. `readout_correction` and `zne` are manual post-processing helpers: call them on the `RunResult` returned by `sf.run()`, as shown above. To request a different compile level, pass it through `sf.run()` — extra kwargs reach the executor unchanged, e.g. `sf.run(qc, device=ibm("ibm_brisbane"), shots=8192, optimization_level=1)`.
 
 ## IonQ
 
