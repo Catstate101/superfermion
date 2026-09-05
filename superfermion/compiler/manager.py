@@ -103,6 +103,19 @@ def compile(circuit: Circuit, level: int = 1, target: Optional[HardwareSpec] = N
     if level == 0 and not target:
         return circuit
 
+    # Rust compilation evaluates parameters, which requires concrete
+    # values. Symbolic (unbound) parameters must not reach the Rust
+    # pipeline - it panics on them (PanicException, SUP-19). Reject up
+    # front with a clean, actionable error instead.
+    unbound = circuit.to_ir().parameter_names()
+    if unbound:
+        raise ValueError(
+            f"compile() requires bound parameter values (level={level}, "
+            f"target={target!r}); unbound parameters: {unbound}. "
+            f"Call circuit.bind({{...}}) first, or use compile(level=0) "
+            f"to keep parameters symbolic."
+        )
+
     # Shim (temporary): decompose opaque unitaries — Rust compiler
     # does not yet handle UNITARY gates with embedded matrices.
     if _has_unitary_gates(circuit):
