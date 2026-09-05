@@ -37,6 +37,7 @@ class GateRecord:
     qubits: list[int]
     params: list[ParamValue] = field(default_factory=list)
     classical_bits: list[int] = field(default_factory=list)
+    condition: Optional[tuple[int, int]] = field(default=None)
     matrix: Optional[np.ndarray] = field(default=None, repr=False)
 
     def to_unitary(self) -> np.ndarray:
@@ -114,6 +115,9 @@ class Circuit:
             self._gates: list[GateRecord] = []
         self._parameters: dict[str, SymbolicParameter] = {}
         self._metadata: dict[str, Any] = {}
+        # Classical condition (cbit, value) waiting for the next gate
+        # (set by ``c_if``, consumed by the next ``_add_gate`` call).
+        self._pending_condition: Optional[tuple[int, int]] = None
 
     @property
     def n_qubits(self) -> int:
@@ -230,6 +234,12 @@ class Circuit:
         name = name.upper()  # Normalize to uppercase for universal backend matching
         self._validate_qubits(qubits, name)
         resolved_params = [self._resolve_param(p) for p in (params or [])]
+        condition = self._pending_condition
+        self._pending_condition = None
+        if condition is not None and self._use_rust:
+            # Rust GateSequence cannot carry classical conditions; convert to
+            # Python GateRecords (lazy) so the condition is preserved.
+            self._ensure_gates()
         if self._use_rust:
             # Push to Rust GateSequence — zero Python GateRecord allocation
             self._gates_rust.add_gate(name, qubits, [float(p) if not isinstance(p, SymbolicParameter) else 0.0 for p in resolved_params])
@@ -238,6 +248,7 @@ class Circuit:
                 name=name,
                 qubits=qubits,
                 params=resolved_params,
+                condition=condition,
             ))
         return self
 
@@ -256,6 +267,11 @@ class Circuit:
         self._ensure_gates()
         for g in gates:
             g.name = g.name.upper()
+            if self._pending_condition is not None:
+                raise ValueError(
+                    "extend_raw() cannot run while a c_if(...) condition is "
+                    "pending; add the gated gate before bulk-extending"
+                )
         self._gates.extend(gates)
         return self
 
@@ -282,6 +298,11 @@ class Circuit:
         self._ensure_gates()
         # Pre-allocate GateRecord list to avoid reallocations
         gate_list: list[GateRecord] = [None] * len(records)  # type: ignore[list-item]
+        if self._pending_condition is not None:
+            raise ValueError(
+                "extend_raw_from_records() cannot run while a c_if(...) "
+                "condition is pending; add the gated gate before bulk-extending"
+            )
         for i, (name, qubits, params) in enumerate(records):
             # Store tuples directly — GateRecord never mutates qubits/params after
             # construction, and skipping list() avoids ~30 % of the import cost.
@@ -475,13 +496,68 @@ class Circuit:
     # Measurement & special
     # ───────────────────────────────────────────────────────
 
+    def c_if(self, cbit: int, value: int = 1) -> Circuit:
+        """Classical feed-forward: apply the NEXT gate only if classical bit
+        ``cbit`` equals ``value``.
+
+        Mid-circuit measurement analogue of PennyLane's
+        ``qml.cond(m == value, op)`` (OpenQASM 3 ``if (c[cbit] == value)``
+        semantics). The condition is attached to the next gate added after
+        this call, e.g.
+
+        >>> circ = sf.Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+
+        Measures the state of qubit 0 into classical bit 0, then applies
+        X on qubit 1 only when the outcome was 1.
+
+        Args:
+            cbit: Classical bit to test (must be < ``n_cbits``).
+            value: Expected bit value (0 or 1).
+
+        Returns:
+            ``self``, for fluent chaining.
+        """
+        if value not in (0, 1):
+            raise ValueError(
+                f"c_if value must be 0 or 1, got {value!r}.\n"
+                f"  Fix: circuit.c_if(cbit, 0) or circuit.c_if(cbit, 1)"
+            )
+        if cbit < 0 or cbit >= self._n_cbits:
+            raise ValueError(
+                f"c_if classical bit {cbit} out of range "
+                f"(circuit has {self._n_cbits} cbits).\n"
+                f"  Fix: sf.Circuit(n_qubits, n_cbits=...)"
+            )
+        if self._pending_condition is not None:
+            raise ValueError(
+                f"c_if({cbit}, {value}) called while a previous condition "
+                f"{self._pending_condition} is still pending.\n"
+                f"  Fix: add the gated gate before chaining another c_if"
+            )
+        self._pending_condition = (cbit, value)
+        return self
+
     def measure(self, qubit: int, cbit: int | None = None) -> Circuit:
         """Measure a qubit in the computational basis.
+
+        When the measured qubit is used again later (a gate, reset, or a
+        second measurement), the measurement is *mid-circuit*: the qubit
+        collapses onto the sampled outcome and the result is stored in the
+        classical bit for classical feed-forward (see :meth:`c_if`).
+        Measurements at the very end of a circuit remain terminal sampling
+        instructions.
 
         Args:
             qubit: Qubit to measure.
             cbit: Classical bit to store result. Defaults to same index.
         """
+        if self._pending_condition is not None:
+            raise ValueError(
+                "c_if(...) cannot precede measure(): conditions apply to "
+                "quantum gates, not to measurements.\n"
+                f"  Fix: drop the pending c_if({self._pending_condition[0]}, "
+                f"{self._pending_condition[1]}) or insert the gated gate first"
+            )
         self._validate_qubit(qubit, "measure")
         if cbit is None:
             cbit = qubit
@@ -534,6 +610,14 @@ class Circuit:
             raise ValueError("Matrix is not unitary (U @ U^dagger != I)")
 
         self._validate_qubits(qubits, "UNITARY")
+
+        if self._pending_condition is not None:
+            raise ValueError(
+                "c_if(...) cannot precede unitary(): classical conditions are "
+                "only supported for named gates.\n"
+                "  Fix: decompose the matrix into basis gates and apply c_if "
+                "to the first one"
+            )
 
         if self._use_rust and self._gates_rust is not None:
             self._gates_rust.add_unitary(qubits, matrix)
@@ -612,6 +696,7 @@ class Circuit:
                 qubits=gate.qubits[:],
                 params=new_params,
                 classical_bits=gate.classical_bits[:],
+                condition=gate.condition,
                 matrix=gate.matrix,
             )
             new_circuit._gates.append(new_gate)
@@ -648,19 +733,24 @@ class Circuit:
             else:
                 param_part = ""
 
+            # Classical feed-forward: OpenQASM 3 `if (c[cbit] == value)`.
+            prefix = ""
+            if gate.condition is not None:
+                prefix = f"if (c[{gate.condition[0]}] == {gate.condition[1]}) "
+
             if gate.name == "MEASURE":
                 cbit = gate.classical_bits[0] if gate.classical_bits else gate.qubits[0]
                 lines.append(f"c[{cbit}] = measure {qstr[0]};")
             elif gate.name == "CNOT":
-                lines.append(f"cx {qstr[0]}, {qstr[1]};")
+                lines.append(f"{prefix}cx {qstr[0]}, {qstr[1]};")
             elif gate.name == "BARRIER":
                 lines.append(f"barrier {', '.join(qstr)};")
             elif len(gate.qubits) == 1:
-                lines.append(f"{name_lower}{param_part} {qstr[0]};")
+                lines.append(f"{prefix}{name_lower}{param_part} {qstr[0]};")
             elif len(gate.qubits) == 2:
-                lines.append(f"{name_lower}{param_part} {qstr[0]}, {qstr[1]};")
+                lines.append(f"{prefix}{name_lower}{param_part} {qstr[0]}, {qstr[1]};")
             elif len(gate.qubits) == 3:
-                lines.append(f"{name_lower}{param_part} {qstr[0]}, {qstr[1]}, {qstr[2]};")
+                lines.append(f"{prefix}{name_lower}{param_part} {qstr[0]}, {qstr[1]}, {qstr[2]};")
 
         return "\n".join(lines) + "\n"
 
@@ -680,6 +770,8 @@ class Circuit:
                 ]
             if gate.classical_bits:
                 d["classical_bits"] = gate.classical_bits
+            if gate.condition is not None:
+                d["condition"] = list(gate.condition)
             result.append(d)
         return result
 
@@ -701,7 +793,13 @@ class Circuit:
                 dag.add_unitary([int(q) for q in gate.qubits], gate.matrix)
             else:
                 params = [float(p) if not isinstance(p, SymbolicParameter) else str(p.name) for p in gate.params]
-                dag.add_gate(str(gate.name), [int(q) for q in gate.qubits], params)
+                if gate.condition is not None:
+                    dag.add_gate_cond(
+                        str(gate.name), [int(q) for q in gate.qubits], params,
+                        int(gate.condition[0]), int(gate.condition[1]),
+                    )
+                else:
+                    dag.add_gate(str(gate.name), [int(q) for q in gate.qubits], params)
         return dag
 
     def to_unitary(self) -> np.ndarray:
