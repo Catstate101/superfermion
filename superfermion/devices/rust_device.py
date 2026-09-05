@@ -26,6 +26,30 @@ def _lsb_to_msb(sv: np.ndarray, n_qubits: int) -> np.ndarray:
     return tensor.reshape(-1)
 
 
+def _is_dynamic_circuit(circuit: Circuit) -> bool:
+    """True when a circuit needs mid-circuit (dynamic) semantics.
+
+    Triggers on: any ``RESET``, any classically conditioned gate
+    (``c_if``), or a ``MEASURE`` whose qubit is touched again later
+    (gate, reset, or second measurement) — i.e. a measure that is not
+    terminal. Purely terminal-measure circuits keep the fast exact path.
+    """
+    circuit._ensure_gates()
+    gates = circuit._gates
+    for i, g in enumerate(gates):
+        name = g.name.upper()
+        if g.condition is not None:
+            return True
+        if name == "RESET":
+            return True
+        if name == "MEASURE":
+            q = g.qubits[0]
+            for later in gates[i + 1:]:
+                if q in later.qubits:
+                    return True
+    return False
+
+
 class RustDevice:
     """High-performance local simulator backed entirely by Rust.
 
@@ -69,6 +93,11 @@ class RustDevice:
 
     def execute(self, circuit: Circuit, shots: int = 1000, **kwargs: Any) -> RunResult:
         """Execute a circuit on this device."""
+        # Mid-circuit (dynamic) circuits: measure/reset/feed-forward change
+        # the state during the circuit, so they need per-shot trajectory
+        # replay instead of a single unitary evolution + terminal sampling.
+        if _is_dynamic_circuit(circuit):
+            return self._run_dynamic(circuit, shots, **kwargs)
         if self._method == "stabilizer":
             return self._run_stabilizer(circuit, shots, **kwargs)
         if self._method == "mps":
@@ -84,6 +113,61 @@ class RustDevice:
             skip_fusion=(self._method in ("stabilizer", "mps")),
             supports_statevector=(self._method == "statevector"),
             is_simulator=True,
+        )
+
+    def _run_dynamic(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
+        """Mid-circuit (dynamic-circuit) simulation via per-shot trajectories.
+
+        Each shot replays the circuit in the Rust trajectory engine: every
+        Measure op samples + collapses its qubit and stores the outcome in
+        the classical register; conditioned gates (``c_if``) execute only
+        when their register test passes; Reset ops collapse the qubit back
+        to |0>. Final bitstrings are sampled over all qubits.
+
+        Requires ``shots > 0`` and ``method='statevector'`` on CPU — the
+        collapsed mixture cannot be represented as a pure state, matching
+        PennyLane's one-shot semantics for finite shots.
+        """
+        if self._hardware != "cpu":
+            raise RuntimeError(
+                "Mid-circuit measurement circuits (measure + feed-forward / "
+                "reset) currently require device='cpu' — the per-shot "
+                "trajectory engine is CPU-only.\n"
+                "  Fix: sf.run(circuit, device='cpu', shots=...)"
+            )
+        if self._method != "statevector":
+            raise RuntimeError(
+                "Mid-circuit measurement circuits (measure + feed-forward / "
+                "reset) currently require method='statevector'.\n"
+                f"  Got method={self._method!r}. "
+                "Fix: sf.run(circuit, method='statevector', shots=...)"
+            )
+        if shots <= 0:
+            raise RuntimeError(
+                "Mid-circuit measurement circuits (measure + feed-forward / "
+                "reset) require finite shots: the collapsed per-shot "
+                "mixture cannot be represented by a single pure state.\n"
+                "  Fix: sf.run(circuit, shots>0) "
+                "(PennyLane parity: finite-shots one-shot mode)"
+            )
+        seed = kwargs.get("seed", 42)
+        dag = self._prepare_dag(circuit)
+        counts = dag.simulate_dynamic(shots, seed)
+        probabilities = {k: v / shots for k, v in counts.items()}
+        return RunResult(
+            counts=counts,
+            probabilities=probabilities,
+            state=None,
+            statevector=None,
+            shots=shots,
+            circuit=circuit,
+            metadata={
+                "backend": "rust-cpu",
+                "n_qubits": circuit.n_qubits,
+                "method": "statevector",
+                "sample_path": "rust-dynamic-trajectories",
+                "dynamic": True,
+            },
         )
 
     def _run_statevector(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
