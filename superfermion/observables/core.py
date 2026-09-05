@@ -86,6 +86,48 @@ def expval(statevector: np.ndarray, observable) -> float:
     return float(np.real(observable._fast_expval(sv)))
 
 
+def _apply_observable(sv: np.ndarray, observable) -> np.ndarray:
+    """Return O|ψ⟩ as a numpy array for PauliString / SparsePauliOp / Hamiltonian."""
+    if isinstance(observable, PauliString):
+        return observable._apply(sv)
+    if isinstance(observable, SparsePauliOp):
+        out = np.zeros_like(sv)
+        for pauli_str, coeff in observable._terms:
+            out += PauliString(pauli_str, coeffs=complex(coeff))._apply(sv)
+        return out
+    if isinstance(observable, Hamiltonian):
+        out = np.zeros_like(sv)
+        for term in observable.terms:
+            out += term._apply(sv)
+        return out
+    raise TypeError(
+        f"Unsupported observable type: {type(observable).__name__}. "
+        "Expected PauliString, SparsePauliOp, or Hamiltonian."
+    )
+
+
+def variance(statevector: np.ndarray, observable) -> float:
+    """Compute Var(O) = ⟨O²⟩ − ⟨O⟩² for any SF observable.
+
+    For Hermitian observables (real coefficients) the result is exact:
+    ⟨O²⟩ = ‖O|ψ⟩‖² and ⟨O⟩ = Re⟨Oψ|ψ⟩ are both read off a single
+    application O|ψ⟩. Works with plain numpy arrays (no JAX required),
+    compatible with all SF backends. PennyLane analogue: ``qml.var``.
+
+    Args:
+        statevector: Complex state vector of length 2^n.
+        observable:  A PauliString, SparsePauliOp, or Hamiltonian.
+
+    Returns:
+        Real variance (float).
+    """
+    sv = np.asarray(statevector, dtype=np.complex128).ravel()
+    opsi = _apply_observable(sv, observable)
+    mean = float(np.vdot(opsi, sv).real)
+    mean_sq = float(np.vdot(opsi, opsi).real)
+    return mean_sq - mean * mean
+
+
 # ── Observable base ────────────────────────────────────────────────────────────
 
 class Observable(ABC):
