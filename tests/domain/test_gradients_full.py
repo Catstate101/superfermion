@@ -121,6 +121,82 @@ class TestQNG:
         assert new_params["theta"] != 0.5
 
 
+class TestQfimFubiniStudy:
+    """Value-level regression tests for State.qfim() (SUP-18).
+
+    The metric must be the Fubini-Study metric, i.e. the covariance
+    (gauge) term must be subtracted: for a Pauli rotation e^{-i theta P/2}
+    the diagonal is Var(P) in the pre-gate state, not <P^2> = 1.
+    """
+
+    def test_rz_on_zero_is_zero(self):
+        """n=1 RZ from |0>: pure global phase -> metric must be ~0."""
+        c = sf.Circuit(1).rz(sf.param("p0"), 0)
+        dag = c.to_ir()
+        st = sf.run(c.bind({"p0": 0.7}), device="cpu", shots=0).state
+        g = np.array(st.qfim(dag, {"p0": 0.7}))
+        assert g.shape == (1, 1)
+        assert abs(float(g[0, 0])) < 1e-6, f"RZ on |0> qfim = {g[0, 0]}"
+
+    def test_rx_ry_on_zero_are_one(self):
+        """n=1 RX/RY from |0>: Var(P) = 1, unchanged by the fix."""
+        for gate in ("rx", "ry"):
+            c = sf.Circuit(1)
+            getattr(c, gate)(sf.param("p0"), 0)
+            dag = c.to_ir()
+            st = sf.run(c.bind({"p0": 0.7}), device="cpu", shots=0).state
+            val = float(np.asarray(st.qfim(dag, {"p0": 0.7}))[0, 0])
+            assert abs(val - 1.0) < 1e-6, f"{gate} on |0> qfim = {val}"
+
+    @staticmethod
+    def _sv(circuit, vals):
+        return np.asarray(
+            sf.run(circuit.bind(vals), device="cpu", shots=0).statevector,
+            dtype=np.complex128,
+        ).ravel()
+
+    @classmethod
+    def _exact_fs_metric(cls, circuit, names, vals, eps=1e-6):
+        """Exact FS metric via central-difference state derivatives (SUP-18)."""
+        psi0 = cls._sv(circuit, vals)
+        dpsi = np.zeros((len(names), psi0.size), dtype=np.complex128)
+        for k, nm in enumerate(names):
+            vp, vm = dict(vals), dict(vals)
+            vp[nm] += eps
+            vm[nm] -= eps
+            dpsi[k] = (cls._sv(circuit, vp) - cls._sv(circuit, vm)) / (2 * eps)
+        gram = dpsi @ dpsi.conj().T
+        conn = psi0 @ dpsi.conj().T            # <dpsi_k|psi>
+        corr = np.outer(conn, conn.conj())     # <dpsi_i|psi><psi|dpsi_j>
+        return 4.0 * np.real(gram - corr)
+
+    @staticmethod
+    def _ladder(n):
+        c = sf.Circuit(n)
+        for i in range(n):
+            c.ry(sf.param(f"p{2 * i}"), i)
+            c.rz(sf.param(f"p{2 * i + 1}"), i)
+        for i in range(n - 1):
+            c.cx(i, i + 1)
+        return c
+
+    def test_entangled_matches_exact_metric(self):
+        """Ladder + RZZ circuits: qfim == exact FS metric (was off by O(1))."""
+        cases = [self._ladder(2), self._ladder(3)]
+        rzz = sf.Circuit(2).ry(sf.param("p0"), 0)
+        rzz.rz(sf.param("p1"), 1)
+        rzz.rzz(sf.param("p2"), 0, 1)
+        cases.append(rzz)
+        rng = np.random.default_rng(11)
+        for circuit in cases:
+            names = circuit.to_ir().parameter_names()
+            vals = dict(zip(names, rng.uniform(-np.pi, np.pi, len(names))))
+            st = sf.run(circuit.bind(vals), device="cpu", shots=0).state
+            g = np.array(st.qfim(circuit.to_ir(), vals))
+            exact = self._exact_fs_metric(circuit, names, vals)
+            np.testing.assert_allclose(g, exact, atol=1e-5, rtol=1e-5)
+
+
 class TestRiemannianGradient:
     def test_riemannian_gradient(self):
         riemannian = pytest.importorskip("superfermion.qml.gradient.riemannian")
