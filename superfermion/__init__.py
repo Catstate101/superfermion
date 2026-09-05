@@ -30,7 +30,7 @@ Application modules (importable but not promoted to ``sf.*``):
     superfermion.viz          — circuit visualization
 """
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 
 # ── Core imports (only numpy required) ────────────────────────────────
 from superfermion.circuit import Circuit
