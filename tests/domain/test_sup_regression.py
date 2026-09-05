@@ -14,6 +14,12 @@ Each class mirrors one per-fix verification script (see the repo-root
 (i) compiler U-convention fidelity suite                       (SUP-12)
 (j) bound/parameterless DAG grad/qfim warning (SUP-6, not silent)
 (k) missing param_values raise catchable MethodError (no Rust panic)
+(l) compile() rejects unbound parameters with a clean ValueError (SUP-19)
+(m) CU/CU3 native IR: matrix convention, sim, qfim (SUP-20)
+(n) DAG JSON roundtrip preserves CP/CU gates (SUP-21)
+(o) classical shadow + shadow expval entry points & accuracy (SUP-22)
+(p) variance + mutual_info measurement types, Rust-backed (SUP-23)
+(q) mid-circuit measure + c_if feed-forward + reset (SUP-24)
 
 Conventions assumed (documented in guides/execution.mdx):
 - numpy statevectors are little-endian: qubit q lives at bit q.
@@ -579,3 +585,509 @@ class TestMissingParamValues:
         st = self._state(qc)
         with pytest.raises(MethodError, match="not found in param_values"):
             st.qfim(qc.to_ir(), {})
+
+
+# ── (l) SUP-19: compile() rejects unbound params (no Rust panic) ─────────────
+class TestCompileUnboundParameters:
+    """compile(level>0) on symbolic parameters used to panic inside the Rust
+    parameter evaluator (PanicException at ops.rs). It must raise a catchable
+    ValueError that names the offending parameters."""
+
+    @staticmethod
+    def _unbound_circuit():
+        return (
+            Circuit(2)
+            .h(0)
+            .ry(sf.param("t0"), 1)
+            .rz(sf.param("t1"), 1)
+            .cnot(0, 1)
+        )
+
+    def test_level1_unbound_raises_value_error(self):
+        with pytest.raises(ValueError, match="requires bound parameter values"):
+            compile_circuit(self._unbound_circuit(), level=1)
+
+    def test_level2_unbound_raises_value_error(self):
+        with pytest.raises(ValueError, match="requires bound parameter values"):
+            compile_circuit(self._unbound_circuit(), level=2)
+
+    def test_error_names_unbound_parameters(self):
+        with pytest.raises(ValueError, match="t0.*t1"):
+            compile_circuit(self._unbound_circuit(), level=1)
+
+    def test_level0_unbound_is_passthrough(self):
+        c = self._unbound_circuit()
+        assert compile_circuit(c, level=0) is c
+
+    def test_bound_circuit_still_compiles(self):
+        c = self._unbound_circuit().bind({"t0": 0.3, "t1": 0.4})
+        result = compile_circuit(c, level=1)
+        assert isinstance(result, Circuit)
+        assert result.gate_count >= 1
+
+
+# ── (m) SUP-20: CU/CU3 native IR support ─────────────────────────────────────
+class TestControlledU3Native:
+    """cu/cu3 used to raise "Unknown gate: 'cu'" from to_ir(). They are now
+    native OpType::Cu gates: control-first, diag(I, U3) matrix convention."""
+
+    _P = (0.6, 0.9, 1.3)  # (theta, phi, lam)
+
+    @staticmethod
+    def _sv(circuit):
+        sv = np.asarray(sf.simulate(circuit, method="statevector").numpy())
+        return np.asarray(sv, dtype=np.complex128).ravel()
+
+    @staticmethod
+    def _exact_fs_metric(circuit, names, vals, eps=1e-6):
+        """Exact FS metric via central-difference state derivatives (SUP-18)."""
+        def sv(v):
+            out = sf.run(circuit.bind(v), device="cpu", shots=0).statevector
+            return np.asarray(out, dtype=np.complex128).ravel()
+
+        psi0 = sv(vals)
+        dpsi = np.zeros((len(names), psi0.size), dtype=np.complex128)
+        for k, nm in enumerate(names):
+            vp, vm = dict(vals), dict(vals)
+            vp[nm] += eps
+            vm[nm] -= eps
+            dpsi[k] = (sv(vp) - sv(vm)) / (2 * eps)
+        gram = dpsi @ dpsi.conj().T
+        conn = psi0 @ dpsi.conj().T            # <dpsi_k|psi>
+        corr = np.outer(conn, conn.conj())     # <dpsi_i|psi><psi|dpsi_j>
+        return 4.0 * np.real(gram - corr)
+
+    def test_cu3_aliases_cu(self):
+        np.testing.assert_allclose(
+            self._sv(Circuit(2).x(0).cu3(*self._P, 0, 1)),
+            self._sv(Circuit(2).x(0).cu(*self._P, 0, 1)),
+            atol=1e-10,
+        )
+
+    def test_cu_equals_u_when_control_is_one(self):
+        # x(0) pins the control to |1>: cu must act exactly like an open u.
+        np.testing.assert_allclose(
+            self._sv(Circuit(2).x(0).cu(*self._P, 0, 1)),
+            self._sv(Circuit(2).x(0).u(*self._P, 1)),
+            atol=1e-10,
+        )
+
+    def test_cu_is_identity_when_control_is_zero(self):
+        # Control q0 stays |0>: neither |00> nor x(1)|00> is touched.
+        sv0 = self._sv(Circuit(2).cu(*self._P, 0, 1))
+        np.testing.assert_allclose(sv0, [1.0, 0, 0, 0], atol=1e-10)
+        sv1 = self._sv(Circuit(2).x(1).cu(*self._P, 0, 1))
+        np.testing.assert_allclose(sv1, [0, 0, 1.0, 0], atol=1e-10)
+
+    def test_cu_acts_as_u3_with_phases(self):
+        # x(0) -> index 1 (q0=|1>, q1=|0>); U3|0> = (cos(θ/2), e^{iφ} sin(θ/2))
+        # lands on the {q0=1} subspace: indices 1 and 3.
+        theta, phi, _ = self._P
+        sv = self._sv(Circuit(2).x(0).cu(*self._P, 0, 1))
+        np.testing.assert_allclose(sv[1], np.cos(theta / 2), atol=1e-10)
+        np.testing.assert_allclose(
+            sv[3], np.exp(1j * phi) * np.sin(theta / 2), atol=1e-10
+        )
+        np.testing.assert_allclose(sv[[0, 2]], 0.0, atol=1e-10)
+
+    def test_cu_to_ir_preserves_symbolic_parameters(self):
+        c = Circuit(2).cu(sf.param("t0"), sf.param("t1"), sf.param("t2"), 0, 1)
+        assert c.to_ir().parameter_names() == ["t0", "t1", "t2"]
+
+    def test_qfim_through_cu_matches_exact_metric(self):
+        # cu3 on an excited control (q0), entangled via CX with q2: the qfim
+        # engine must see Cu parameters and match the exact FS metric.
+        c = Circuit(3).x(0).cu3(sf.param("p0"), sf.param("p1"), sf.param("p2"), 0, 1)
+        c.cx(1, 2)
+        names = c.to_ir().parameter_names()
+        assert names == ["p0", "p1", "p2"]
+        vals = {"p0": 0.6, "p1": 0.9, "p2": 1.3}
+        st = sf.run(c.bind(vals), device="cpu", shots=0).state
+        g = np.array(st.qfim(c.to_ir(), vals))
+        exact = self._exact_fs_metric(c, names, vals)
+        np.testing.assert_allclose(g, exact, atol=1e-5, rtol=1e-5)
+
+
+# ── (n) SUP-21: DAG JSON roundtrip keeps parameterized controlled gates ─────
+class TestDagJsonRoundtrip:
+    """QuantumDAG to_json/from_json used to silently drop CP gates
+    (rebuild_op_type had no "CP" arm - same bug class as Cu before SUP-20).
+    Both gates must survive a roundtrip unchanged."""
+
+    @staticmethod
+    def _roundtrip_sv(circuit):
+        dag = circuit.to_ir()
+        dag2 = type(dag).from_json(dag.to_json())
+        return (
+            np.asarray(dag.simulate(), dtype=np.complex128).ravel(),
+            np.asarray(dag2.simulate(), dtype=np.complex128).ravel(),
+        )
+
+    def test_cp_survives_roundtrip(self):
+        before, after = self._roundtrip_sv(
+            Circuit(2).x(0).x(1).cp(0.6, 0, 1)
+        )
+        np.testing.assert_allclose(after, before, atol=1e-10)
+
+    def test_cu_survives_roundtrip(self):
+        before, after = self._roundtrip_sv(
+            Circuit(2).x(0).cu3(0.6, 0.9, 1.3, 0, 1)
+        )
+        np.testing.assert_allclose(after, before, atol=1e-10)
+
+
+# ── SUP-22: classical shadow + shadow expval ────────────────────────────────
+
+class TestClassicalShadow:
+    """(o) SUP-22: classical-shadow estimators (additive feature).
+
+    Entry points sf.classical_shadow / sf.shadow_expval / sf.ClassicalShadow
+    (and State.classical_shadow / State.shadow_expval) sample randomized
+    single-qubit Pauli-basis snapshots from the exact statevector and
+    estimate expectation values with the unbiased shadow estimator
+    (median of k chunk means for k > 1).  Verified against exact expval;
+    PennyLane cross-checks live in the repo-root _verify_shadow.py.
+    """
+
+    @staticmethod
+    def _exact(circuit, label):
+        sv = np.asarray(
+            sf.run(circuit, device="cpu", method="statevector", shots=0)
+            .statevector,
+            dtype=np.complex128,
+        ).ravel()
+        op = SparsePauliOp.from_string(label, n_qubits=circuit.n_qubits)
+        return float(np.real(op._fast_expval(sv)))
+
+    def test_entry_points_present(self):
+        for name in ("classical_shadow", "shadow_expval", "ClassicalShadow"):
+            assert callable(getattr(sf, name, None)), name
+        assert callable(getattr(sf.State, "classical_shadow", None))
+        assert callable(getattr(sf.State, "shadow_expval", None))
+        import superfermion.mitigation as sfm
+
+        assert callable(sfm.classical_shadow)
+        assert callable(sfm.shadow_expval)
+        assert callable(sfm.ClassicalShadow)
+
+    def test_single_qubit_matches_exact(self):
+        circuit = Circuit(1).ry(0.3, 0)
+        ex = self._exact(circuit, "Z")
+        est = sf.shadow_expval(circuit, "Z", shots=12000, seed=3)
+        assert abs(est - ex) < 0.05, f"est={est} exact={ex}"
+        # X expectation of RY(0.3)|0> = sin(0.3)
+        exx = self._exact(circuit, "X")
+        estx = sf.shadow_expval(circuit, "X", shots=12000, seed=4)
+        assert abs(estx - exx) < 0.05, f"est={estx} exact={exx}"
+
+    def test_bell_correlators(self):
+        bell = Circuit(2).h(0).cnot(0, 1)
+        for label in ("ZZ", "XX", "YY"):
+            ex = self._exact(bell, label)
+            est = sf.shadow_expval(bell, label, shots=16000, seed=5)
+            assert abs(est - ex) < 0.12, f"{label}: est={est} exact={ex}"
+
+    def test_three_qubit_term(self):
+        ghz = Circuit(3).h(0).cnot(0, 1).cnot(1, 2)
+        ex = self._exact(ghz, "ZZZ")
+        est = sf.shadow_expval(ghz, "ZZZ", shots=24000, seed=6)
+        assert abs(est - ex) < 0.25, f"est={est} exact={ex}"
+
+    def test_observable_forms_agree(self):
+        circuit = Circuit(2).ry(0.6, 0).ry(1.2, 1).cnot(0, 1)
+        shadow = sf.classical_shadow(circuit, shots=8000, seed=7)
+        base = shadow.expval(([1, 1], 1.0, 0.0))
+        assert abs(shadow.expval(SparsePauliOp.from_string("X0X1", n_qubits=2))
+                   - base) < 1e-9
+        assert abs(shadow.expval(sf.PauliString("XX")) - base) < 1e-9
+        assert abs(shadow.expval(
+            sf.Hamiltonian([sf.PauliString("XX", coeffs=1.0)])) - base) < 1e-9
+        assert abs(shadow.expval("X0X1") - base) < 1e-9
+        # identity term is exact; coefficients scale linearly
+        assert abs(shadow.expval(([0, 0], 2.0, 0.0)) - 2.0) < 1e-9
+        assert abs(shadow.expval(([1, 1], 3.0, 0.0)) - 3.0 * base) < 1e-9
+
+    def test_seed_reproducibility(self):
+        circuit = Circuit(2).ry(0.6, 0).ry(1.2, 1).cnot(0, 1)
+        a = sf.classical_shadow(circuit, shots=400, seed=42)
+        b = sf.classical_shadow(circuit, shots=400, seed=42)
+        assert np.array_equal(a.bits, b.bits)
+        assert np.array_equal(a.recipes, b.recipes)
+        c_ = sf.classical_shadow(circuit, shots=400, seed=43)
+        assert not (np.array_equal(a.bits, c_.bits)
+                    and np.array_equal(a.recipes, c_.recipes))
+        assert a.n_qubits == 2 and a.n_snapshots == 400
+        assert set(np.unique(a.recipes)).issubset({1, 2, 3})
+
+    def test_median_of_means(self):
+        circuit = Circuit(2).ry(0.6, 0).ry(1.2, 1).cnot(0, 1)
+        ex = self._exact(circuit, "ZZ")
+        for k in (2, 8, 25):
+            est = sf.shadow_expval(circuit, "ZZ", shots=20000, seed=8, k=k)
+            assert abs(est - ex) < 0.12, f"k={k}: est={est} exact={ex}"
+
+    def test_state_methods(self):
+        circuit = Circuit(1).ry(0.3, 0)
+        st = sf.simulate(circuit, method="statevector")
+        ex = self._exact(circuit, "Z")
+        shadow = st.classical_shadow(shots=12000, seed=9)
+        assert shadow.n_snapshots == 12000
+        assert abs(shadow.expval(([3], 1.0, 0.0)) - ex) < 0.05
+        assert abs(st.shadow_expval(([3], 1.0, 0.0), shots=12000, seed=10)
+                   - ex) < 0.05
+
+    def test_validation(self):
+        circuit = Circuit(1).h(0)
+        with pytest.raises(ValueError):
+            sf.classical_shadow(circuit, shots=0)
+        with pytest.raises(ValueError):
+            sf.ClassicalShadow([[0, 2]], [[1, 2]])   # bits must be 0/1
+        with pytest.raises(ValueError):
+            sf.ClassicalShadow([[0, 1]], [[1, 7]])   # bad basis code
+        with pytest.raises(ValueError):
+            sf.ClassicalShadow([[0, 1]], [[1]])      # shape mismatch
+        shadow = sf.classical_shadow(circuit, shots=100, seed=1)
+        with pytest.raises(ValueError):
+            shadow.expval(([1, 1], 1.0, 0.0))      # term beyond n_qubits
+        with pytest.raises(ValueError):
+            shadow.expval("Z0", k=0)
+        with pytest.raises(ValueError):
+            shadow.expval("Z0", k=101)              # k > snapshots
+        with pytest.raises(ValueError):
+            sf.classical_shadow(np.ones(3), shots=10)  # not a 2**n state
+
+
+class TestVarianceMutualInfo:
+    """(p) variance + mutual_info measurement types (SUP-23)."""
+
+    @staticmethod
+    def _raw(label, coef=1.0, n=None):
+        codes = [_PAULI_ENCODE[ch] for ch in label]
+        if n is not None:
+            codes = codes + [0] * (n - len(codes))
+        return (codes, float(coef), 0.0)
+
+    @staticmethod
+    def _state(circuit):
+        return sf.run(circuit, device="cpu", method="statevector",
+                      shots=0).state
+
+    def test_entry_points(self):
+        assert callable(sf.variance)
+        assert "variance" in sf.__all__
+        assert hasattr(sf.State, "variance")
+        assert hasattr(sf.State, "mutual_info")
+        assert hasattr(sf.RunResult, "variance")
+        assert hasattr(sf.RunResult, "mutual_info")
+
+    def test_variance_bell_analytic(self):
+        circuit = Circuit(2).h(0).cnot(0, 1)
+        st = self._state(circuit)
+        assert abs(st.variance([self._raw("ZI", n=2)]) - 1.0) < 1e-9
+        assert abs(st.variance([self._raw("ZZ", n=2)])) < 1e-12
+        assert abs(st.variance([self._raw("ZI", 0.5, 2),
+                                self._raw("IX", 0.3, 2)]) - 0.34) < 1e-9
+        assert abs(st.variance([self._raw("I", n=2)])) < 1e-12
+
+    def test_variance_numpy_reference(self):
+        # 3-qubit RY/CNOT; State.variance (Rust) vs pure-numpy O|psi>
+        circuit = (Circuit(3).ry(0.7, 0).ry(0.4, 1).cnot(0, 1)
+                   .cnot(1, 2).rx(0.9, 2))
+        st = self._state(circuit)
+        sv = np.asarray(st.numpy(), dtype=np.complex128)
+        obs = [sf.PauliString("ZII", coeffs=0.5),
+               sf.PauliString("IZI", coeffs=0.3),
+               sf.PauliString("IIX", coeffs=0.2)]
+        opsi = sum(t._apply(sv) for t in obs)
+        mean = float(np.vdot(opsi, sv).real)
+        mean_sq = float(np.vdot(opsi, opsi).real)
+        expected = mean_sq - mean * mean
+        raw = [self._raw("ZII", 0.5, 3), self._raw("IZI", 0.3, 3),
+               self._raw("IIX", 0.2, 3)]
+        assert abs(st.variance(raw) - expected) < 1e-8
+        spo = SparsePauliOp(["ZII", "IZI", "IIX"], coeffs=[0.5, 0.3, 0.2])
+        assert abs(sf.variance(sv, spo) - st.variance(raw)) < 1e-9
+
+    def test_variance_density_matrix(self):
+        circuit = Circuit(2).h(0).cnot(0, 1)
+        st = self._state(circuit)
+        rho0 = st.partial_trace([0])  # Bell reduced state = I/2
+        assert rho0.method == "density_matrix"
+        for label in ("Z", "X", "Y"):
+            assert abs(rho0.variance([self._raw(label)]) - 1.0) < 1e-9
+        assert abs(rho0.entropy() - np.log(2.0)) < 1e-9
+        assert abs(rho0.purity() - 0.5) < 1e-9
+
+    def test_variance_edges(self):
+        st0 = self._state(Circuit(1))
+        assert abs(st0.variance([self._raw("Z")])) < 1e-12
+        stp = self._state(Circuit(1).h(0))
+        assert abs(stp.variance([self._raw("Z")]) - 1.0) < 1e-9
+        assert abs(stp.variance([self._raw("X")])) < 1e-12
+        assert abs(stp.variance([self._raw("Z", 2.0)])
+                   - 4.0 * stp.variance([self._raw("Z")])) < 1e-9
+
+    def test_mutual_info_bell(self):
+        circuit = Circuit(2).h(0).cnot(0, 1)
+        st = self._state(circuit)
+        mi = st.mutual_info([0], [1])
+        assert abs(mi - 2.0 * np.log(2.0)) < 1e-9
+        assert abs(st.mutual_info([1], [0]) - mi) < 1e-12
+        comp = (st.partial_trace([0]).entropy()
+                + st.partial_trace([1]).entropy()
+                - st.partial_trace([0, 1]).entropy())
+        assert abs(mi - comp) < 1e-9
+        prod = self._state(Circuit(2).h(0))
+        assert abs(prod.mutual_info([0], [1])) < 1e-12
+
+    def test_mutual_info_ry3_pl_constants(self):
+        # PennyLane 0.45 exact-state anchors (probe _probe_var_mi.py)
+        circuit = (Circuit(3).ry(0.7, 0).ry(0.4, 1).cnot(0, 1)
+                   .cnot(1, 2).rx(0.9, 2))
+        st = self._state(circuit)
+        assert abs(st.mutual_info([0, 1], [2]) - 0.83763164) < 1e-6
+        assert abs(st.mutual_info([0], [1]) - 0.31962789) < 1e-6
+
+    def test_validation(self):
+        st = self._state(Circuit(2).h(0).cnot(0, 1))
+        with pytest.raises(MethodError):
+            st.mutual_info([0], [5])
+        with pytest.raises(MethodError):
+            st.mutual_info([0, 1], [1])
+        res = sf.RunResult(counts={"00": 2})
+        with pytest.raises(RuntimeError):
+            res.mutual_info([0], [1])
+
+    def test_runresult_paths(self):
+        circuit = Circuit(2).h(0).cnot(0, 1)
+        res = sf.run(circuit, device="cpu", method="statevector", shots=0)
+        assert abs(res.variance([self._raw("ZI", n=2)]) - 1.0) < 1e-9
+        assert abs(res.mutual_info([0], [1]) - 2.0 * np.log(2.0)) < 1e-9
+        counts_res = sf.run(circuit, device="cpu", method="statevector",
+                            shots=20000, seed=42)
+        assert abs(counts_res.variance([self._raw("ZI", n=2)]) - 1.0) < 0.1
+
+
+# ── (q) SUP-24: mid-circuit measure + c_if feed-forward + reset ──────────────
+
+class TestMidCircuit:
+    """(q) mid-circuit measure / classical feed-forward / reset (SUP-24).
+
+    Measure + c_if used to be terminal-only: the Rust simulator dropped
+    Measure ops, Reset was an identity, and no conditional-execution API
+    existed. Dynamic circuits (reused wire after a measure, any reset,
+    any c_if gate) now run per-shot trajectories (dag.simulate_dynamic)
+    with finite shots on CPU statevector; purely terminal-measure
+    circuits keep the exact fast path unchanged.
+
+    SF count keys are q0-last (char j = qubit n-1-j), so P(q1=1) in a
+    2-qubit circuit = (counts["10"] + counts["11"]) / shots.
+    """
+
+    @staticmethod
+    def _p1(counts, shots):
+        return (counts.get("10", 0) + counts.get("11", 0)) / shots
+
+    def test_c_if_feedforward_correlation(self):
+        """h then measure: X(1) iff m == 1 -> q1 = m, P(q1=1) = 0.5,
+        keys 00/11 only (q1 is |0> until the conditional X fires)."""
+        circuit = Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+        res = sf.run(circuit, shots=40000, seed=7)
+        assert set(res.counts) <= {"00", "11"}
+        assert sum(res.counts.values()) == 40000
+        assert abs(self._p1(res.counts, 40000) - 0.5) < 0.01
+        assert res.metadata["dynamic"] is True
+        assert res.state is None
+
+    def test_c_if_deterministic_flip(self):
+        """m = 1 with certainty (X before measure) -> X(1) fires every shot."""
+        circuit = Circuit(2).x(0).measure(0, 0).c_if(0, 1).x(1)
+        res = sf.run(circuit, shots=5000, seed=1)
+        assert self._p1(res.counts, 5000) == 1.0
+
+    def test_c_if_value_zero_branch(self):
+        """c_if(0, 0): X fires only when m == 0 -> q1 == not m, keys 01/10."""
+        circuit = Circuit(2).h(0).measure(0, 0).c_if(0, 0).x(1)
+        res = sf.run(circuit, shots=40000, seed=7)
+        assert set(res.counts) <= {"01", "10"}
+        assert abs(self._p1(res.counts, 40000) - 0.5) < 0.01
+
+    def test_reset_mid_circuit(self):
+        """Reset collapses to |0> (was identity): X;reset -> P(q0=1) = 0."""
+        res = sf.run(Circuit(1).x(0).reset(0), shots=20000, seed=7)
+        assert res.counts.get("1", 0) == 0
+        # measure+reset then X -> |1> with certainty every shot.
+        res2 = sf.run(Circuit(1).h(0).measure(0, 0).reset(0).x(0),
+                      shots=20000, seed=7)
+        assert res2.counts.get("1", 0) == 20000
+
+    def test_measure_then_reuse_collapses(self):
+        """Measure then reuse the wire: collapse (not identity) -> uniform."""
+        res = sf.run(Circuit(1).h(0).measure(0, 0).h(0), shots=40000, seed=7)
+        assert abs(res.counts.get("1", 0) / 40000 - 0.5) < 0.01
+
+    def test_chained_feed_forward_ghz(self):
+        """GHZ: X(1) iff m0 makes q1 = 0 always, so the m1 branch never
+        fires and q2 = q0 -> P(q2=1) = 0.5 (char 0 of a 3-qubit key)."""
+        circuit = (Circuit(3).h(0).cnot(0, 1).cnot(0, 2)
+                   .measure(0, 0).c_if(0, 1).x(1)
+                   .measure(1, 1).c_if(1, 1).x(2))
+        res = sf.run(circuit, shots=40000, seed=7)
+        p2 = sum(v for k, v in res.counts.items() if k[0] == "1") / 40000
+        assert abs(p2 - 0.5) < 0.01
+
+    def test_seed_determinism(self):
+        """Same seed -> identical trajectory sample; different seed differs."""
+        circuit = Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+        a = sf.run(circuit, shots=20000, seed=123)
+        b = sf.run(circuit, shots=20000, seed=123)
+        assert a.counts == b.counts
+        c = sf.run(circuit, shots=20000, seed=124)
+        assert a.counts != c.counts
+
+    def test_surface_roundtrip_preserves_condition(self):
+        """to_gate_list / to_qasm3 / bind() all preserve the c_if condition."""
+        circuit = Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+        cond = [g for g in circuit.to_gate_list()
+                if g.get("condition") == [0, 1]]
+        assert len(cond) == 1 and cond[0]["name"] == "X"
+        q3 = circuit.to_qasm3()
+        assert "if (c[0] == 1) x q[1];" in q3
+        assert "c[0] = measure q[0];" in q3
+        bound = circuit.bind({})
+        assert any(g.condition == (0, 1) for g in bound._gates)
+
+    def test_requires_finite_shots_statevector_cpu(self):
+        """Dynamic circuits need shots > 0, statevector, CPU (clean errors)."""
+        circuit = Circuit(1).h(0).measure(0, 0).h(0)
+        with pytest.raises(RuntimeError):
+            sf.run(circuit, shots=0)
+        with pytest.raises(RuntimeError):
+            sf.run(circuit, shots=10, method="mps")
+        with pytest.raises(RuntimeError):
+            sf.run(circuit, shots=10, method="stabilizer")
+        with pytest.raises(RuntimeError):
+            sf.run(circuit, shots=10, method="density_matrix")
+
+    def test_c_if_validation(self):
+        """c_if guards: cbit range, value 0/1, no double condition, no
+        pending condition on measure/unitary."""
+        with pytest.raises(ValueError):
+            Circuit(1).measure(0, 0).c_if(5, 1)
+        with pytest.raises(ValueError):
+            Circuit(1).c_if(0, 2)
+        with pytest.raises(ValueError):
+            Circuit(1).c_if(0, 1).c_if(0, 1)
+        with pytest.raises(ValueError):
+            Circuit(1).c_if(0, 1).measure(0, 0)
+        with pytest.raises(ValueError):
+            Circuit(1).c_if(0, 1).unitary(np.eye(2), [0])
+
+    def test_terminal_measure_path_unchanged(self):
+        """Non-regression: purely terminal measures keep the exact path."""
+        res = sf.run(Circuit(2).h(0).cnot(0, 1).measure(0, 0).measure(1, 1),
+                     shots=20000, seed=42)
+        assert set(res.counts) == {"00", "11"}
+        assert sum(res.counts.values()) == 20000
+        assert res.metadata.get("dynamic") is not True
+        assert res.state is not None
