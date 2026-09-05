@@ -290,6 +290,11 @@ fn map_gate(name: &str, params: &[f64]) -> Option<OpType> {
             Parameter::Const(p1()),
             Parameter::Const(p2()),
         )),
+        "cu" | "cu3" => Some(OpType::Cu(
+            Parameter::Const(p0()),
+            Parameter::Const(p1()),
+            Parameter::Const(p2()),
+        )),
         "cx" | "cnot" => Some(OpType::CNOT),
         "cz" => Some(OpType::CZ),
         "cy" => Some(OpType::CY),
