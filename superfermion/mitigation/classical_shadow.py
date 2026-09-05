@@ -78,8 +78,12 @@ def _rotate(sv: np.ndarray, n: int, recipe_row) -> np.ndarray:
     arr = sv.reshape((2,) * n)
     for q in range(n):
         m = _ROT[int(recipe_row[q])]
-        arr = np.tensordot(m, arr, axes=([1], [q]))
-        arr = np.moveaxis(arr, 0, q)
+        # Statevectors are little-endian (wire q at bit q), so in the
+        # C-order ravel the wire q lives on tensor axis n-1-q, not axis q
+        # (axis q carries bit n-1-q = wire n-1-q).  SUP-25.
+        axis = n - 1 - q
+        arr = np.tensordot(m, arr, axes=([1], [axis]))
+        arr = np.moveaxis(arr, 0, axis)
     return arr.ravel()
 
 
