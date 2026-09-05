@@ -1,0 +1,132 @@
+---
+title: "Mid-Circuit Measurement & Feed-Forward"
+description: "Measure in the middle of a circuit, condition later gates on the result (c_if), and reset qubits — dynamic-circuit semantics like qml.measure + qml.cond."
+---
+
+Superfermion supports **dynamic (mid-circuit) circuits**: measure a
+qubit, branch on the outcome with classical feed-forward, and reset
+qubits mid-circuit. This is the PennyLane analogue of `qml.measure` +
+`qml.cond` and of `qml.measure(wire, reset=True)`.
+
+## When a measure is mid-circuit
+
+`circuit.measure(q, cbit)` is a *terminal* sampling instruction when
+the qubit is never used again. As soon as the same qubit is touched
+later — by a gate, a `reset`, or a second measurement — the measure
+becomes *mid-circuit*: the qubit collapses onto the sampled outcome,
+the bit is stored in the classical register, and the run continues.
+Detection is automatic; you do not opt in.
+
+## Classical feed-forward with c_if
+
+`circuit.c_if(cbit, value=1)` applies the **next gate** only when the
+classical bit equals `value` (0 or 1):
+
+```python
+import superfermion as sf
+
+# h then measure: q1 ends up equal to the measured bit m.
+qc = sf.Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+res = sf.run(qc, shots=40000, seed=7)
+
+print(res.counts)          # {'00': ~20000, '11': ~20000} (seeded example)
+print(res.metadata["dynamic"])  # True
+```
+
+Because `m = 0` half the time and `m = 1` half the time, and the
+conditional `X` fires only for `m = 1`, the final bitstring is always
+`m`-correlated: `q1 == m`. Only `00` and `11` can appear.
+
+The `value=0` branch selects the opposite case:
+
+```python
+qc0 = sf.Circuit(2).h(0).measure(0, 0).c_if(0, 0).x(1)
+print(sorted(sf.run(qc0, shots=40000, seed=7).counts))  # ['01', '10'] only
+```
+
+A condition with a deterministic outcome is exact: with `X` before the
+measure, `m = 1` in every shot, so the feed-forward always fires:
+
+```python
+flip = sf.Circuit(2).x(0).measure(0, 0).c_if(0, 1).x(1)
+print(sf.run(flip, shots=5000, seed=1).counts)  # {'11': 5000}
+```
+
+## Chaining multiple mid-circuit measures
+
+Mid-circuit measures can be chained: later conditions read the bits of
+earlier measures (including bits written by `measure_all()`), so
+multi-stage feed-forward programs work:
+
+```python
+# GHZ + chained feed-forward: X on q1 iff m0 -> q1 is always 0 after
+# the flip, so the second c_if never fires and q2 = q0.
+ghz = (sf.Circuit(3).h(0).cnot(0, 1).cnot(0, 2)
+       .measure(0, 0).c_if(0, 1).x(1)
+       .measure(1, 1).c_if(1, 1).x(2))
+r = sf.run(ghz, shots=40000, seed=7)
+p_q2 = sum(v for k, v in r.counts.items() if k[0] == "1") / 40000
+print(round(p_q2, 4))   # ~0.5 — q2 mirrors q0
+```
+
+## Reset
+
+`circuit.reset(q)` collapses qubit `q` back to |0⟩ in the middle of a
+circuit (previously it silently behaved as identity in the Rust
+simulator). Combined with a measure-and-discard, it is the SF form of
+PennyLane's `qml.measure(wire, reset=True)`:
+
+```python
+# X then reset: the qubit is |0> at the end.
+print(sf.run(sf.Circuit(1).x(0).reset(0), shots=2000, seed=7).counts)
+# {'0': 2000}
+
+# measure with reset, then X: deterministic |1> regardless of m.
+r = sf.run(sf.Circuit(1).h(0).measure(0, 0).reset(0).x(0),
+           shots=2000, seed=7)
+print(r.counts)   # {'1': 2000}
+```
+
+## Requirements and limits
+
+Dynamic circuits are simulated with **per-shot trajectory replay**
+(each shot: fresh |0…0⟩, sample and collapse at every mid measure,
+execute conditional gates only when their register test passes, sample
+all qubits at the end). This matches PennyLane's finite-shots one-shot
+mode, which means:
+
+- `shots` must be positive — the collapsed mixture is not a pure state,
+  so `shots=0` raises a `RuntimeError` with a `Fix:` hint (PennyLane has
+  the same restriction for one-shot semantics).
+- `method="statevector"` and `device="cpu"` are required; other methods
+  raise a clean `RuntimeError` naming the fix.
+
+```python
+try:
+    sf.run(sf.Circuit(1).h(0).measure(0, 0).h(0), shots=0)
+except RuntimeError as exc:
+    print("caught RuntimeError")   # dynamic circuits need finite shots
+```
+
+`c_if` guards are strict: the classical bit must exist, `value` must be
+0 or 1, a condition cannot precede `measure()`/`unitary()`/bulk
+extension, and conditions cannot be stacked (apply one gate per `c_if`).
+
+## Surface formats
+
+Conditions survive every surface format: `to_gate_list()` adds a
+`condition: [cbit, value]` entry, `bind()` preserves them, and
+`to_qasm3()` emits OpenQASM 3.0 `if` statements:
+
+```python
+qc = sf.Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+qasm = qc.to_qasm3()
+assert "c[0] = measure q[0];" in qasm
+assert "if (c[0] == 1) x q[1];" in qasm
+print("qasm3 ok")
+```
+
+## See also
+
+- Measurement types: [Variance & Mutual Information](/docs/guides/measurements)
+- Counts, probabilities and terminal sampling: [Execution](/docs/guides/execution)

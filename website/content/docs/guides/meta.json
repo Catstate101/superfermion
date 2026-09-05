@@ -3,7 +3,11 @@
   "pages": [
     "index",
     "circuits",
+    "controlled-gates",
     "execution",
+    "measurements",
+    "mid-circuit",
+    "classical-shadow",
     "compiler",
     "gradients",
     "chemistry",

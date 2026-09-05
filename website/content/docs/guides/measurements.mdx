@@ -1,0 +1,189 @@
+---
+title: "Measurement Types & Results"
+description: "Every measurement type in one place with code: expectation values, variance, entropy, purity, mutual information, probabilities, counts, classical shadows and mid-circuit measurement."
+---
+
+This page covers every measurement type Superfermion offers, with the SF
+code for each. Everything is verified against PennyLane 0.45 as ground
+truth (exact quantities agree to machine precision; sampled quantities
+match within shot noise).
+
+| Measurement | SF entry points | Nature |
+|---|---|---|
+| Expectation value | `sf.expval`, `State.expectation`, `RunResult.expectation` | exact |
+| Variance | `sf.variance`, `State.variance`, `RunResult.variance` | exact |
+| Von Neumann entropy | `State.entropy()` (reduced via `partial_trace`) | exact |
+| Purity | `State.purity()` | exact |
+| Mutual information | `State.mutual_info(a, b)` | exact |
+| Probabilities | `RunResult.probabilities` | exact on statevector paths |
+| Counts (sampling) | `sf.run(...).counts` | empirical |
+| Classical shadows | `sf.classical_shadow`, `sf.shadow_expval` | empirical (1/sqrt(n) noise) |
+| Mid-circuit measure | `Circuit.measure`, `reset`, `c_if` | per-shot trajectories |
+
+The snippets below run top-to-bottom; later blocks reuse the Bell state
+built in the first one.
+
+## Expectation values
+
+`sf.expval(statevector, observable)` takes a plain numpy statevector and
+any observable — a `PauliString`, `SparsePauliOp`, or `Hamiltonian`.
+`State.expectation(...)` (and `RunResult.expectation`) are the Rust-backed
+forms and take raw Pauli terms: triples of `(paulis, coef_re, coef_im)`
+where `paulis` is a per-qubit code list (`0 = I`, `1 = X`, `2 = Y`,
+`3 = Z`). PennyLane analogue: `qml.expval`.
+
+```python
+import numpy as np
+import superfermion as sf
+from superfermion.observables.core import SparsePauliOp
+
+bell = sf.Circuit(2).h(0).cnot(0, 1)
+sv = np.asarray(sf.simulate(bell).numpy(), dtype=np.complex128)
+
+print(sf.expval(sv, SparsePauliOp(["ZZ"], coeffs=[1.0])))  # 1.0 (Bell is a +1 eigenstate)
+print(sf.expval(sv, SparsePauliOp(["ZI"], coeffs=[1.0])))  # 0.0 (q0 is random)
+
+st = sf.simulate(bell)
+print(st.expectation([([3, 3], 1.0, 0.0)]))   # 1.0  (same ZZ, raw term form)
+```
+
+## Variance
+
+`sf.variance(statevector, observable)` computes the exact variance
+
+**Var(O) = ⟨O²⟩ − ⟨O⟩²**
+
+for any observable. For Hermitian observables it reads both ⟨O⟩ and
+⟨O²⟩ = ‖O|ψ⟩‖² from a single application of `O` to the statevector, so it
+is exact and fast:
+
+```python
+print(sf.variance(sv, SparsePauliOp(["ZZ"], coeffs=[1.0])))   # ~0.0 (eigenstate)
+print(sf.variance(sv, SparsePauliOp(["ZI"], coeffs=[1.0])))   # 1.0
+print(sf.variance(sv, SparsePauliOp(["ZI", "IX"], coeffs=[0.5, 0.3])))
+# 0.34 = (0.5^2 + 0.3^2) for the maximally mixed reduced state
+```
+
+`ZZ` on the Bell state is an eigenstate (variance 0), while `ZI` flips
+between outcomes (variance 1).
+
+### On states and run results
+
+Rust-backed `State` and `RunResult` objects expose `variance` directly
+with the same raw Pauli-term list as `expectation`:
+
+```python
+res = sf.run(bell, shots=0)
+st = res.state
+
+# ZZ (codes [3, 3]) has variance 0 on the Bell state; ZI has variance 1
+print(st.variance([([3, 3], 1.0, 0.0)]))   # ~0.0
+print(st.variance([([3, 0], 1.0, 0.0)]))   # 1.0
+print(res.variance([([3, 0], 1.0, 0.0)]))  # 1.0 (delegates to the state)
+```
+
+When a `RunResult` has no stored state but does have counts, `variance`
+falls back to an empirical estimate from the count frequencies, with the
+same parity convention as `expectation`.
+
+## Entropy & purity
+
+`State.entropy()` and `State.purity()` return the exact von Neumann
+entropy and purity of the state (natural-log entropy — PennyLane
+`qml.vn_entropy`/`qml.purity` analogues). Trace out subsystems first
+with `partial_trace` to get subsystem entropies:
+
+```python
+st = sf.simulate(bell)
+
+rho0 = st.partial_trace([0])
+print(rho0.entropy())   # 0.6931471805599453  (= ln 2, Bell reduced state)
+print(rho0.purity())    # 0.5
+```
+
+## Mutual information
+
+`State.mutual_info(wires_a, wires_b)` (and `RunResult.mutual_info(...)`)
+returns the exact mutual information
+
+**I(A;B) = S(A) + S(B) − S(AB)**
+
+between two disjoint wire sets, computed from partial traces with
+natural-log entropy — the PennyLane `qml.mutual_info` analogue:
+
+```python
+st = sf.run(bell, shots=0).state
+
+print(st.mutual_info([0], [1]))   # 1.3862943611198906  (= 2 ln 2)
+print(st.mutual_info([1], [0]))   # same value (symmetric)
+
+prod = sf.run(sf.Circuit(2).h(0), shots=0).state
+print(prod.mutual_info([0], [1]))  # 0.0 for a product state
+```
+
+Validation is strict: overlapping wire sets, out-of-range wires, or
+duplicate wires raise `MethodError` (a `RuntimeError` subclass) with a
+message naming the offending wires:
+
+```python
+try:
+    sf.simulate(sf.Circuit(2).h(0).cnot(0, 1)).mutual_info([0, 1], [1])
+except RuntimeError as exc:
+    print("caught:", type(exc).__name__)   # mutual_info: overlapping wires
+```
+
+## Probabilities & counts
+
+`RunResult.probabilities` gives per-bitstring probabilities — exact on
+the statevector path, empirical on sampled paths — and `RunResult.counts`
+gives raw shot counts. Keys are little-endian bitstrings, q0-last,
+consistent across every backend:
+
+```python
+res = sf.run(bell, shots=20000, seed=7)
+print({k: round(v, 3) for k, v in res.probabilities.items()})  # {'00': 0.5, '11': 0.5}
+print(sorted(res.counts))   # ['00', '11'] — only the correlated pair
+```
+
+## Classical shadows
+
+The one-shot estimator `sf.shadow_expval(state, observable, shots, seed)`
+draws random single-qubit Pauli-basis snapshots and estimates the
+expectation value with `1/sqrt(n)` shot noise. Observable labels are
+human-readable strings (`"ZZ"`, `"Z0Z1"`, `"IXI"`):
+
+```python
+print(round(sf.shadow_expval(bell, "ZZ", shots=20000, seed=7), 3))  # ~1.0
+print(round(sf.shadow_expval(bell, "XZ", shots=20000, seed=7), 3))  # ~0.0
+```
+
+Full API, seeded reproducibility and median-of-means: see
+[Classical Shadows](/docs/guides/classical-shadow).
+
+## Mid-circuit measurement
+
+`Circuit.measure(q, cbit)` is terminal while the qubit is unused, but as
+soon as the qubit is reused it collapses mid-circuit; `c_if(cbit, value)`
+applies the next gate only when the classical bit equals `value`, and
+`reset(q)` collapses back to |0⟩. Dynamic programs run with per-shot
+trajectory replay:
+
+```python
+qc = sf.Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+r = sf.run(qc, shots=20000, seed=7)
+
+print(sorted(r.counts))          # ['00', '11'] — q1 mirrors the measured bit
+print(r.metadata["dynamic"])     # True
+```
+
+Collapse semantics, chained feed-forward and requirements: see
+[Mid-Circuit Measurement](/docs/guides/mid-circuit).
+
+## See also
+
+- Execution, devices, sampling methods and `RunResult`:
+  [Execution](/docs/guides/execution)
+- Classical-shadow snapshot estimators:
+  [Classical Shadows](/docs/guides/classical-shadow)
+- Dynamic circuits with `measure`/`reset`/`c_if`:
+  [Mid-Circuit Measurement](/docs/guides/mid-circuit)
