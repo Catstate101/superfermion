@@ -106,6 +106,12 @@ pub struct QuantumDAG {
     /// Number of classical bits
     pub n_cbits: usize,
 
+    /// Last DAG node that read or wrote each classical bit. Used to draw
+    /// `WireType::Classical` dependency edges so topological order always
+    /// runs a conditioned gate after the Measure that set its condition
+    /// (and before a later op that rewrites the same bit).
+    last_cbit_access: Vec<Option<NodeId>>,
+
     /// Free parameters (variable name → unique id)
     pub parameters: IndexMap<String, usize>,
 
@@ -143,6 +149,7 @@ impl QuantumDAG {
             n_cbits,
             parameters: IndexMap::new(),
             param_locations: HashMap::new(),
+            last_cbit_access: vec![None; n_cbits],
             metadata: CircuitMetadata::default(),
         }
     }
@@ -257,6 +264,37 @@ impl QuantumDAG {
         self.graph
             .add_edge(new_node, output_node, WireType::Qubit(qubit));
 
+        // Sequence this measure after any prior op that read or wrote the
+        // same classical bit, then record it as the bit's latest accessor so
+        // later conditioned gates (or re-measurements) are ordered after it.
+        if let Some(prev) = self.last_cbit_access[cbit] {
+            self.graph
+                .add_edge(prev, new_node, WireType::Classical(cbit));
+        }
+        self.last_cbit_access[cbit] = Some(new_node);
+
+        new_node
+    }
+
+    /// Add a gate that only executes when classical bit `cbit` equals
+    /// `value` (classical feed-forward, OpenQASM 3 `if (c[cbit] == value)`
+    /// semantics). A classical dependency edge is drawn from the last op
+    /// that read or wrote `cbit` (typically the Measure that set it).
+    pub fn add_op_conditioned(
+        &mut self,
+        op_type: OpType,
+        qubits: &[QubitId],
+        cbit: ClassicalBitId,
+        value: u64,
+    ) -> NodeId {
+        assert!(cbit < self.n_cbits, "Classical bit {} out of range", cbit);
+        let new_node = self.add_op(op_type, qubits);
+        if let Some(prev) = self.last_cbit_access[cbit] {
+            self.graph
+                .add_edge(prev, new_node, WireType::Classical(cbit));
+        }
+        self.graph[new_node].condition = Some((cbit, value));
+        self.last_cbit_access[cbit] = Some(new_node);
         new_node
     }
 
@@ -529,6 +567,7 @@ impl QuantumDAG {
             n_cbits: self.n_cbits,
             parameters: self.parameters.clone(),
             param_locations: self.param_locations.clone(),
+            last_cbit_access: self.last_cbit_access.clone(),
             metadata: self.metadata.clone(),
         }
     }
@@ -694,6 +733,171 @@ impl QuantumDAG {
             Self::apply_gate_inplace(&mut state, op, gate_u);
         }
         state
+    }
+
+    /// Mid-circuit (dynamic-circuit) simulation: per-shot trajectory replay.
+    ///
+    /// Each shot restarts from |0...0> and walks the DAG in topological
+    /// order (which now respects classical-bit dependencies). Measure ops
+    /// sample the qubit from the current state, collapse it, and store the
+    /// outcome in the classical register; Reset ops collapse the qubit back
+    /// to |0> without recording an outcome; ops carrying a classical
+    /// condition are skipped when their register test fails. The final
+    /// state of every shot is sampled over all qubits.
+    ///
+    /// This matches PennyLane's one-shot semantics for finite shots with
+    /// mid-circuit measurement (qml.measure + qml.cond).
+    pub fn simulate_dynamic(
+        &self,
+        shots: usize,
+        seed: u64,
+    ) -> std::collections::HashMap<String, usize> {
+        use rand::Rng;
+        use rand::SeedableRng;
+
+        let n = self.n_qubits;
+        let dim = 1usize << n;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut creg = vec![0u64; self.n_cbits];
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        for _ in 0..shots {
+            let mut state = vec![num_complex::Complex64::new(0.0, 0.0); dim];
+            state[0] = num_complex::Complex64::new(1.0, 0.0);
+            for b in creg.iter_mut() {
+                *b = 0;
+            }
+
+            for &node_id in &self.topological_order() {
+                let op = &self.graph[node_id];
+                if op.op_type.is_boundary() || op.op_type == OpType::Barrier {
+                    continue;
+                }
+                // Every op kind (except Measure/MeasureAll below, which are
+                // the sources of classical values) honors a classical
+                // condition: skip when the register test fails.
+                match &op.op_type {
+                    OpType::Measure => {
+                        if let Some((cbit, value)) = op.condition {
+                            if creg[cbit] != value {
+                                continue;
+                            }
+                        }
+                        let q = op.qubits[0];
+                        let cbit = op.classical_bits.first().copied().unwrap_or(q);
+                        let bit = Self::collapse_measure(&mut state, q, &mut rng);
+                        creg[cbit] = bit as u64;
+                    }
+                    OpType::MeasureAll => {
+                        for q in 0..n {
+                            let bit = Self::collapse_measure(&mut state, q, &mut rng);
+                            creg[q] = bit as u64;
+                        }
+                    }
+                    OpType::Reset => {
+                        if let Some((cbit, value)) = op.condition {
+                            if creg[cbit] != value {
+                                continue;
+                            }
+                        }
+                        let q = op.qubits[0];
+                        Self::reset_qubit(&mut state, q, &mut rng);
+                    }
+                    _ => {
+                        if let Some((cbit, value)) = op.condition {
+                            if creg[cbit] != value {
+                                continue;
+                            }
+                        }
+                        let gate_u = op.op_type.to_matrix();
+                        Self::apply_gate_inplace(&mut state, op, &gate_u);
+                    }
+                }
+            }
+
+            // Sample the final state over all qubits (same orientation and
+            // cumulative-search scheme as the non-dynamic samplers).
+            let mut cumulative = vec![0.0f64; dim + 1];
+            for i in 0..dim {
+                let a = state[i];
+                cumulative[i + 1] = cumulative[i] + a.re * a.re + a.im * a.im;
+            }
+            let total = cumulative[dim];
+            let r: f64 = rng.gen::<f64>() * total;
+            let idx = match cumulative
+                .binary_search_by(|v| v.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Less))
+            {
+                Ok(i) => i.min(dim - 1),
+                Err(i) => (i - 1).min(dim - 1),
+            };
+            let bitstring: String = (0..n)
+                .rev()
+                .map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' })
+                .collect();
+            *counts.entry(bitstring).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Sample qubit `q` from the current state, project onto the sampled
+    /// basis state, and renormalize. Returns the sampled bit.
+    fn collapse_measure(
+        state: &mut [num_complex::Complex64],
+        q: usize,
+        rng: &mut rand::rngs::StdRng,
+    ) -> u8 {
+        use rand::Rng;
+        let stride = 1usize << q;
+        let mut p0 = 0.0f64;
+        for (i, a) in state.iter().enumerate() {
+            if (i & stride) == 0 {
+                p0 += a.re * a.re + a.im * a.im;
+            }
+        }
+        let bit = if rng.gen::<f64>() < p0 { 0 } else { 1 };
+        let pb = if bit == 0 { p0 } else { 1.0 - p0 };
+        let scale = 1.0 / pb.sqrt();
+        for (i, a) in state.iter_mut().enumerate() {
+            if ((i >> q) & 1) == bit {
+                *a = num_complex::Complex64::new(a.re * scale, a.im * scale);
+            } else {
+                *a = num_complex::Complex64::new(0.0, 0.0);
+            }
+        }
+        bit as u8
+    }
+
+    /// Mid-circuit reset: measure-and-discard the qubit, then prepare |0>.
+    /// (Sample the outcome like a measure, collapse onto it, then flip the
+    /// qubit back to |0> when the sampled bit was 1. No outcome is stored.)
+    fn reset_qubit(state: &mut [num_complex::Complex64], q: usize, rng: &mut rand::rngs::StdRng) {
+        use rand::Rng;
+        let stride = 1usize << q;
+        let mut p0 = 0.0f64;
+        for (i, a) in state.iter().enumerate() {
+            if (i & stride) == 0 {
+                p0 += a.re * a.re + a.im * a.im;
+            }
+        }
+        let bit = if rng.gen::<f64>() < p0 { 0 } else { 1 };
+        let pb = if bit == 0 { p0 } else { 1.0 - p0 };
+        let scale = 1.0 / pb.sqrt();
+        for (i, a) in state.iter_mut().enumerate() {
+            if ((i >> q) & 1) == bit {
+                *a = num_complex::Complex64::new(a.re * scale, a.im * scale);
+            } else {
+                *a = num_complex::Complex64::new(0.0, 0.0);
+            }
+        }
+        if bit == 1 {
+            // Prepare |0>: flip the (now pure) qubit with X.
+            for i in 0..state.len() {
+                let partner = i ^ stride;
+                if (i & stride) == 0 {
+                    state.swap(i, partner);
+                }
+            }
+        }
     }
 
     /// Apply a gate in-place on the statevector. Each gate transforms
@@ -1516,6 +1720,7 @@ fn op_type_to_name_params(op: &OpType) -> (String, Vec<f64>) {
         OpType::R1(p) => ("r1".into(), vec![p.evaluate()]),
         OpType::P(p) => ("p".into(), vec![p.evaluate()]),
         OpType::U(a, b, c) => ("u".into(), vec![a.evaluate(), b.evaluate(), c.evaluate()]),
+        OpType::Cu(a, b, c) => ("cu".into(), vec![a.evaluate(), b.evaluate(), c.evaluate()]),
         OpType::CNOT => ("cx".into(), vec![]),
         OpType::CZ => ("cz".into(), vec![]),
         OpType::CY => ("cy".into(), vec![]),

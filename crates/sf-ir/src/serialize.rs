@@ -164,6 +164,7 @@ impl SerializedCircuit {
             "R1" => Some(OpType::R1(param(0))),
             "P" => Some(OpType::P(param(0))),
             "U" => Some(OpType::U(param(0), param(1), param(2))),
+            "Cu" => Some(OpType::Cu(param(0), param(1), param(2))),
             "CNOT" => Some(OpType::CNOT),
             "CZ" => Some(OpType::CZ),
             "CY" => Some(OpType::CY),
@@ -175,6 +176,7 @@ impl SerializedCircuit {
             "Ryy" => Some(OpType::Ryy(param(0))),
             "CRx" => Some(OpType::CRx(param(0))),
             "CRz" => Some(OpType::CRz(param(0))),
+            "CP" => Some(OpType::CP(param(0))),
             "CCX" => Some(OpType::CCX),
             "CSWAP" => Some(OpType::CSWAP),
             "Measure" => None, // Handled separately
@@ -203,6 +205,37 @@ mod tests {
 
         assert_eq!(rebuilt.n_qubits, 2);
         assert_eq!(rebuilt.gate_count(), 2);
+    }
+
+    #[test]
+    fn test_json_roundtrip_parameterized_controlled_gates() {
+        // Regression: rebuild_op_type used to drop CP (and Cu before SUP-20),
+        // silently losing gates on DAG JSON roundtrips.
+        let mut dag = QuantumDAG::new(2, 0);
+        dag.add_op(OpType::CP(crate::ops::Parameter::Const(0.6)), &[0, 1]);
+        dag.add_op(
+            OpType::Cu(
+                crate::ops::Parameter::Const(0.6),
+                crate::ops::Parameter::Const(0.9),
+                crate::ops::Parameter::Const(1.3),
+            ),
+            &[0, 1],
+        );
+
+        let serialized = SerializedCircuit::from_dag(&dag);
+        let json = serialized.to_json().unwrap();
+        let rebuilt = SerializedCircuit::from_json(&json).unwrap().to_dag();
+
+        assert_eq!(rebuilt.gate_count(), 2);
+        let expected = dag.to_unitary();
+        let actual = rebuilt.to_unitary();
+        assert_eq!(actual.shape(), expected.shape());
+        for i in 0..expected.len() {
+            assert!(
+                (actual[i] - expected[i]).norm() < 1e-12,
+                "unitary mismatch at index {i}"
+            );
+        }
     }
 
     #[test]

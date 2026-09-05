@@ -20,8 +20,76 @@ impl std::fmt::Display for MethodError {
 
 impl std::error::Error for MethodError {}
 
+// ── Pauli algebra helpers (variance needs A² = (Σ c_i P_i)²) ──────────────
+// Pauli codes: 0=I, 1=X, 2=Y, 3=Z (same encoding as Python _PAULI_ENCODE).
+fn pauli_mul(a: u8, b: u8) -> (u8, Complex64) {
+    let one = Complex64::new(1.0, 0.0);
+    let i = Complex64::new(0.0, 1.0);
+    if a == 0 {
+        return (b, one); // I·P = P
+    }
+    if b == 0 {
+        return (a, one); // P·I = P
+    }
+    if a == b {
+        return (0, one); // P·P = I (+1 phase)
+    }
+    let third = 6 - a - b; // {1,2,3} sums to 6 → the remaining Pauli
+    let cyclic = (a == 1 && b == 2) || (a == 2 && b == 3) || (a == 3 && b == 1);
+    if cyclic {
+        (third, i) // X·Y = iZ, Y·Z = iX, Z·X = iY
+    } else {
+        (third, -i) // anti-cyclic order picks up −i
+    }
+}
+
+fn multiply_pauli_terms(a: &PauliTerm, b: &PauliTerm) -> PauliTerm {
+    let n = a.paulis.len().max(b.paulis.len());
+    let mut paulis = Vec::with_capacity(n);
+    let mut phase = Complex64::new(1.0, 0.0);
+    for q in 0..n {
+        let (code, ph) = pauli_mul(
+            a.paulis.get(q).copied().unwrap_or(0),
+            b.paulis.get(q).copied().unwrap_or(0),
+        );
+        paulis.push(code);
+        phase *= ph;
+    }
+    PauliTerm {
+        paulis,
+        coef: a.coef * b.coef * phase,
+    }
+}
+
+/// Expand (Σ_i c_i P_i)² into a single weighted Pauli list (exact, O(m²)
+/// terms, m = number of observable terms).
+fn square_observable(observable: &[PauliTerm]) -> Vec<PauliTerm> {
+    let mut acc: HashMap<Vec<u8>, Complex64> = HashMap::new();
+    for t1 in observable {
+        for t2 in observable {
+            let prod = multiply_pauli_terms(t1, t2);
+            *acc.entry(prod.paulis).or_insert(Complex64::new(0.0, 0.0)) += prod.coef;
+        }
+    }
+    acc.into_iter()
+        .map(|(paulis, coef)| PauliTerm { paulis, coef })
+        .collect()
+}
+
 pub trait QuantumStateImpl: Send + Sync {
     fn expectation(&self, observable: &[PauliTerm]) -> Result<f64, MethodError>;
+    /// Exact variance Var(O) = ⟨O²⟩ − ⟨O⟩² for a Pauli observable.
+    ///
+    /// ⟨O²⟩ is evaluated exactly by expanding O² into its O(m²) Pauli
+    /// products (m = number of observable terms), so every state type gets
+    /// a correct value through this default implementation - no per-state
+    /// code required.
+    fn variance(&self, observable: &[PauliTerm]) -> Result<f64, MethodError> {
+        let mean = self.expectation(observable)?;
+        let squared = square_observable(observable);
+        let mean_sq = self.expectation(&squared)?;
+        Ok(mean_sq - mean * mean)
+    }
     fn sample(&self, shots: usize, seed: u64) -> Result<HashMap<String, usize>, MethodError>;
     fn grad(
         &self,
@@ -43,6 +111,37 @@ pub trait QuantumStateImpl: Send + Sync {
         &self,
         keep_qubits: &[usize],
     ) -> Result<Box<dyn QuantumStateImpl>, MethodError>;
+    /// Mutual information I(A;B) = S(A) + S(B) − S(AB) between two
+    /// (disjoint) wire sets, computed from partial traces.
+    ///
+    /// Entropy is in natural-log units (same convention as `entropy()`,
+    /// which uses `ln`), matching PennyLane's `qml.mutual_info`.
+    fn mutual_info(&self, wires_a: &[usize], wires_b: &[usize]) -> Result<f64, MethodError> {
+        let n = self.n_qubits();
+        for &w in wires_a.iter().chain(wires_b.iter()) {
+            if w >= n {
+                return Err(MethodError(format!(
+                    "mutual_info() qubit {w} out of range (n_qubits={n})"
+                )));
+            }
+        }
+        if wires_a.iter().any(|a| wires_b.contains(a)) {
+            return Err(MethodError(
+                "mutual_info() wire sets must be disjoint".into(),
+            ));
+        }
+        let s_a = self.partial_trace(wires_a)?.entropy()?;
+        let s_b = self.partial_trace(wires_b)?.entropy()?;
+        let mut ab: Vec<usize> = wires_a
+            .iter()
+            .cloned()
+            .chain(wires_b.iter().cloned())
+            .collect();
+        ab.sort_unstable();
+        ab.dedup();
+        let s_ab = self.partial_trace(&ab)?.entropy()?;
+        Ok(s_a + s_b - s_ab)
+    }
     fn n_qubits(&self) -> usize;
     fn method_name(&self) -> &str;
     fn device_name(&self) -> &str;
@@ -229,6 +328,21 @@ impl QuantumStateImpl for StatevectorState {
             d_psi.push(deriv);
         }
 
+        // Fubini-Study metric: Q[i][j] = 4 Re( <dpsi_i|dpsi_j>
+        //                            - <dpsi_i|psi><psi|dpsi_j> ).
+        // conn[k] = <psi|dpsi_k> supplies the covariance (gauge) term that
+        // removes global-phase motion of the state (SUP-18).
+        let conn: Vec<Complex64> = d_psi
+            .iter()
+            .map(|d| {
+                self.data
+                    .iter()
+                    .zip(d.iter())
+                    .map(|(a, b)| a.conj() * b)
+                    .sum()
+            })
+            .collect();
+
         let mut qfim = vec![vec![0.0f64; n_params]; n_params];
         for i in 0..n_params {
             for j in i..n_params {
@@ -237,7 +351,7 @@ impl QuantumStateImpl for StatevectorState {
                     .zip(d_psi[j].iter())
                     .map(|(a, b)| a.conj() * b)
                     .sum();
-                let val = 4.0 * overlap.re;
+                let val = 4.0 * (overlap - conn[i].conj() * conn[j]).re;
                 qfim[i][j] = val;
                 qfim[j][i] = val;
             }

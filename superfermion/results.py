@@ -54,6 +54,42 @@ class RunResult:
             return _estimate_expval_from_counts(observable, self.counts)
         return 0.0
 
+    def variance(self, observable) -> float:
+        """Compute variance Var(O) = ⟨O²⟩ − ⟨O⟩² of an observable.
+
+        Uses exact computation from state (if available) or estimates
+        from counts (same parity convention as ``expectation``).
+        PennyLane analogue: ``qml.var``.
+
+        Args:
+            observable: Pauli observable terms as list of (paulis, coef_re, coef_im).
+
+        Returns:
+            Variance as float.
+        """
+        if self.state is not None:
+            return self.state.variance(observable)
+        if self.counts:
+            return _estimate_var_from_counts(observable, self.counts)
+        return 0.0
+
+    def mutual_info(self, wires_a, wires_b) -> float:
+        """Mutual information I(A;B) between two wire sets.
+
+        Exact, computed from partial traces of the state (natural-log
+        units). PennyLane analogue: ``qml.mutual_info``.
+
+        Args:
+            wires_a: First wire list.
+            wires_b: Second (disjoint) wire list.
+
+        Returns:
+            Mutual information in nats.
+        """
+        if self.state is None:
+            raise RuntimeError("mutual_info() not available: no state (QPU result?)")
+        return self.state.mutual_info(wires_a, wires_b)
+
     def grad(self, observable, dag=None, param_values=None) -> dict:
         """Compute gradient of an observable.
 
@@ -201,3 +237,37 @@ def _estimate_expval_from_counts(
             term_val += eigenvalue * count
         result += coef_re * term_val / total_shots
     return result
+
+
+def _estimate_var_from_counts(
+    observable: list,
+    counts: Dict[str, int],
+) -> float:
+    """Estimate Var(O) = E[o²] − E[o]² from measurement counts.
+
+    Uses the same per-bitstring eigenvalue convention as
+    ``_estimate_expval_from_counts``: the eigenvalue of the observable
+    on a measured bitstring is the parity-weighted coefficient sum.
+    """
+    total_shots = sum(counts.values())
+    if total_shots == 0:
+        return 0.0
+
+    mean = 0.0
+    mean_sq = 0.0
+    for bitstring, count in counts.items():
+        n = len(bitstring)
+        eigen = 0.0
+        for paulis, coef_re, _coef_im in observable:
+            parity = 0
+            for q, p in enumerate(paulis):
+                if p in (1, 2, 3):  # X, Y, Z all flip parity
+                    if q < n:
+                        # bitstrings are q0-last: qubit q is bit n-1-q
+                        parity ^= int(bitstring[n - 1 - q])
+            eigen += coef_re * (1.0 - 2.0 * parity)
+        mean += eigen * count
+        mean_sq += eigen * eigen * count
+    mean /= total_shots
+    mean_sq /= total_shots
+    return mean_sq - mean * mean

@@ -1,0 +1,77 @@
+---
+title: "Classical Shadows"
+description: "Randomized-basis snapshot estimators: sf.classical_shadow, ClassicalShadow.expval and sf.shadow_expval for few-shot expectation values."
+---
+
+Classical shadows estimate expectation values from random single-qubit
+Pauli-basis measurements, needing far fewer shots than measuring each
+observable directly — useful when many observables share one state.
+
+The estimator is shot-noise-limited: with `n` snapshots the error of a
+single local observable estimate scales like `1/sqrt(n)`.
+
+## Drawing a shadow
+
+```python
+import superfermion as sf
+from superfermion.observables.core import SparsePauliOp
+
+bell = sf.Circuit(2).h(0).cnot(0, 1)
+shadow = sf.classical_shadow(bell, shots=20000, seed=7)
+
+print(shadow.n_snapshots, shadow.n_qubits)   # 20000 2
+print(shadow.bits.shape, shadow.recipes.shape)  # (20000, 2) (20000, 2)
+```
+
+`sf.classical_shadow(state, shots, seed=None)` accepts a `Circuit`, a
+`State`, or a plain numpy statevector (pure states only). Equivalent
+constructors on the returned `ClassicalShadow` class:
+`ClassicalShadow.from_circuit(circuit, shots, seed)` and
+`ClassicalShadow.from_statevector(sv, shots, seed)`.
+
+## Estimating expectation values
+
+`.expval(observable, k=1)` estimates the expectation value of any
+observable (a `PauliString`, `SparsePauliOp`, `Hamiltonian`, label
+string, or raw term). `k` > 1 switches from the plain mean to
+median-of-means aggregation over `k` chunks (robust to outliers):
+
+```python
+print(round(shadow.expval(SparsePauliOp(["ZZ"], coeffs=[1.0])), 3))  # ~1.0
+print(round(shadow.expval(SparsePauliOp(["XX"], coeffs=[1.0])), 3))  # ~1.0
+print(round(shadow.expval(SparsePauliOp(["XZ"], coeffs=[1.0])), 3))  # ~0.0
+```
+
+The Bell state is a `+1` eigenstate of both `ZZ` and `XX`, so both
+estimates land near 1 with 20 000 snapshots (seeded run), while the
+non-eigenstate `XZ` estimates near 0.
+
+### One-shot helper
+
+`sf.shadow_expval(state, observable, shots=1000, seed=None, k=1)`
+draws the shadow and estimates in one call. Observables can be given as
+human-readable strings:
+
+```python
+print(round(sf.shadow_expval(bell, "ZZ", shots=20000, seed=7), 3))  # ~1.0
+print(round(sf.shadow_expval(bell, "Z0", shots=20000, seed=7), 3))  # ~0.0
+```
+
+Supported label formats are `"ZZ"` (condensed, length = n_qubits),
+`"Z0Z1"` (indexed), and `"IXI"` (explicit identities).
+
+## Notes and limits
+
+- **Pure states only.** The snapshot protocol assumes an exact pure
+  state; passing an impure state raises a `ValueError`.
+- **Statistical, not exact.** Unlike `State.variance` /
+  `State.expectation`, shadow estimates carry `1/sqrt(n)` shot noise —
+  increase `shots` (or `k`) for tighter estimates. The seeded runs on
+  this page are reproducible but still noisy at the third decimal.
+- Snapshots are reproducible via `seed`; no randomness leaks between
+  the shadow drawing and other library RNG state (numpy `default_rng`).
+
+## See also
+
+- Measurement types: [Variance & Mutual Information](/docs/guides/measurements)
+- Expectation values on states: [Execution](/docs/guides/execution)

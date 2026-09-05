@@ -1,0 +1,74 @@
+---
+title: "Controlled Gates: CU & CP"
+description: "Native controlled-U3 (cu/cu3) and controlled-phase (cp) gates: exact simulation, compilation and JSON round-trips that preserve them."
+---
+
+`cu`, `cu3` and `cp` are native IR gates in Superfermion — they
+simulate, differentiate and serialize exactly, without decomposition.
+
+## Controlled-U3: cu / cu3
+
+`circuit.cu(theta, phi, lam, control, target)` (alias `cu3`) applies a
+controlled U3 rotation
+
+**CU = diag(I, U3(θ, φ, λ))**
+
+— the same control-first, `diag(I, U3)` convention as PennyLane's
+`qml.CU`:
+
+```python
+import superfermion as sf
+
+qc = sf.Circuit(2).cp(0.7, 0, 1).cu(1.2, 0.3, 0.4, 0, 1)
+state = sf.simulate(qc)
+print(state.numpy().round(4))
+# [1.+0.j 0.+0.j 0.+0.j 0.+0.j]  (control in |0> -> CU leaves |00> alone)
+```
+
+With the control qubit in |0⟩ the `CU` acts as identity, so the state
+stays |00⟩. Flip the control to see the U3 branch:
+
+```python
+qc2 = sf.Circuit(2).x(0).cu(1.2, 0.3, 0.4, 0, 1)
+sv = sf.run(qc2, shots=0).statevector
+# <Z> = P(0) - P(1) = -1.0 on the |1> control, so it stayed |1>
+print(sf.expval(sv, sf.PauliString("ZI", coeffs=1.0)))  # -1.0
+```
+
+The gates accept symbolic parameters like any other rotation, work
+with gradients, and are preserved by `compile()` optimization passes.
+
+## Controlled-phase: cp
+
+`circuit.cp(phi, control, target)` applies the phase-controlled
+`CP(phi) = diag(1, 1, 1, e^{i phi})` gate:
+
+```python
+qc3 = sf.Circuit(2).x(0).x(1).cp(0.7, 0, 1)
+sv = sf.run(qc3, shots=0).statevector
+print(sv[3])   # ~ (0.764842+0.644218j) = e^(i*0.7) on |11>
+```
+
+## Serialization round-trips
+
+DAG serialization preserves every controlled gate, including `CP` and
+`CU`. Converting a circuit to a `QuantumDAG`, dumping it to JSON and
+loading it back yields an identical statevector:
+
+```python
+dag = qc.to_ir()
+dag2 = type(dag).from_json(dag.to_json())
+
+sv1 = dag.simulate()
+sv2 = dag2.simulate()
+print(max(abs(a - b) for a, b in zip(sv1, sv2)))   # 0.0
+```
+
+Earlier builds of the Rust IR silently **dropped** `CP` gates on this
+round-trip (and `cu` was rejected with "Unknown gate: cu"); both now
+survive unchanged.
+
+## See also
+
+- Gate reference and parameterized gates: [Circuits](/docs/guides/circuits)
+- Compiler passes and optimization: [Compiler](/docs/guides/compiler)

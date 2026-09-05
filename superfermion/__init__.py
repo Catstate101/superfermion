@@ -14,7 +14,8 @@ Quick Start::
 
 Core surface (``sf.*``):
     Circuit, run, compile, param, RunResult, DeviceExecutor, experiment,
-    PauliString, SparsePauliOp, Hamiltonian, expval
+    PauliString, SparsePauliOp, Hamiltonian, expval, ClassicalShadow,
+    classical_shadow, shadow_expval
 
 Application modules (importable but not promoted to ``sf.*``):
     superfermion.algorithms   — VQE, QAOA
@@ -70,6 +71,23 @@ def _state_qfim_with_check(self, dag, param_values):
 _RustState.grad = _state_grad_with_check
 _RustState.qfim = _state_qfim_with_check
 State = _RustState
+
+# SUP-22: expose classical-shadow utilities on State (pure states only; the
+# snapshots are sampled from the exact statevector returned by numpy()).
+def _state_classical_shadow(self, shots, seed=None):
+    from superfermion.mitigation.classical_shadow import ClassicalShadow
+    return ClassicalShadow.from_statevector(self.numpy(), shots, seed=seed)
+
+
+def _state_shadow_expval(self, observable, shots=1000, seed=None, k=1):
+    from superfermion.mitigation.classical_shadow import ClassicalShadow
+    return ClassicalShadow.from_statevector(
+        self.numpy(), shots, seed=seed
+    ).expval(observable, k=k)
+
+
+_RustState.classical_shadow = _state_classical_shadow
+_RustState.shadow_expval = _state_shadow_expval
 from superfermion.utils.exceptions import MethodError
 
 from superfermion.devices import (
@@ -80,8 +98,19 @@ from superfermion.experiment.protocols import TrackerProtocol
 from superfermion.experiment.context import experiment
 from superfermion.experiment.local_tracker import LocalTracker
 
-from superfermion.observables.core import PauliString, SparsePauliOp, Hamiltonian, expval
+from superfermion.observables.core import (
+    PauliString,
+    SparsePauliOp,
+    Hamiltonian,
+    expval,
+    variance,
+)
 from superfermion.noise import NoiseModel
+
+# SUP-22: classical shadow protocol (randomized Pauli-basis snapshots) and
+# shadow expectation values. Pure-Python/numpy; snapshots sampled from the
+# exact statevector. See superfermion.mitigation.classical_shadow.
+from superfermion.mitigation import ClassicalShadow, classical_shadow, shadow_expval
 
 
 __all__ = [
@@ -96,7 +125,9 @@ __all__ = [
     # Experiment tracking
     "TrackerProtocol", "experiment", "LocalTracker",
     # Observables
-    "PauliString", "SparsePauliOp", "Hamiltonian", "expval",
+    "PauliString", "SparsePauliOp", "Hamiltonian", "expval", "variance",
+    # Classical shadows (SUP-22)
+    "ClassicalShadow", "classical_shadow", "shadow_expval",
     # Version
     "__version__",
 ]

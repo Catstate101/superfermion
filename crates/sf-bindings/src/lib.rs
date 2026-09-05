@@ -139,6 +139,13 @@ impl PyState {
             .map_err(|e| method_error(py, e.to_string()))
     }
 
+    fn variance(&self, py: Python<'_>, observable: Vec<(Vec<u8>, f64, f64)>) -> PyResult<f64> {
+        let terms = Self::parse_observable(&observable);
+        self.inner
+            .variance(&terms)
+            .map_err(|e| method_error(py, e.to_string()))
+    }
+
     #[pyo3(signature = (shots, seed=42))]
     fn sample(
         &self,
@@ -231,6 +238,17 @@ impl PyState {
             .partial_trace(&keep_qubits)
             .map_err(|e| method_error(py, e.to_string()))?;
         Ok(PyState { inner: new_state })
+    }
+
+    fn mutual_info(
+        &self,
+        py: Python<'_>,
+        wires_a: Vec<usize>,
+        wires_b: Vec<usize>,
+    ) -> PyResult<f64> {
+        self.inner
+            .mutual_info(&wires_a, &wires_b)
+            .map_err(|e| method_error(py, e.to_string()))
     }
 
     #[staticmethod]
@@ -345,6 +363,34 @@ impl PyQuantumDAG {
 
         let op = Self::parse_gate(gate_name, &rust_params)?;
         self.inner.add_op(op, &qubits);
+        Ok(())
+    }
+
+    /// Add a gate that only executes when classical bit `cbit` equals
+    /// `value` (classical feed-forward, OpenQASM 3 `if` semantics).
+    fn add_gate_cond(
+        &mut self,
+        gate_name: &str,
+        qubits: Vec<usize>,
+        params: Vec<pyo3::Bound<'_, pyo3::PyAny>>,
+        cbit: usize,
+        value: u64,
+    ) -> PyResult<()> {
+        let rust_params: Vec<Parameter> = params
+            .into_iter()
+            .map(|p| {
+                if let Ok(f) = p.extract::<f64>() {
+                    Parameter::Const(f)
+                } else if let Ok(s) = p.extract::<String>() {
+                    Parameter::Variable { name: s, id: 0 }
+                } else {
+                    Parameter::Const(0.0)
+                }
+            })
+            .collect();
+
+        let op = Self::parse_gate(gate_name, &rust_params)?;
+        self.inner.add_op_conditioned(op, &qubits, cbit, value);
         Ok(())
     }
 
@@ -693,6 +739,19 @@ impl PyQuantumDAG {
         Ok(counts)
     }
 
+    /// Mid-circuit (dynamic-circuit) simulation: per-shot trajectory
+    /// replay with state collapse at every Measure op and classical
+    /// feed-forward (conditioned ops) support. Returns a bitstring ->
+    /// count dict over all qubits (same orientation as
+    /// `simulate_and_sample`).
+    fn simulate_dynamic(
+        &self,
+        shots: usize,
+        seed: u64,
+    ) -> std::collections::HashMap<String, usize> {
+        self.inner.simulate_dynamic(shots, seed)
+    }
+
     /// Simulate and apply MSB/LSB endianness transpose in Rust before returning.
     /// Returns statevector in MSB (q0=leftmost) convention directly.
     fn simulate_msb<'py>(
@@ -828,6 +887,12 @@ impl PyQuantumDAG {
                 let phi = params.get(1).cloned().unwrap_or(Parameter::Const(0.0));
                 let lam = params.get(2).cloned().unwrap_or(Parameter::Const(0.0));
                 Ok(OpType::U(theta, phi, lam))
+            }
+            "cu" | "cu3" => {
+                let theta = params.first().cloned().unwrap_or(Parameter::Const(0.0));
+                let phi = params.get(1).cloned().unwrap_or(Parameter::Const(0.0));
+                let lam = params.get(2).cloned().unwrap_or(Parameter::Const(0.0));
+                Ok(OpType::Cu(theta, phi, lam))
             }
             "rzz" => {
                 let theta = params.first().cloned().unwrap_or(Parameter::Const(0.0));

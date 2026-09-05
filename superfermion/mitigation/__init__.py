@@ -4,6 +4,7 @@ Error Mitigation — Post-processing techniques for noise reduction.
 Implements:
 - Zero Noise Extrapolation (ZNE)
 - Measurement Error Mitigation (readout correction)
+- Classical shadows (randomized Pauli-basis snapshots + shadow expval)
 """
 from __future__ import annotations
 
@@ -14,6 +15,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 import superfermion as sf
+
+# SUP-22: classical-shadow estimators live in the sibling submodule; re-export
+# here so ``sf.mitigation.classical_shadow`` / ``ClassicalShadow`` work.
+from superfermion.mitigation.classical_shadow import (  # noqa: E402,F401
+    ClassicalShadow,
+    classical_shadow,
+    shadow_expval,
+)
 
 
 def zne(
