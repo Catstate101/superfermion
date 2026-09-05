@@ -793,6 +793,36 @@ class TestClassicalShadow:
         est = sf.shadow_expval(ghz, "ZZZ", shots=24000, seed=6)
         assert abs(est - ex) < 0.25, f"est={est} exact={ex}"
 
+    def test_local_single_qubit_terms_match_exact_sup25(self):
+        """(r) SUP-25: single-qubit terms on n=2 used to collapse to the
+        wire's X/Y/Z mean because _rotate measured the reflected wire."""
+        circuit = Circuit(2).ry(1.2, 0).rz(0.6, 0).cnot(0, 1).ry(0.4, 1).rz(0.9, 1)
+        for label in ("Z0", "X0", "Z1", "X1"):
+            ex = self._exact(circuit, label)
+            est = sf.shadow_expval(circuit, label, shots=30000, seed=100)
+            assert abs(est - ex) < 0.10, f"{label}: est={est} exact={ex}"
+
+    def test_asymmetric_two_qubit_terms_match_exact_sup25(self):
+        """(r) SUP-25: n=2 asymmetric pairs used to estimate the reflected
+        operator (est of X0Z1 tracked exact Z0X1 instead of X0Z1)."""
+        circuit = Circuit(2).ry(1.2, 0).rz(0.6, 0).cnot(0, 1).ry(0.4, 1).rz(0.9, 1)
+        for label in ("X0Z1", "Z0X1", "Y0Z1", "Z0Y1"):
+            ex = self._exact(circuit, label)
+            est = sf.shadow_expval(circuit, label, shots=40000, seed=101)
+            assert abs(est - ex) < 0.15, f"{label}: est={est} exact={ex}"
+
+    def test_three_qubit_local_and_asymmetric_terms_sup25(self):
+        """(r) SUP-25: on n=3 only the middle wire and reflection-closed
+        Z0Z2 survived the reflected-wire rotation; local/asymmetric terms
+        were biased."""
+        circuit = (Circuit(3).ry(1.0, 0).cnot(0, 1).ry(0.7, 1).cnot(1, 2)
+                   .rz(0.5, 0).rz(0.3, 2))
+        for label, tol in (("Z0", 0.10), ("Z1", 0.10), ("Z2", 0.10),
+                           ("Z0Z1", 0.15), ("X0Z1", 0.15), ("Z0Z2", 0.15)):
+            ex = self._exact(circuit, label)
+            est = sf.shadow_expval(circuit, label, shots=40000, seed=102)
+            assert abs(est - ex) < tol, f"{label}: est={est} exact={ex}"
+
     def test_observable_forms_agree(self):
         circuit = Circuit(2).ry(0.6, 0).ry(1.2, 1).cnot(0, 1)
         shadow = sf.classical_shadow(circuit, shots=8000, seed=7)
