@@ -270,6 +270,46 @@ impl PyState {
         })
     }
 
+    /// Build a density-matrix state handle from an explicit rho.
+    ///
+    /// ``rho`` is the row-major flatten (complex128, length 2^(2n)) of the
+    /// density matrix in the little-endian computational basis (qubit q at
+    /// bit position q) — the layout returned by ``State.numpy()`` for
+    /// ``method='density_matrix'``.  Used to build the handle for noisy
+    /// density-matrix runs, where the rho is only available after the
+    /// noisy simulation (``simulate_to_state`` has no noise path).
+    #[staticmethod]
+    fn from_dm(
+        rho: numpy::PyReadonlyArray1<num_complex::Complex64>,
+        n_qubits: usize,
+    ) -> PyResult<Self> {
+        let flat: Vec<num_complex::Complex64> = rho.as_slice()?.to_vec();
+        let dim = 1usize << n_qubits;
+        if flat.len() != dim * dim {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "array length {} doesn't match 2^{} * 2^{} = {}",
+                flat.len(),
+                n_qubits,
+                n_qubits,
+                dim * dim
+            )));
+        }
+        // Wrappers index the density matrix in the interleaved vectorized
+        // layout data[ket | (bra << n)] (see DensityMatrixStateWrapper),
+        // while the input rho is row-major; permute accordingly.
+        let mut data = vec![num_complex::Complex64::new(0.0, 0.0); dim * dim];
+        for ket in 0..dim {
+            for bra in 0..dim {
+                data[ket | (bra << n_qubits)] = flat[ket * dim + bra];
+            }
+        }
+        let mut dm = sf_ir::dm::DensityMatrixState::new(n_qubits);
+        dm.data = data;
+        Ok(PyState::new(Box::new(DensityMatrixStateWrapper::new(
+            dm, "cpu",
+        ))))
+    }
+
     #[getter]
     fn n_qubits(&self) -> usize {
         self.inner.n_qubits()

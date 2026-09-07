@@ -388,3 +388,61 @@ class RustDevice:
 
     def __repr__(self) -> str:
         return f"RustDevice(hardware='{self._hardware}', method='{self._method}')"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Additive fix: noisy density-matrix state handle.
+#
+# `_run_density_matrix` builds `RunResult.state` via
+# `dag.simulate_to_state("density_matrix")`, which has no noise path, so
+# the state handle (and therefore `RunResult.expectation()`/`variance()`,
+# `state.purity()`, ...) silently reflected the *noiseless* state whenever
+# a gate-noise model was applied.  The noisy rho is already computed
+# correctly and stored in `result.metadata["density_matrix"]`; when gate
+# noise is present, swap the handle for one backed by that noisy rho.
+# Preferred: the native `State.from_dm` binding (rebuilt wheels only).
+# Fallback: `NoisyDensityMatrixState`, a pure-Python drop-in handle.
+# No code above is modified.
+# ─────────────────────────────────────────────────────────────────────────
+def _execute_with_noisy_state(execute):
+    """Wrap ``RustDevice.execute`` so noisy density-matrix runs return a
+    state handle backed by the noisy rho (see module-level note)."""
+
+    def wrapper(self, circuit: Circuit, shots: int = 1000, **kwargs: Any) -> RunResult:
+        result = execute(self, circuit, shots, **kwargs)
+        noise_model = kwargs.get("noise_model", None)
+        has_gate_noise = bool(
+            noise_model is not None
+            and (getattr(noise_model, "_1q_kraus", None) or getattr(noise_model, "_2q_kraus", None))
+        )
+        if (
+            has_gate_noise
+            and self._method == "density_matrix"
+            and result.state is not None
+            and "density_matrix" in result.metadata
+        ):
+            n_qubits = result.metadata.get("n_qubits", circuit.n_qubits)
+            from superfermion.devices.noisy_dm_state import (
+                NoisyDensityMatrixState,
+                _to_little_endian,
+            )
+            rho_le = _to_little_endian(
+                np.asarray(result.metadata["density_matrix"]), n_qubits
+            )
+            try:
+                # Native handle (Design B): `State.from_dm` exists only on
+                # wheels rebuilt with the additive Rust binding; older
+                # wheels fall back to the pure-Python proxy below.
+                from superfermion._sf_core import State as _RustState
+                result.state = _RustState.from_dm(
+                    np.ascontiguousarray(rho_le.ravel(), dtype=np.complex128),
+                    n_qubits,
+                )
+            except (ImportError, AttributeError):
+                result.state = NoisyDensityMatrixState(rho_le, n_qubits, device="cpu")
+        return result
+
+    return wrapper
+
+
+RustDevice.execute = _execute_with_noisy_state(RustDevice.execute)
