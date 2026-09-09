@@ -14,9 +14,46 @@ from __future__ import annotations
 
 import os
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from superfermion.devices import DeviceCapabilities, DeviceExecutor
+
+
+def _ensure_measurements(qc: Any) -> Any:
+    """Append ``measure_all()`` when the circuit has no measurement ops.
+
+    IBM SamplerV2 rejects circuits without explicit measurements (runtime
+    error 1515). SF circuits carry measurement implicitly (Sampler-style
+    semantics), so ``bridge.to_qiskit`` emits none; add a full Z-basis
+    measurement before transpilation so real-hardware runs are accepted.
+    """
+    try:
+        has_measure = any(
+            getattr(inst.operation, "name", "") == "measure"
+            for inst in qc.data
+        )
+    except Exception:
+        return qc  # circuit cannot be introspected (e.g. mocked in tests)
+    if not has_measure:
+        qc.measure_all()
+    return qc
+
+
+def _normalize_counts_to_sf(counts: dict[str, int], width: int) -> dict[str, int]:
+    """Convert IBM SamplerV2 counts to SF's q0-last bitstring convention.
+
+    Verified on real hardware (ibm_fez/ibm_marrakesh, 2026-09):
+    ``bridge.to_qiskit`` reverses qubit indices (sf i -> qiskit n-1-i) and
+    ``measure_all`` maps creg[i] <- qiskit q[i], so the two reversals cancel
+    and SamplerV2 keys come back q0-first (bitstring position i holds SF
+    qubit i). SF counts are q0-last (qubit q is bit n-1-q, see results.py),
+    so each key of the measured width is reversed. Keys of other widths
+    (e.g. exotic multi-register mid-circuit layouts) are left untouched.
+    """
+    return {
+        (k[::-1] if len(k) == width else k): v
+        for k, v in (counts or {}).items()
+    }
 
 
 class IBMDeviceExecutor:
@@ -34,6 +71,7 @@ class IBMDeviceExecutor:
         ibmq_backend = self._service.backend(self._backend_name)
 
         qc = to_qiskit(circuit)
+        qc = _ensure_measurements(qc)
 
         from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
         pm = generate_preset_pass_manager(
@@ -57,6 +95,12 @@ class IBMDeviceExecutor:
                 counts = pub_result.data[next(iter(pub_result.data._fields))].get_counts()
         except Exception as exc:
             raise RuntimeError(f"Could not parse IBM result: {exc}") from exc
+
+        # SamplerV2 keys are q0-first; SF counts are q0-last. Normalize so
+        # all SF counts consumers (results.py, parameter_shift, readout
+        # correction) read the documented convention.
+        counts = _normalize_counts_to_sf(
+            counts, circuit.n_cbits or circuit.n_qubits)
 
         return RunResult(
             counts=counts,
