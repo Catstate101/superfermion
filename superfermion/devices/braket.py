@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional
 
-from superfermion.devices import DeviceCapabilities
+from superfermion.devices import DeviceCapabilities, DeviceInfo
 
 
 def _to_braket(circuit: "Circuit") -> Any:
@@ -187,3 +187,28 @@ class BraketDevice:
     def __call__(self, device: str = "sv1") -> BraketDeviceExecutor:
         device_arn = self._resolve_device_arn(device)
         return BraketDeviceExecutor(self._get_aws_session(), device_arn, self._s3_bucket)
+
+    def list_devices(self) -> List[DeviceInfo]:
+        """List Amazon Braket devices available to this account.
+
+        Returns SF-style ``DeviceInfo`` summaries (name, n_qubits, status,
+        is_simulator). Requires valid AWS credentials in the session;
+        ``n_qubits`` falls back to -1 when device properties cannot be
+        fetched (e.g. offline listing stubs).
+        """
+        from braket.aws import AwsDevice
+
+        aws_session = self._get_aws_session()
+        infos: List[DeviceInfo] = []
+        for device in AwsDevice.get_devices(aws_session=aws_session):
+            try:
+                n_qubits = int(device.properties.paradigm.qubitCount)
+            except Exception:
+                n_qubits = -1
+            infos.append(DeviceInfo(
+                name=str(device.name),
+                n_qubits=n_qubits,
+                status=str(getattr(device, "status", "UNKNOWN")),
+                is_simulator=str(getattr(device, "type", "")) == "SIMULATOR",
+            ))
+        return infos
