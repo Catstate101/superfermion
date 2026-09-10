@@ -30,6 +30,10 @@ import superfermion as sf
 # Connect — token is optional; IBMDevice() also reads QISKIT_IBM_TOKEN
 ibm = IBMDevice(token="your-ibm-token")
 
+# List hardware available on your account
+for dev in ibm.list_devices():
+    print(f"{dev.name}: {dev.n_qubits} qubits, {dev.status}")
+
 # Run on real hardware — no measure gates required
 qc = sf.Circuit(2).h(0).cnot(0, 1)
 result = sf.run(qc, device=ibm("ibm_fez"), shots=8192)
