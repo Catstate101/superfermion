@@ -27,38 +27,57 @@ pip install "superfermion[qpu]"
 from superfermion.devices.ibm import IBMDevice
 import superfermion as sf
 
-# Connect
+# Connect — token is optional; IBMDevice() also reads QISKIT_IBM_TOKEN
 ibm = IBMDevice(token="your-ibm-token")
 
-# List available devices
-print(ibm.list_devices())
+# Run on real hardware — no measure gates required
+qc = sf.Circuit(2).h(0).cnot(0, 1)
+result = sf.run(qc, device=ibm("ibm_fez"), shots=8192)
 
-# Run on real hardware
-qc = sf.Circuit(2).h(0).cnot(0, 1).measure_all()
-result = sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
-
-print(result.counts)
-print(result.metadata.execution_time)
-print(result.metadata.device_properties)
+print(result.counts)     # SF q0-last bitstrings, same convention as local runs
+print(result.metadata)   # {'backend': 'ibm_fez', 'provider': 'ibm'}
 ```
 
 `token` is optional — if omitted, `IBMDevice()` reads the `QISKIT_IBM_TOKEN` environment variable instead.
 
-### IBM-Specific Options
+### Automatic Measurements
+
+SF circuits carry measurement implicitly (Sampler-style semantics), but IBM's SamplerV2 rejects circuits without explicit measurement instructions (runtime error 1515). The adapter therefore appends a full Z-basis `measure_all()` to the converted Qiskit circuit whenever it contains no measure gates, so plain circuits run on real hardware unchanged. Explicit `circuit.measure(q)` / `circuit.measure_all()` gates are respected and never duplicated.
+
+### Counts Convention (q0-last)
+
+`result.counts` follows SF's documented q0-last convention — qubit `q` is bit `n - 1 - q` — matching the local `"cpu"` sampler. IBM's SamplerV2 returns q0-first bitstrings (position `i` holds SF qubit `i`; verified empirically, `x(0)` on `ibm_fez` returns `'10'`), so the adapter reverses every key of the measured width before building the `RunResult`. All counts consumers — `RunResult.expectation`, `parameter_shift_grad`, `readout_correction` — therefore behave identically for QPU and simulator results, and results from different providers can be compared directly.
+
+### Parameter-Shift Gradients on Hardware
 
 ```python
-# With error mitigation
-from superfermion.mitigation import readout_correction, zne
+from superfermion.observables import SparsePauliOp
+from superfermion.qml.gradient.parameter_shift import parameter_shift_grad
 
-# Readout error correction
-result = sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
-corrected_counts = readout_correction(result)
+theta = sf.param("theta")
+circ = sf.Circuit(2).ry(theta, 0).cx(0, 1)
+obs = SparsePauliOp.from_string("ZI", n_qubits=2)   # Z on qubit 0
 
-# Zero-noise extrapolation
-result = zne(qc, device=ibm("ibm_brisbane"), noise_levels=[1, 2, 3])
+grad = parameter_shift_grad(circ, obs, {"theta": 0.8},
+                            device=ibm("ibm_fez"), shots=2048)
+print(grad)   # analytic value: -sin(0.8) = -0.7174
 ```
 
-**Transpilation & mitigation:** Superfermion submits raw ISA circuits — it transpiles with Qiskit's preset pass manager at `optimization_level=3` (the executor default) and applies no error mitigation on the device path. `readout_correction` and `zne` are manual post-processing helpers: call them on the `RunResult` returned by `sf.run()`, as shown above. To request a different compile level, pass it through `sf.run()` — extra kwargs reach the executor unchanged, e.g. `sf.run(qc, device=ibm("ibm_brisbane"), shots=8192, optimization_level=1)`.
+Verified on real IBM QPUs (`ibm_marrakesh`, `ibm_fez`, September 2026): one-qubit and entangled two-qubit parameter-shift gradients match the analytic value within counting statistics at 2048 shots per shifted run. A two-qubit case with an idle second qubit failed before the normalization fix (`Ry(0.8, 0)`, obs `ZI`: measured +0.0000 vs analytic −0.7174, z = 64 — raw SamplerV2 keys were stored q0-first and misread as q0-last); after the adapter normalization the same case measures −0.72 ± 0.01 (z ≈ 0) on the same backend. Expect small residual attenuation from readout error: measured ≈ analytic × (1 − E), where E = p(1|0) + p(0|1) for the measured qubit (≈1–3% on current devices, from live calibration).
+
+### Error Mitigation
+
+```python
+from superfermion.mitigation import readout_correction, zne
+
+# Readout-error correction: M[i][j] = P(measure i | true j)
+corrected = readout_correction(result.counts, calibration_matrix=M)
+
+# Zero-noise extrapolation: observable_fn maps a statevector to a scalar
+value = zne(qc, observable_fn=my_observable_fn, scale_factors=[1, 2, 3])
+```
+
+**Transpilation & mitigation:** the adapter transpiles with Qiskit's preset pass manager at `optimization_level=3` (the executor default) and applies no error mitigation on the device path. To request a different compile level, pass it through `sf.run()` — extra kwargs reach the executor unchanged, e.g. `sf.run(qc, device=ibm("ibm_fez"), shots=8192, optimization_level=1)`. `readout_correction` and `zne` are manual helpers: `readout_correction` takes the (already q0-last) counts dict plus an optional calibration matrix; `zne` folds the circuit at increasing noise scales and extrapolates an `observable_fn`.
 
 ## IonQ
 
@@ -154,7 +173,7 @@ with sf.experiment("qpu-benchmark") as tracker:
     sf.run(qc, device="cpu", shots=10000)
 
     # QPU runs
-    sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
+    sf.run(qc, device=ibm("ibm_fez"), shots=8192)
     sf.run(qc, device=ionq("aria-1"), shots=1000)
 
 # All runs logged in ~/.superfermion/runs/qpu-benchmark/

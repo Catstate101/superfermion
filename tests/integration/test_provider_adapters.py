@@ -124,6 +124,82 @@ class TestIBMDeviceAdapter:
         _, call_kwargs = mock_sampler.run.call_args
         assert call_kwargs.get("shots") == 4000
 
+    def test_ensure_measurements_appends_when_missing(self):
+        """SamplerV2 rejects measure-less circuits (error 1515); the adapter
+        must append measure_all() before transpilation."""
+        pytest.importorskip("qiskit")
+        from qiskit import QuantumCircuit
+
+        from superfermion.devices.ibm import _ensure_measurements
+
+        qc = QuantumCircuit(2)
+        qc.h(0)
+        out = _ensure_measurements(qc)
+        names = [i.operation.name for i in out.data]
+        assert "measure" in names
+        assert out.num_clbits == 2
+
+        # circuits that already carry measurements are left untouched
+        qc2 = QuantumCircuit(2, 2)
+        qc2.h(0)
+        qc2.measure([0, 1], [0, 1])
+        out2 = _ensure_measurements(qc2)
+        n_meas = sum(1 for i in out2.data if i.operation.name == "measure")
+        assert n_meas == 2  # no extra measure_all appended
+
+    def test_ensure_measurements_skips_unintrospectable_circuit(self):
+        """A mocked/non-qiskit circuit must not break the pipeline."""
+        from superfermion.devices.ibm import _ensure_measurements
+        qc = MagicMock()
+        assert _ensure_measurements(qc) is qc
+
+    def test_normalize_counts_reverses_q0_first_keys(self):
+        """SamplerV2 keys are q0-first (position i = SF qubit i); SF counts
+        are q0-last (qubit q is bit n-1-q), so keys are reversed."""
+        from superfermion.devices.ibm import _normalize_counts_to_sf
+
+        # x(0) on a real IBM backend returns '10' (q0-first); SF expects '01'
+        assert _normalize_counts_to_sf({"10": 1011, "00": 8, "11": 5}, 2) == {
+            "01": 1011, "00": 8, "11": 5,
+        }
+        # symmetric and single-qubit keys are invariant under reversal
+        assert _normalize_counts_to_sf({"00": 512, "11": 512}, 2) == {
+            "00": 512, "11": 512,
+        }
+        assert _normalize_counts_to_sf({"0": 5, "1": 9}, 1) == {"0": 5, "1": 9}
+        # keys of a different width (multi-register layouts) are untouched
+        assert _normalize_counts_to_sf({"0": 3, "00": 7}, 2) == {"0": 3, "00": 7}
+
+    def test_execute_normalizes_raw_q0_first_counts(self, bell_circuit):
+        """End-to-end (mocked SamplerV2): raw q0-first counts must reach
+        RunResult in SF q0-last order, so RunResult.expectation and the
+        parameter-shift counts parser read the documented convention."""
+        pytest.importorskip("qiskit_ibm_runtime")
+        from superfermion.devices.ibm import IBMDeviceExecutor
+
+        mock_service = MagicMock()
+        mock_pub = MagicMock()
+        # q0-first raw counts as returned by SamplerV2 for x(0)+noise
+        mock_pub.data.meas.get_counts.return_value = {"10": 700, "00": 300}
+        mock_result = MagicMock()
+        mock_result.__getitem__.return_value = mock_pub
+        mock_sampler = MagicMock()
+        mock_sampler.run.return_value.result.return_value = mock_result
+        mock_service.backend.return_value = MagicMock()
+
+        executor = IBMDeviceExecutor(mock_service, "ibm_fez")
+        with patch("superfermion.bridge.to_qiskit", return_value=MagicMock()):
+            with patch(
+                "qiskit.transpiler.preset_passmanagers.generate_preset_pass_manager",
+            ) as mock_pm:
+                mock_pm.return_value.run.return_value = MagicMock()
+                with patch("qiskit_ibm_runtime.SamplerV2", return_value=mock_sampler):
+                    result = executor.execute(bell_circuit, shots=1000)
+
+        assert result.counts == {"01": 700, "00": 300}
+        # q0-last parser: <Z0> = P('00') - P('01') = 0.3 - 0.7 = -0.4
+        assert result.expectation([([3, 0], 1.0, 0.0)]) == pytest.approx(-0.4)
+
 
 class TestIonQDeviceAdapter:
     def test_callable_returns_device_executor(self):
