@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import os
 
-from typing import Any, Optional
+from typing import Any, List, Optional
 
-from superfermion.devices import DeviceCapabilities, DeviceExecutor
+from superfermion.devices import DeviceCapabilities, DeviceExecutor, DeviceInfo
 
 
 def _ensure_measurements(qc: Any) -> Any:
@@ -146,3 +146,31 @@ class IBMDevice:
 
     def __call__(self, backend_name: str = "ibm_fez") -> IBMDeviceExecutor:
         return IBMDeviceExecutor(self._ensure_service(), backend_name)
+
+    def list_devices(self) -> List[DeviceInfo]:
+        """List IBM Quantum backends available to this account.
+
+        Returns SF-style ``DeviceInfo`` summaries (name, n_qubits, status,
+        is_simulator) using the same token plumbing as execution
+        (``token=`` or the ``QISKIT_IBM_TOKEN`` environment variable).
+        """
+        service = self._ensure_service()
+        infos: List[DeviceInfo] = []
+        for backend in service.backends():
+            status = backend.status()
+            # Older QiskitRuntimeService exposes status().name; newer
+            # versions expose .operational (+ status_msg) only.
+            status_name = getattr(status, "name", None)
+            if status_name is None:
+                if hasattr(status, "operational"):
+                    status_name = (
+                        "operational" if status.operational else "offline")
+                else:
+                    status_name = str(status)
+            infos.append(DeviceInfo(
+                name=str(backend.name),
+                n_qubits=int(getattr(backend, "num_qubits", -1)),
+                status=str(status_name),
+                is_simulator=bool(getattr(backend, "simulator", False)),
+            ))
+        return infos

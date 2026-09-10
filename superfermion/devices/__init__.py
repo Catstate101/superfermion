@@ -34,6 +34,20 @@ class DeviceCapabilities:
     is_simulator: bool = True
 
 
+@dataclass(frozen=True)
+class DeviceInfo:
+    """Summary of a cloud device available to a provider account.
+
+    Returned by provider ``list_devices()`` helpers (IBM, Braket) so
+    account hardware can be enumerated through a single SF-style shape.
+    """
+
+    name: str
+    n_qubits: int
+    status: str
+    is_simulator: bool = False
+
+
 @runtime_checkable
 class DeviceExecutor(Protocol):
     """Protocol that all device executors must satisfy.
@@ -145,6 +159,7 @@ class Algorithm(Protocol):
 __all__ = [
     "DeviceExecutor",
     "DeviceCapabilities",
+    "DeviceInfo",
     "Provider",
     "Job",
     "Algorithm",

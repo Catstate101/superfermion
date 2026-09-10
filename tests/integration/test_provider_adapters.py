@@ -200,6 +200,49 @@ class TestIBMDeviceAdapter:
         # q0-last parser: <Z0> = P('00') - P('01') = 0.3 - 0.7 = -0.4
         assert result.expectation([([3, 0], 1.0, 0.0)]) == pytest.approx(-0.4)
 
+    def test_list_devices_returns_sf_device_info(self):
+        """list_devices() maps account backends to SF-style DeviceInfo."""
+        from types import SimpleNamespace
+
+        from superfermion.devices import DeviceInfo
+        from superfermion.devices.ibm import IBMDevice
+
+        def fake_backend(name, n, status=None, sim=False, operational=None):
+            if status is not None:  # older runtime: status().name
+                st = SimpleNamespace(name=status)
+            else:  # newer runtime: status().operational only
+                st = SimpleNamespace(operational=operational, status_msg="")
+            return SimpleNamespace(
+                name=name, num_qubits=n, simulator=sim, status=lambda: st,
+            )
+
+        mock_service = MagicMock()
+        mock_service.backends.return_value = [
+            fake_backend("ibm_fez", 156, status="operational"),
+            fake_backend("ibm_marrakesh", 156, operational=True),
+            fake_backend("ibm_kingston", 156, operational=False),
+        ]
+
+        ibm = IBMDevice(token="fake-token")
+        with patch.object(ibm, "_ensure_service", return_value=mock_service):
+            infos = ibm.list_devices()
+
+        assert all(isinstance(d, DeviceInfo) for d in infos)
+        assert [d.name for d in infos] == [
+            "ibm_fez", "ibm_marrakesh", "ibm_kingston"]
+        assert infos[0].n_qubits == 156
+        assert infos[0].status == "operational"  # older .name shape
+        assert infos[1].status == "operational"  # newer .operational shape
+        assert infos[2].status == "offline"      # newer offline mapping
+        assert infos[0].is_simulator is False
+
+    def test_list_devices_requires_token(self, monkeypatch):
+        from superfermion.devices.ibm import IBMDevice
+
+        monkeypatch.delenv("QISKIT_IBM_TOKEN", raising=False)
+        with pytest.raises(ValueError, match="requires a token"):
+            IBMDevice().list_devices()
+
 
 class TestIonQDeviceAdapter:
     def test_callable_returns_device_executor(self):
@@ -269,6 +312,50 @@ class TestBraketDeviceAdapter:
             mock_session.return_value.search_devices.return_value = []
             with pytest.raises(ValueError, match="No Braket device found"):
                 braket("nonexistent_device_xyz")
+
+    def test_list_devices_returns_sf_device_info(self):
+        """list_devices() maps Braket devices to SF-style DeviceInfo; a
+        device whose properties cannot be fetched falls back to -1."""
+        import types as pytypes
+
+        from superfermion.devices import DeviceInfo
+        from superfermion.devices.braket import BraketDevice
+
+        def fake_device(name, qubit_count, status, dtype):
+            props = pytypes.SimpleNamespace(
+                paradigm=pytypes.SimpleNamespace(qubitCount=qubit_count))
+            return pytypes.SimpleNamespace(
+                name=name, status=status, type=dtype, properties=props)
+
+        fake_sv1 = fake_device("SV1", 34, "ONLINE", "SIMULATOR")
+        fake_qpu = fake_device("Rigetti", 80, "ONLINE", "QPU")
+        fake_qpu.properties = None  # properties unavailable -> -1 fallback
+
+        class FakeAwsDevice:
+            @classmethod
+            def get_devices(cls, aws_session=None, **kwargs):
+                return [fake_sv1, fake_qpu]
+
+        fake_aws = pytypes.ModuleType("braket.aws")
+        fake_aws.AwsDevice = FakeAwsDevice
+
+        braket = BraketDevice.__new__(BraketDevice)  # no boto3 needed
+        braket._s3_bucket = "test-bucket"
+
+        with patch.dict("sys.modules", {
+            "braket": pytypes.ModuleType("braket"),
+            "braket.aws": fake_aws,
+        }):
+            with patch.object(braket, "_get_aws_session",
+                              return_value=MagicMock()):
+                infos = braket.list_devices()
+
+        assert all(isinstance(d, DeviceInfo) for d in infos)
+        assert [d.name for d in infos] == ["SV1", "Rigetti"]
+        assert infos[0].n_qubits == 34
+        assert infos[0].is_simulator is True
+        assert infos[1].n_qubits == -1  # graceful fallback
+        assert infos[1].status == "ONLINE"
 
 
 class TestAdapterProtocolCompliance:
