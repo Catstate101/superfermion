@@ -23,14 +23,14 @@ with a Rust acceleration core (Rayon multithreading + in-place statevector).
 - **4 simulation methods** — statevector (CPU/GPU), MPS tensor network,
   stabilizer (Aaronson-Gottesman tableau), density matrix (Kraus channels)
 - **Adjoint differentiation** — 1 forward + 1 backward pass regardless of
-  parameter count; up to 200x faster than parameter-shift for deep circuits
+  parameter count (44–198x faster than parameter-shift on deep circuits)
 - **MPS tensor networks** — Rust MPS with faer-based QR decomposition and
   lazy SWAP routing; scales to 200+ qubits for low-entanglement circuits
 - **Stabilizer simulator** — word-packed tableau; Clifford circuits at
   poly-time to ~1000 qubits
-- **Quantum Error Correction** — 10 codes (Repetition, Shor, Steane,
-  Bacon-Shor, Surface, Toric, Color, Honeycomb, Hypercube, CSS) +
-  4 decoders (MWPM, Union-Find, BP+OSD, Neural)
+- **Quantum Error Correction** — stabilizer code constructions
+  (Repetition, Shor, Steane, Surface) + decoders (BP+OSD, greedy
+  matching, Union-Find, Neural); additional codes in progress
 - **Multi-framework ML** — `QuantumLayer` (Flax), `TorchQuantumLayer`
   (PyTorch), `TFQuantumLayer` (TensorFlow)
 - **5 gradient methods** — adjoint, parameter-shift, SPSA, QNG, Riemannian
@@ -122,7 +122,7 @@ Python API (superfermion/)
     |-- nn/           Thin ML bridges: Flax/PyTorch/TF → sf.State.grad()
     |-- algorithms/   VQE, QAOA, QSVM, QBM, QRL + Grover, QPE, HHL
     |-- chemistry/    JW/BK transforms, UCCSD ansatz, PySCF bridge
-    |-- qec/          10 codes + 4 decoders
+    |-- qec/          codes + 4 decoders
     |-- compiler/     gate decomposition, rotation merge, SABRE routing
     |-- bridge/       Qiskit, Cirq, PennyLane, QASM interop
     |-- noise/        NoiseModel (Kraus channels for density matrix)
@@ -187,16 +187,17 @@ result = sf.run(circuit, device="gpu", shots=0)
 ## Benchmarks
 
 Performance measured against Qiskit Aer 0.17 and PennyLane Lightning 0.45
-on CPU (details in [`notebooks/`](notebooks/)).
+on CPU (details in [`notebooks/`](notebooks/)). Speedups are regime-dependent;
+the caveats below are part of the claim.
 
 | Workload | SF vs Competitor | Speedup |
 |---|---|---|
-| Stabilizer (n=10–500, 10k shots) | vs Qiskit Aer stabilizer | 3.7–6.8x |
-| MPS GHZ (n=10–100, 10k shots) | vs Qiskit Aer MPS | 21–33x |
-| Adjoint gradient (n=4–16, depth=1) | vs PennyLane Lightning | 1.5–800x |
-| Adjoint vs param-shift (n=10) | SF internal | 20–198x (grows with params) |
-| Shot sampling (n=10–22, 100k shots) | vs Qiskit Aer | 1.6–9.5x |
-| VQE H2 end-to-end | vs PennyLane Lightning | 100x |
+| Statevector (n=10–18) | vs Qiskit Aer statevector | up to ~5x (Aer faster at n≥20) |
+| Stabilizer (n=10–500, 10k shots) | vs Qiskit Aer stabilizer | 3–7x |
+| MPS GHZ (n=10–100, 10k shots) | vs Qiskit Aer MPS | 23–33x (GHZ is the best case for MPS) |
+| Adjoint gradient (n=4–16, depth=1) | vs PennyLane `qml.grad` | 1.5–800x (PennyLane faster at n≥18) |
+| Adjoint vs param-shift (n=10, depth 1–8) | SF internal | 44–198x (grows with depth) |
+| Shot sampling (n=10–22, 100k shots) | vs Qiskit Aer | 1.4–11.7x (Aer wins at 1k–10k shots, n≥20) |
 
 ---
 
