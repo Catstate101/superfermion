@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "sf-bindings"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "nalgebra",
  "num-complex",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "sf-compiler"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "indexmap",
  "log",
@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "sf-gpu"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "approx",
  "cudarc",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "sf-ir"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "approx",
  "faer",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "sf-pulse"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "log",
  "num-complex",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "sf-qec"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "log",
  "ndarray",
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "sf-router"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "indexmap",
  "log",
