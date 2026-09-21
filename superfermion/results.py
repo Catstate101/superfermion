@@ -15,6 +15,141 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class LazyDict(dict):
+    """A ``dict`` whose entries are built on first access.
+
+    Large result payloads (e.g. the ``2^n``-entry exact probability table
+    of a statevector run) are frequently never read — consumers usually
+    only use ``counts``. ``LazyDict`` defers the construction cost until
+    the first read operation, at which point it materializes in-place
+    (storage grows via ``dict.update``), so callers can never observe a
+    partially built table.
+
+    All read, mutation, comparison, repr, copy/pickle operations trigger
+    materialization. Only C-level dict fast paths that bypass Python
+    dispatch (e.g. ``dict(obj)``'s storage merge, ``PyDict_Next``) are
+    not intercepted — construct from ``obj.items()`` or iterate instead.
+
+    Args:
+        build: Zero-argument callable returning a plain ``dict``.
+    """
+
+    __slots__ = ("_build",)
+
+    def __init__(self, build) -> None:
+        super().__init__()
+        self._build = build
+
+    def _materialize(self) -> None:
+        build = self._build
+        if build is not None:
+            self._build = None
+            super().update(build())
+
+    # ── read operations ──────────────────────────────────────────
+    def __len__(self) -> int:
+        self._materialize()
+        return super().__len__()
+
+    def __iter__(self):
+        self._materialize()
+        return super().__iter__()
+
+    def __contains__(self, key) -> bool:
+        self._materialize()
+        return super().__contains__(key)
+
+    def __getitem__(self, key):
+        self._materialize()
+        return super().__getitem__(key)
+
+    def __bool__(self) -> bool:
+        self._materialize()
+        return super().__len__() > 0
+
+    def __repr__(self) -> str:
+        self._materialize()
+        return super().__repr__()
+
+    def __eq__(self, other):
+        self._materialize()
+        return super().__eq__(other)
+
+    def __ne__(self, other):
+        self._materialize()
+        return super().__ne__(other)
+
+    def __or__(self, other):
+        self._materialize()
+        return super().__or__(other)
+
+    def __ror__(self, other):
+        self._materialize()
+        return super().__ror__(other)
+
+    def get(self, key, default=None):
+        self._materialize()
+        return super().get(key, default)
+
+    def keys(self):
+        self._materialize()
+        return super().keys()
+
+    def values(self):
+        self._materialize()
+        return super().values()
+
+    def items(self):
+        self._materialize()
+        return super().items()
+
+    def copy(self):
+        self._materialize()
+        return super().copy()
+
+    def __copy__(self):
+        self._materialize()
+        return dict(self)
+
+    def __reduce__(self):
+        # Pickle/deepcopy as a plain dict (avoids reviving the thunk).
+        self._materialize()
+        return (dict, (dict(self),))
+
+    # ── mutation operations ──────────────────────────────────────
+    def __setitem__(self, key, value) -> None:
+        self._materialize()
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key) -> None:
+        self._materialize()
+        super().__delitem__(key)
+
+    def update(self, *args, **kwargs) -> None:
+        self._materialize()
+        super().update(*args, **kwargs)
+
+    def setdefault(self, key, default=None):
+        self._materialize()
+        return super().setdefault(key, default)
+
+    def pop(self, key, *args):
+        self._materialize()
+        return super().pop(key, *args)
+
+    def popitem(self):
+        self._materialize()
+        return super().popitem()
+
+    def clear(self) -> None:
+        self._materialize()
+        super().clear()
+
+    def __ior__(self, other):
+        self._materialize()
+        return super().__ior__(other)
+
+
 @dataclass
 class RunResult:
     """Result of executing a quantum circuit.

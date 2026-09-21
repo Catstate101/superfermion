@@ -9,12 +9,56 @@ This replaces the old LocalDevice + factory.py + multiple backend classes.
 
 from __future__ import annotations
 
+import os
+import warnings
 from typing import Any, Dict, List, Optional
 import numpy as np
 
 from superfermion.circuit import Circuit
 from superfermion.devices import DeviceCapabilities
-from superfermion.results import RunResult
+from superfermion.results import LazyDict, RunResult
+
+# Above this qubit count the exact |c|² probability table costs more to
+# build than typical runs save by reading it — defer it until first use.
+_EAGER_PROBS_MAX_QUBITS = 12
+
+# MPS runs warn when the discarded-weight fraction exceeds this threshold
+# (override with SF_MPS_WARN_WEIGHT); SF_MPS_STRICT=1 turns it into an error.
+_MPS_WARN_WEIGHT_DEFAULT = 1e-10
+
+
+def _check_mps_truncation(state: Any, bond_dim: int) -> None:
+    """Surface MPS bond-dimension truncation instead of failing silently.
+
+    The Rust core reports the discarded-weight fraction Σε for every step in
+    which the QR bond cap removed real weight.  Warn when it exceeds
+    ``SF_MPS_WARN_WEIGHT`` (default 1e-10), or raise when ``SF_MPS_STRICT=1``
+    — results from a truncated MPS are approximate.
+    """
+    get_report = getattr(state, "truncation_report", None)
+    if get_report is None:
+        return
+    try:
+        info = get_report()
+    except Exception:
+        return
+    if not info:
+        return
+    discarded = float(info.get("discarded_weight", 0.0))
+    threshold = float(os.environ.get("SF_MPS_WARN_WEIGHT", _MPS_WARN_WEIGHT_DEFAULT))
+    if discarded <= threshold:
+        return
+    msg = (
+        f"MPS simulation truncated {discarded:.3e} of the state weight at "
+        f"bond_dim={bond_dim} ({info.get('truncation_events', 0)} events, max "
+        f"single-step {float(info.get('max_discarded_weight', 0.0)):.3e}); "
+        f"results are approximate (fidelity lower bound "
+        f"{float(info.get('fidelity_lower_bound', 1.0)):.6f}). "
+        "Increase bond_dim for a more accurate state."
+    )
+    if os.environ.get("SF_MPS_STRICT") == "1":
+        raise RuntimeError(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=3)
 
 
 def _lsb_to_msb(sv: np.ndarray, n_qubits: int) -> np.ndarray:
@@ -24,6 +68,43 @@ def _lsb_to_msb(sv: np.ndarray, n_qubits: int) -> np.ndarray:
     tensor = sv.reshape([2] * n_qubits)
     tensor = tensor.transpose(list(range(n_qubits - 1, -1, -1)))
     return tensor.reshape(-1)
+
+
+def _call_dm_noisy_state(dag: Any, noise_ops: Any, noise_ops_2q: Any) -> Any:
+    """Native noisy-DM call; forwards 2q channels when present.
+
+    Tolerates builds whose binding predates the optional 2q parameter
+    (TypeError -> documented RuntimeWarning + 1q-only call) so a source
+    checkout never silently drops 2q noise on an older extension.
+    """
+    if noise_ops_2q:
+        try:
+            return dag.simulate_dm_noisy_state(noise_ops, noise_ops_2q)
+        except TypeError:
+            warnings.warn(
+                "This superfermion build does not support two-qubit noise "
+                "channels on the native density-matrix path; they are ignored "
+                "for this run (rebuild the extension to apply them).",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+    return dag.simulate_dm_noisy_state(noise_ops)
+
+
+def _call_dm_noisy_vec(dag: Any, noise_ops: Any, noise_ops_2q: Any) -> Any:
+    """Legacy vec-returning fallback, 2q-aware in the same way."""
+    if noise_ops_2q:
+        try:
+            return dag.simulate_dm_noisy(noise_ops, noise_ops_2q)
+        except TypeError:
+            warnings.warn(
+                "This superfermion build does not support two-qubit noise "
+                "channels on the native density-matrix path; they are ignored "
+                "for this run (rebuild the extension to apply them).",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+    return dag.simulate_dm_noisy(noise_ops)
 
 
 def _is_dynamic_circuit(circuit: Circuit) -> bool:
@@ -93,6 +174,21 @@ class RustDevice:
 
     def execute(self, circuit: Circuit, shots: int = 1000, **kwargs: Any) -> RunResult:
         """Execute a circuit on this device."""
+        # Gate/readout noise is only applied on the density-matrix path;
+        # warn instead of silently returning noiseless results elsewhere.
+        noise_model = kwargs.get("noise_model", None)
+        if (
+            noise_model is not None
+            and getattr(noise_model, "has_noise", False)
+            and self._method != "density_matrix"
+        ):
+            warnings.warn(
+                f"noise_model is ignored by method='{self._method}': gate and "
+                "readout noise are only applied on the density-matrix path. "
+                "Use method='density_matrix' for noisy simulations.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         # Mid-circuit (dynamic) circuits: measure/reset/feed-forward change
         # the state during the circuit, so they need per-shot trajectory
         # replay instead of a single unitary evolution + terminal sampling.
@@ -206,11 +302,19 @@ class RustDevice:
         else:
             counts = {}
 
-        probabilities = {
-            format(i, f"0{n_qubits}b"): float(p)
-            for i, p in enumerate(np.abs(final_state) ** 2)
-            if p > 1e-15
-        }
+        def _exact_probabilities() -> Dict[str, float]:
+            probs = np.abs(final_state) ** 2
+            return {
+                format(i, f"0{n_qubits}b"): float(p)
+                for i, p in enumerate(probs)
+                if p > 1e-15
+            }
+
+        probabilities: Dict[str, float] = (
+            _exact_probabilities()
+            if n_qubits <= _EAGER_PROBS_MAX_QUBITS
+            else LazyDict(_exact_probabilities)
+        )
 
         return RunResult(
             counts=counts,
@@ -233,6 +337,7 @@ class RustDevice:
         dag = circuit.to_ir()
 
         state = dag.simulate_to_state("mps", "cpu", bond_dim)
+        _check_mps_truncation(state, bond_dim)
 
         if shots > 0:
             counts = state.sample(shots, seed)
@@ -295,18 +400,55 @@ class RustDevice:
 
         if noise_model is not None and noise_model.has_noise:
             noise_ops = noise_model.to_rust_kraus_ops(n)
-            rho_vec = dag.simulate_dm_noisy(noise_ops)
-            rho = rho_vec.reshape(2**n, 2**n).conj()
-            rho = _reverse_qubits_dm(rho, n)
+            noise_ops_2q = (
+                noise_model.to_rust_kraus_ops_2q()
+                if hasattr(noise_model, "to_rust_kraus_ops_2q")
+                else []
+            )
+            if noise_ops or noise_ops_2q:
+                # Native handle: the noisy DM data stays in Rust and is moved
+                # into the State handle (zero-copy), avoiding the numpy
+                # round-trip (simulate_dm_noisy -> from_dm). Older wheels
+                # without the binding fall back to the vec + Python proxy.
+                try:
+                    # Native handle: the noisy DM data stays in Rust and is
+                    # moved into the State handle; the binding also returns
+                    # the public row-major rho (one in-Rust gather) so the
+                    # Python numpy() + _reverse_qubits_dm round-trip is
+                    # skipped entirely. Optional 2q channels ride along on
+                    # builds that support the parameter (helpers warn +
+                    # degrade instead of silently dropping them otherwise).
+                    state, rho_flat = _call_dm_noisy_state(dag, noise_ops, noise_ops_2q)
+                    rho = np.asarray(rho_flat, dtype=np.complex128).reshape(2**n, 2**n)
+                except AttributeError:
+                    rho_vec = _call_dm_noisy_vec(dag, noise_ops, noise_ops_2q)
+                    rho_le = rho_vec.reshape(2**n, 2**n).conj()
+                    rho = _reverse_qubits_dm(rho_le, n)
+                    # State handle backed by the noisy rho — no duplicate
+                    # noiseless simulate_to_state("density_matrix") call.
+                    from superfermion.devices.noisy_dm_state import NoisyDensityMatrixState
+                    state = NoisyDensityMatrixState(rho_le, n)
+                noisy_state_ready = True
+            else:
+                # Readout-only noise: the quantum state is unchanged, so the
+                # Rust handle is kept (unchanged-path contract).
+                rho_vec = dag.simulate_dm()
+                rho = rho_vec.reshape(2**n, 2**n).conj()
+                rho = _reverse_qubits_dm(rho, n)
+                state = dag.simulate_to_state("density_matrix")
+                noisy_state_ready = False
         else:
             rho_vec = dag.simulate_dm()
             rho = rho_vec.reshape(2**n, 2**n).conj()
             rho = _reverse_qubits_dm(rho, n)
-
-        state = dag.simulate_to_state("density_matrix")
+            state = dag.simulate_to_state("density_matrix")
+            noisy_state_ready = False
 
         probs = _dm_to_probs(rho)
-        purity = float(np.real(np.trace(rho @ rho)))
+        # Hermitian rho: Tr(rho²) = Σ|rho_ij|² — Frobenius norm squared,
+        # O(d²) instead of the O(d³) rho @ rho matmul. np.vdot conjugates
+        # its first argument, so one BLAS pass replaces abs+square+sum.
+        purity = float(np.vdot(rho, rho).real)
         probabilities = {
             format(i, f'0{n}b'): float(p)
             for i, p in enumerate(probs) if p > 1e-12
@@ -332,12 +474,27 @@ class RustDevice:
                 "density_matrix": rho,
                 "n_qubits": n,
                 "probabilities": probabilities,
+                # Private marker: tells _execute_with_noisy_state that the
+                # state handle is already backed by the noisy rho, so its
+                # rebuild (from_dm round-trip) is skipped. Popped by the
+                # wrapper and never user-visible.
+                **({"_sf_noisy_state_ready": True} if noisy_state_ready else {}),
             },
         )
 
     def _run_stabilizer(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
         """Stabilizer simulation for Clifford circuits."""
         seed = kwargs.get("seed", 42)
+        # Hard cap of the Rust tableau: raise a clean ValueError instead of
+        # the pyo3 PanicException (a BaseException that `except Exception`
+        # cannot catch) surfacing from crates/sf-ir/src/stabilizer.rs.
+        if circuit.n_qubits > 1024:
+            raise ValueError(
+                "method='stabilizer' supports at most 1024 qubits "
+                f"(got {circuit.n_qubits}): the Rust tableau has a hard cap.\n"
+                "  Use method='mps' or method='statevector' for larger "
+                "circuits."
+            )
         dag = circuit.to_ir()
 
         try:
@@ -347,6 +504,14 @@ class RustDevice:
                 "Circuit contains non-Clifford gates — cannot use method='stabilizer'.\n"
                 "  Use method='statevector' or method='mps' instead."
             ) from e
+        except BaseException as e:  # noqa: BLE001 - PanicException escapes Exception
+            if type(e).__name__ == "PanicException":
+                raise ValueError(
+                    f"method='stabilizer' failed in the Rust tableau: {e}.\n"
+                    "  The tableau supports at most 1024 qubits; use "
+                    "method='mps' or 'statevector' for larger circuits."
+                ) from e
+            raise
 
         if shots > 0:
             counts = state.sample(shots, seed)
@@ -420,6 +585,7 @@ def _execute_with_noisy_state(execute):
             and self._method == "density_matrix"
             and result.state is not None
             and "density_matrix" in result.metadata
+            and not result.metadata.pop("_sf_noisy_state_ready", False)
         ):
             n_qubits = result.metadata.get("n_qubits", circuit.n_qubits)
             from superfermion.devices.noisy_dm_state import (

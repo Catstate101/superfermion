@@ -213,26 +213,60 @@ class NoiseModel:
         return noisy
 
     def to_rust_kraus_ops(self, n_qubits: int) -> List[Tuple[int, List[float]]]:
-        """Convert 1-qubit Kraus channels to the flat format expected by Rust.
+        """Convert the 1-qubit noise channels to the flat format expected by Rust.
 
-        Returns list of (qubit, flat_kraus) tuples where flat_kraus encodes all
-        Kraus matrices for that qubit as [re00, im00, re01, im01, ...] per matrix.
-        Applied after every gate touching the qubit.
+        Returns list of (qubit, flat_kraus) tuples where flat_kraus encodes the
+        **composed** channel's Kraus matrices for that qubit as
+        [re00, im00, re01, im01, ...] per matrix.  The channel is applied
+        after every gate touching the qubit.
+
+        Multiple 1q channels on the same qubit are composed in the order they
+        were added (C2 ∘ C1 after the gate), exactly matching the sequential
+        application of the pure-Python path.  Passing the raw concatenation of
+        every channel's Kraus set instead would make the Rust core sum the
+        per-channel superoperators (non-TP: tr(rho) = #channels per gate
+        touch) — the composite set below is exact by construction.
         """
         ops: List[Tuple[int, List[float]]] = []
         if not self._1q_kraus:
             return ops
 
+        composite: Optional[List[np.ndarray]] = None
+        for kraus_set in self._1q_kraus:
+            if composite is None:
+                composite = list(kraus_set)
+            else:
+                composite = [L @ K for K in composite for L in kraus_set]
+
+        flat: List[float] = []
+        for K in composite:
+            for r in range(2):
+                for c in range(2):
+                    flat.append(float(K[r, c].real))
+                    flat.append(float(K[r, c].imag))
         for q in range(n_qubits):
-            flat: List[float] = []
-            for kraus_set in self._1q_kraus:
-                for K in kraus_set:
-                    for r in range(2):
-                        for c in range(2):
-                            flat.append(float(K[r, c].real))
-                            flat.append(float(K[r, c].imag))
-            ops.append((q, flat))
+            ops.append((q, list(flat)))
         return ops
+
+    def to_rust_kraus_ops_2q(self) -> List[List[float]]:
+        """Flat Kraus sets for the 2-qubit channels (native DM path).
+
+        Returns one flat list per 2q channel, in add-order.  Each 4x4 Kraus
+        matrix is flattened as 32 floats (re00, im00, re01, im01, ... re33,
+        im33).  The Rust core applies the channels sequentially after every
+        2q gate (after the fused gate + 1q-channel sweep), which matches the
+        per-channel sequential semantics of :meth:`apply_2q`.
+        """
+        channels: List[List[float]] = []
+        for kraus_set in self._2q_kraus:
+            flat: List[float] = []
+            for K in kraus_set:
+                for r in range(4):
+                    for c in range(4):
+                        flat.append(float(K[r, c].real))
+                        flat.append(float(K[r, c].imag))
+            channels.append(flat)
+        return channels
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize noise model to a dictionary."""

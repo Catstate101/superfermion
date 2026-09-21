@@ -28,14 +28,17 @@ pub mod classical;
 pub mod commutation;
 pub mod dag;
 pub mod dm;
+pub mod f32lane;
 pub mod gate_list;
 pub mod mps;
 pub mod ops;
 pub mod qasm;
 pub mod qubits;
 pub mod serialize;
+pub mod simd;
 pub mod stabilizer;
 pub mod state;
+pub mod sysmem;
 
 // Re-export core types at crate root for convenience
 pub use adjoint::{adjoint_grad, AdjointGradResult, PauliTerm};

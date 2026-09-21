@@ -69,26 +69,34 @@ impl Pass for GateCancellationPass {
     }
 
     fn run(&self, dag: &mut QuantumDAG) -> Result<(), CompilerError> {
-        let mut changed = true;
-
-        while changed {
-            changed = false;
+        // Sweep the topological order and cancel greedily, marking both
+        // nodes of every cancelled pair as consumed so overlapping choices
+        // are skipped. Cancelling a pair re-wires its predecessor straight
+        // to its successor, which can expose a fresh adjacent pair there,
+        // so repeat sweeps until no progress is made. (The previous
+        // implementation restarted the whole scan after every single
+        // cancellation, which is quadratic: ~11s of the 100q QFT compile
+        // was spent here on ~7k cancellations.)
+        loop {
+            let mut cancelled = false;
+            let mut consumed: std::collections::HashSet<petgraph::prelude::NodeIndex> =
+                std::collections::HashSet::new();
             let topo = dag.topological_order();
 
             for &node_id in &topo {
-                if !dag.graph().contains_node(node_id) {
+                if !dag.graph().contains_node(node_id) || consumed.contains(&node_id) {
                     continue;
                 }
 
                 let op1 = dag.graph()[node_id].op_type.clone();
                 let qubits1: Vec<usize> = dag.graph()[node_id].qubits.to_vec();
 
-                // For each outgoing qubit edge, look at the successor
+                let mut partner: Option<petgraph::prelude::NodeIndex> = None;
                 for edge in dag.graph().edges_directed(node_id, Direction::Outgoing) {
                     if let sf_ir::WireType::Qubit(_q) = edge.weight() {
                         let next_node = edge.target();
 
-                        if dag.is_boundary_node(next_node) {
+                        if dag.is_boundary_node(next_node) || consumed.contains(&next_node) {
                             continue;
                         }
 
@@ -102,17 +110,22 @@ impl Pass for GateCancellationPass {
                             {
                                 continue;
                             }
-
-                            self.remove_pair(dag, node_id, next_node);
-                            changed = true;
+                            partner = Some(next_node);
                             break;
                         }
                     }
                 }
 
-                if changed {
-                    break;
+                if let Some(next_node) = partner {
+                    self.remove_pair(dag, node_id, next_node);
+                    consumed.insert(node_id);
+                    consumed.insert(next_node);
+                    cancelled = true;
                 }
+            }
+
+            if !cancelled {
+                break;
             }
         }
 

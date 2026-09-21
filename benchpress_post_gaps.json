@@ -2,10 +2,10 @@
   {
     "category": "Manipulation",
     "test": "bench_basis_change",
-    "sf_time_s": 1.30619814199963,
-    "qk_time_s": 1.3037546520026808,
-    "winner": "Qiskit",
-    "ratio": "1.0x",
+    "sf_time_s": 1.7920568000008643,
+    "qk_time_s": 2.1373325000022305,
+    "winner": "SF",
+    "ratio": "1.2x",
     "sf_extra": {
       "gate_count_2q": 500,
       "target_basis": [
@@ -28,106 +28,106 @@
   {
     "category": "Transpilation",
     "test": "bench_qft_transpile",
-    "sf_time_s": 26.022930172999622,
-    "qk_time_s": 4.122824477002723,
-    "winner": "Qiskit",
-    "ratio": "6.3x",
+    "sf_time_s": 3.4083589000001666,
+    "qk_time_s": 8.298754999999801,
+    "winner": "SF",
+    "ratio": "2.4x",
     "sf_extra": {
-      "gate_count": 30795,
-      "gate_count_2q": 20865
+      "gate_count": 34215,
+      "gate_count_2q": 21650
     },
     "qk_extra": {
-      "gate_count": 47293,
-      "gate_count_2q": 8300
+      "gate_count": 45980,
+      "gate_count_2q": 8140
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_qv_transpile",
-    "sf_time_s": 1.4007172410019848,
-    "qk_time_s": 3.035533480997401,
+    "sf_time_s": 1.3102441000010003,
+    "qk_time_s": 5.209539500003302,
     "winner": "SF",
-    "ratio": "2.2x",
+    "ratio": "4.0x",
     "sf_extra": {
-      "gate_count": 11013,
-      "gate_count_2q": 5553
+      "gate_count": 10917,
+      "gate_count_2q": 5637
     },
     "qk_extra": {
-      "gate_count": 28025,
-      "gate_count_2q": 4805
+      "gate_count": 27980,
+      "gate_count_2q": 4814
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_su2_transpile",
-    "sf_time_s": 0.04288007200011634,
-    "qk_time_s": 12.079622023000411,
+    "sf_time_s": 0.07815320000008796,
+    "qk_time_s": 13.29409189999933,
     "winner": "SF",
-    "ratio": "281.7x",
+    "ratio": "170.1x",
     "sf_extra": {
-      "gate_count": 1761,
-      "gate_count_2q": 751
+      "gate_count": 1752,
+      "gate_count_2q": 752
     },
     "qk_extra": {
-      "gate_count": 4458,
-      "gate_count_2q": 655
+      "gate_count": 4231,
+      "gate_count_2q": 613
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_bv_transpile",
-    "sf_time_s": 0.011573967000003904,
-    "qk_time_s": 1.0568108220031718,
+    "sf_time_s": 0.013051400001131697,
+    "qk_time_s": 1.7564794999998412,
     "winner": "SF",
-    "ratio": "91.3x",
+    "ratio": "134.6x",
     "sf_extra": {
-      "gate_count": 641,
-      "gate_count_2q": 226
+      "gate_count": 647,
+      "gate_count_2q": 232
     },
     "qk_extra": {
-      "gate_count": 857,
-      "gate_count_2q": 127
+      "gate_count": 848,
+      "gate_count_2q": 131
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_heisenberg_transpile",
-    "sf_time_s": 0.017479536996688694,
-    "qk_time_s": 11.70439275100216,
+    "sf_time_s": 0.01994899999772315,
+    "qk_time_s": 13.133540199996787,
     "winner": "SF",
-    "ratio": "669.6x",
+    "ratio": "658.4x",
     "sf_extra": {
-      "gate_count": 1284,
-      "gate_count_2q": 339
+      "gate_count": 1376,
+      "gate_count_2q": 421
     },
     "qk_extra": {
-      "gate_count": 2546,
+      "gate_count": 2614,
       "gate_count_2q": 450
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_qaoa_transpile",
-    "sf_time_s": 0.045065832000545925,
-    "qk_time_s": 1.6713490230031312,
+    "sf_time_s": 0.052450799998041475,
+    "qk_time_s": 1.9682695000010426,
     "winner": "SF",
-    "ratio": "37.1x",
+    "ratio": "37.5x",
     "sf_extra": {
-      "gate_count": 2524,
-      "gate_count_2q": 919
+      "gate_count": 2359,
+      "gate_count_2q": 949
     },
     "qk_extra": {
-      "gate_count": 4201,
-      "gate_count_2q": 694
+      "gate_count": 4236,
+      "gate_count_2q": 724
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_simplification_transpile",
-    "sf_time_s": 0.009210077001625905,
-    "qk_time_s": 1.041166898998199,
+    "sf_time_s": 0.012577400000736816,
+    "qk_time_s": 1.6424328999964928,
     "winner": "SF",
-    "ratio": "113.0x",
+    "ratio": "130.6x",
     "sf_extra": {
       "gate_count": 500,
       "gate_count_2q": 0
@@ -140,17 +140,17 @@
   {
     "category": "Transpilation",
     "test": "bench_clifford_transpile",
-    "sf_time_s": 19.38546574800057,
-    "qk_time_s": 27.307419362001383,
+    "sf_time_s": 11.873029600003065,
+    "qk_time_s": 24.279000599999563,
     "winner": "SF",
-    "ratio": "1.4x",
+    "ratio": "2.0x",
     "sf_extra": {
-      "gate_count": 111468,
-      "gate_count_2q": 64303
+      "gate_count": 113851,
+      "gate_count_2q": 65841
     },
     "qk_extra": {
-      "gate_count": 317137,
-      "gate_count_2q": 57898
+      "gate_count": 317120,
+      "gate_count_2q": 57941
     }
   }
 ]

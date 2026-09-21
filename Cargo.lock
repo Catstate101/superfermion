@@ -990,6 +990,7 @@ dependencies = [
  "numpy",
  "pyo3",
  "rand",
+ "rayon",
  "sf-compiler",
  "sf-ir",
  "sf-pulse",

@@ -20,6 +20,12 @@ Each class mirrors one per-fix verification script (see the repo-root
 (o) classical shadow + shadow expval entry points & accuracy (SUP-22)
 (p) variance + mutual_info measurement types, Rust-backed (SUP-23)
 (q) mid-circuit measure + c_if feed-forward + reset (SUP-24)
+(r) routed-MPS degenerate-merge guard: dW ~ 0 on the seed=0 repro (SUP-30)
+(s) multi-1q noise channels compose sequentially, trace 1         (SUP-31)
+(t) two-qubit noise channels applied on DM, trace preserved       (SUP-32)
+(u) noise_model warns on sv/stabilizer/mps, silent on DM          (SUP-33)
+(v) stabilizer n>1024 raises ValueError (no Rust PanicException)  (SUP-34)
+(w) density_matrix rho docstring states q0-first convention       (SUP-35)
 
 Conventions assumed (documented in guides/execution.mdx):
 - numpy statevectors are little-endian: qubit q lives at bit q.
@@ -28,6 +34,7 @@ Conventions assumed (documented in guides/execution.mdx):
 """
 
 import functools
+import pathlib
 import warnings
 
 import numpy as np
@@ -1121,3 +1128,165 @@ class TestMidCircuit:
         assert sum(res.counts.values()) == 20000
         assert res.metadata.get("dynamic") is not True
         assert res.state is not None
+
+
+# ── (r)…(w) SUP-30…SUP-35 fix batch (0.1.11 local build 5a0db75e) ────────────
+
+def _kd(p):
+    """1q depolarizing Kraus set, total-Pauli-error convention."""
+    return [np.sqrt(1 - p) * _PAULI_MAT["I"], np.sqrt(p / 3) * _PAULI_MAT["X"],
+            np.sqrt(p / 3) * _PAULI_MAT["Y"], np.sqrt(p / 3) * _PAULI_MAT["Z"]]
+
+
+def _ka(g):
+    """1q amplitude-damping Kraus set (gamma = g)."""
+    return [np.diag([1, np.sqrt(1 - g)]).astype(complex),
+            np.array([[0, np.sqrt(g)], [0, 0]], dtype=complex)]
+
+
+def _apply_channel_sets(rho, sets):
+    """Sequential channel application: rho' = sum_K K rho K^dag per set."""
+    for ks in sets:
+        rho = sum(K @ rho @ K.conj().T for K in ks)
+    return rho
+
+
+class TestSup30MpsRoutedMergeGuard:
+    @staticmethod
+    def _repro(seed: int, n: int = 16) -> object:
+        """Routed-Clifford repro: random H/S/CX stream (seed 0 lost 1.03e-1
+        of weight pre-fix on the flat √2-spectrum merge at bond 64)."""
+        rng = np.random.default_rng(seed)
+        qc = Circuit(n)
+        for _ in range(6 * n):
+            u = float(rng.random())
+            q = int(rng.integers(0, n))
+            if u < 0.35:
+                qc.h(q)
+            elif u < 0.7:
+                qc.s(q)
+            else:
+                q2 = int(rng.integers(0, n))
+                if q2 != q:
+                    qc.cnot(q, q2)
+        return qc
+
+    @pytest.mark.parametrize("seed", [0, 1, 7])
+    def test_discarded_weight_machine_precision(self, seed):
+        """(r) Measured re-selection guard: the faer σ↔v-mismatched merge is
+        re-selected by ‖M·v_c‖, so the discarded weight stays ~1e-14
+        (pre-fix: 1.03e-1 / 1.53e-1 / 2.52e-1 for seeds 0/1/7)."""
+        st = self._repro(seed).to_ir().evolve_mps(64)
+        d_w = float(st.discarded_weight())
+        assert d_w < 1e-9, f"seed={seed}: discarded_weight={d_w:.3e}"
+
+
+class TestSup31NoiseChannelComposition:
+    def test_multi_1q_channels_compose_sequentially(self):
+        """(s) add_depolarizing(0.1) then add_amplitude_damping(0.1) must
+        compose per gate (union-sum was non-TP): trace 1 and equal to the
+        sequential Kraus reference."""
+        c1 = Circuit(1).x(0).h(0)
+        nm1 = sf.NoiseModel().add_depolarizing(0.1).add_amplitude_damping(0.1)
+        r1 = sf.run(c1, method="density_matrix", noise_model=nm1, shots=0)
+        rho1 = np.asarray(r1.metadata["density_matrix"])
+        assert abs(float(np.trace(rho1).real) - 1.0) < 1e-10
+        assert abs(sum(r1.probabilities.values()) - 1.0) < 1e-10
+        ref = np.zeros((2, 2), dtype=complex)
+        ref[0, 0] = 1.0
+        h_mat = (_PAULI_MAT["X"] + _PAULI_MAT["Z"]) / np.sqrt(2)
+        for u_mat in (_PAULI_MAT["X"], h_mat):
+            ref = u_mat @ ref @ u_mat.conj().T
+            ref = _apply_channel_sets(ref, [_kd(0.1), _ka(0.1)])
+        assert float(np.abs(rho1 - ref).max()) < 1e-10
+
+    def test_add_order_is_application_order(self):
+        """(s) depol(1.0) then ampdamp(1.0) maps any 1q state to |0><0|;
+        the reverse order would give I/2, so this pins the add-order."""
+        nm = sf.NoiseModel().add_depolarizing(1.0).add_amplitude_damping(1.0)
+        r = sf.run(Circuit(1).x(0), method="density_matrix",
+                   noise_model=nm, shots=0)
+        rho = np.asarray(r.metadata["density_matrix"])
+        assert abs(rho[0, 0] - 1.0) < 1e-10
+        assert abs(rho[1, 1]) < 1e-10
+
+
+class TestSup32TwoQubitChannel:
+    def test_2q_channel_applied_and_trace_preserved(self):
+        """(t) add_two_qubit_depolarizing(0.5) must act on the DM path
+        (pre-fix it was silently dropped): state changes, trace stays 1,
+        and the result matches the manual 2q-Kraus reference."""
+        cb = Circuit(2).h(0).cnot(0, 1)
+        rho0 = np.asarray(sf.run(cb, method="density_matrix", shots=0)
+                          .metadata["density_matrix"])
+        nm2 = sf.NoiseModel().add_two_qubit_depolarizing(0.5)
+        r2 = sf.run(cb, method="density_matrix", noise_model=nm2, shots=0)
+        rho2 = np.asarray(r2.metadata["density_matrix"])
+        assert float(np.abs(rho2 - rho0).max()) > 1e-6
+        assert abs(float(np.trace(rho2).real) - 1.0) < 1e-10
+        k2 = nm2._2q_kraus[0]
+        ref = sum(K @ rho0 @ K.conj().T for K in k2)
+        assert float(np.abs(rho2 - ref).max()) < 1e-10
+
+    def test_2q_channel_contributes_in_mixed_model(self):
+        """(t) 1q+2q differs from 1q-only (the 2q channel now contributes)."""
+        cb = Circuit(2).h(0).cnot(0, 1)
+        rho_mix = np.asarray(sf.run(
+            cb, method="density_matrix", shots=0,
+            noise_model=sf.NoiseModel().add_depolarizing(0.05)
+            .add_two_qubit_depolarizing(0.5)).metadata["density_matrix"])
+        rho_1q = np.asarray(sf.run(
+            cb, method="density_matrix", shots=0,
+            noise_model=sf.NoiseModel().add_depolarizing(0.05))
+            .metadata["density_matrix"])
+        assert float(np.abs(rho_mix - rho_1q).max()) > 1e-6
+
+
+class TestSup33IgnoredNoiseWarning:
+    def test_non_dm_methods_warn_and_ignore(self):
+        """(u) noise_model on sv/stabilizer/mps warns RuntimeWarning and
+        yields identical counts to the noiseless run."""
+        c4 = Circuit(4).h(0).cnot(0, 1).s(2).cnot(1, 3)
+        nm = sf.NoiseModel().add_depolarizing(0.5)
+        for meth in ("statevector", "stabilizer", "mps"):
+            base = sf.run(c4, method=meth, shots=2000, seed=11)
+            with pytest.warns(RuntimeWarning, match="noise_model is ignored"):
+                res = sf.run(c4, method=meth, noise_model=nm,
+                             shots=2000, seed=11)
+            assert res.counts == base.counts
+
+    def test_dm_stays_silent(self):
+        """(u) no spurious ignore-warning on the density_matrix path."""
+        c4 = Circuit(4).h(0).cnot(0, 1).s(2).cnot(1, 3)
+        nm = sf.NoiseModel().add_depolarizing(0.5)
+        with warnings.catch_warnings(record=True) as wl:
+            warnings.simplefilter("always")
+            sf.run(c4, method="density_matrix", noise_model=nm, shots=0)
+        assert not any("noise_model is ignored" in str(w.message) for w in wl)
+
+
+class TestSup34StabilizerQubitCap:
+    def test_ghz_8_control(self):
+        """(v) stabilizer GHZ-8 yields only all-0/all-1 keys."""
+        c8 = Circuit(8).h(0)
+        for i in range(7):
+            c8.cnot(i, i + 1)
+        res = sf.run(c8, method="stabilizer", shots=2000, seed=1)
+        assert set(res.counts) <= {"00000000", "11111111"}
+
+    def test_n_gt_1024_raises_valueerror(self):
+        """(v) n=1025 used to surface as a Rust PanicException; it must now
+        raise a catchable ValueError naming the 1024 limit."""
+        cbig = Circuit(1025).h(0).cnot(0, 1)
+        with pytest.raises(ValueError, match="1024"):
+            sf.run(cbig, method="stabilizer", shots=0)
+
+
+class TestSup35DensityMatrixDocstring:
+    def test_reverse_qubits_dm_docstring_states_q0_first(self):
+        """(w) the rho-convention docstring must state the measured q0-first
+        (little-endian) convention; the old misleading phrasing is gone."""
+        import superfermion.backends.density_matrix as dmm
+        src = pathlib.Path(dmm.__file__).read_text(encoding="utf-8")
+        assert "q0-first" in src
+        assert "little-endian expected by external" not in src

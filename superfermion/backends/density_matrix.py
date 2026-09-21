@@ -8,6 +8,7 @@ flows through RustDevice._run_density_matrix() using Rust-native DM evolution.
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -28,22 +29,33 @@ from superfermion.noise import NoiseModel, kraus_depolarizing_1q, kraus_depolari
 
 # ── Density matrix operations ──────────────────────────────────────────────────
 
-def _reverse_qubits_dm(rho: np.ndarray, n: int) -> np.ndarray:
-    """Reverse qubit ordering in density matrix (big-endian ↔ little-endian).
+@functools.lru_cache(maxsize=16)
+def _rev_index(n: int) -> np.ndarray:
+    """Bit-reversal index array for n qubits, built with an arithmetic
+    recurrence (no per-entry string formatting). Cached per n."""
+    dim = 1 << n
+    rev = np.zeros(dim, dtype=np.int64)
+    for i in range(1, dim):
+        rev[i] = (rev[i >> 1] >> 1) | ((i & 1) << (n - 1))
+    return rev
 
-    SF internally uses big-endian convention (qubit 0 = MSB, leftmost in
-    the Kronecker product).  PennyLane and Qiskit use little-endian
-    (qubit 0 = LSB, rightmost).  This function applies the bit-reversal
-    permutation  ρ' = P ρ P†  so that the output matches the standard
-    little-endian convention expected by external frameworks.
+
+def _reverse_qubits_dm(rho: np.ndarray, n: int) -> np.ndarray:
+    """Convert rho from the engine's internal little-endian layout to the
+    public big-endian (q0-first) convention.
+
+    The Rust core stores rho little-endian (qubit 0 = LSB, rightmost in the
+    Kronecker product).  The public ``RunResult.metadata["density_matrix"]``
+    rho — and the SF consumer convention in ``results.py`` — is big-endian
+    (qubit 0 = MSB, leftmost, row-major q0-first; e.g. a single-qubit X on
+    qubit 0 puts the weight in ``rho[1, 1]``).  This function applies the
+    bit-reversal permutation  ρ' = P ρ P†  mapping LE -> public BE; it is
+    used on both the noiseless and noisy density-matrix paths.
     """
-    dim = 2 ** n
-    perm = np.zeros((dim, dim), dtype=np.complex128)
-    for i in range(dim):
-        bits = format(i, f'0{n}b')
-        i_rev = int(bits[::-1], 2)
-        perm[i_rev, i] = 1.0
-    return perm @ rho @ perm.T
+    rev = _rev_index(n)
+    # ρ' = P ρ P† with P[rev[i], i] = 1 — a pure index permutation, so
+    # O(d²) fancy-indexing is used instead of two O(d³) dense matmuls.
+    return rho[np.ix_(rev, rev)]
 
 
 def _embed_1q(gate_2x2: np.ndarray, qubit: int, n: int) -> np.ndarray:
@@ -152,10 +164,13 @@ def _sample_dm(rho: np.ndarray, shots: int, rng: np.random.Generator) -> Dict[st
     probs = np.maximum(probs, 0)
     probs /= probs.sum()
     indices = rng.choice(len(probs), size=shots, p=probs)
+    # Vectorized count: bincount over the dim unique outcomes, then format
+    # only the observed bitstrings (same exact counts as the per-shot loop).
+    counts_arr = np.bincount(indices, minlength=len(probs))
     counts: Dict[str, int] = {}
-    for idx in indices:
-        bs = format(idx, f'0{n_qubits}b')
-        counts[bs] = counts.get(bs, 0) + 1
+    for idx, c in enumerate(counts_arr):
+        if c:
+            counts[format(idx, f'0{n_qubits}b')] = int(c)
     return counts
 
 

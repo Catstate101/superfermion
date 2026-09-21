@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 
 use numpy::{PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use sf_ir::gate_list::GateSequence;
 use sf_ir::state::{
     DensityMatrixStateWrapper, MPSStateWrapper, QuantumStateImpl, StabilizerStateWrapper,
@@ -113,6 +114,27 @@ impl PyMPSState {
         self.inner.perm.clone()
     }
 
+    /// Accumulated discarded-weight fraction Σε over all 2q-gate QR steps.
+    /// 0.0 = exact evolution; > 0 means the `bond_dim` cap removed real weight.
+    fn discarded_weight(&self) -> f64 {
+        self.inner.discarded_weight
+    }
+
+    /// Largest single-step discarded fraction observed.
+    fn max_discarded_weight(&self) -> f64 {
+        self.inner.max_discarded_weight
+    }
+
+    /// Number of 2q-gate steps that discarded non-negligible weight.
+    fn truncation_events(&self) -> usize {
+        self.inner.truncation_events
+    }
+
+    /// Conservative lower bound on the state fidelity: 1 − Σε.
+    fn fidelity_lower_bound(&self) -> f64 {
+        self.inner.fidelity_lower_bound()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "MPSState(n_qubits={}, bond_dim={})",
@@ -125,9 +147,19 @@ impl PyMPSState {
 // State — Rust-native quantum state handle (sf.State)
 // ═══════════════════════════════════════════════════════════
 
+/// Truncation telemetry captured for method="mps" states.
+#[derive(Clone, Copy)]
+pub struct MpsTruncationReport {
+    pub discarded_weight: f64,
+    pub max_discarded_weight: f64,
+    pub truncation_events: usize,
+}
+
 #[pyclass(name = "State")]
 pub struct PyState {
     inner: Box<dyn QuantumStateImpl>,
+    /// Set only for method="mps" handles: evolution truncation telemetry.
+    mps_report: Option<MpsTruncationReport>,
 }
 
 #[pymethods]
@@ -232,12 +264,40 @@ impl PyState {
         Ok(numpy::PyArray1::from_vec(py, p))
     }
 
+    /// Truncation telemetry for MPS states (None for exact methods).
+    ///
+    /// Returns a dict with:
+    ///   discarded_weight     — Σε over all 2q-gate QR steps (0.0 = exact)
+    ///   max_discarded_weight — largest single-step discard
+    ///   truncation_events    — steps that discarded non-negligible weight
+    ///   fidelity_lower_bound — 1 − Σε, clamped to [0, 1]
+    fn truncation_report<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, pyo3::types::PyDict>>> {
+        let Some(report) = self.mps_report else {
+            return Ok(None);
+        };
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("discarded_weight", report.discarded_weight)?;
+        d.set_item("max_discarded_weight", report.max_discarded_weight)?;
+        d.set_item("truncation_events", report.truncation_events)?;
+        d.set_item(
+            "fidelity_lower_bound",
+            (1.0 - report.discarded_weight).clamp(0.0, 1.0),
+        )?;
+        Ok(Some(d))
+    }
+
     fn partial_trace(&self, py: Python<'_>, keep_qubits: Vec<usize>) -> PyResult<Self> {
         let new_state = self
             .inner
             .partial_trace(&keep_qubits)
             .map_err(|e| method_error(py, e.to_string()))?;
-        Ok(PyState { inner: new_state })
+        Ok(PyState {
+            inner: new_state,
+            mps_report: None,
+        })
     }
 
     fn mutual_info(
@@ -267,6 +327,7 @@ impl PyState {
         }
         Ok(PyState {
             inner: Box::new(StatevectorState::new(v, n_qubits, "cpu")),
+            mps_report: None,
         })
     }
 
@@ -346,7 +407,10 @@ impl PyState {
 
 impl PyState {
     pub fn new(inner: Box<dyn QuantumStateImpl>) -> Self {
-        PyState { inner }
+        PyState {
+            inner,
+            mps_report: None,
+        }
     }
 
     fn parse_observable(terms: &[(Vec<u8>, f64, f64)]) -> Vec<sf_ir::PauliTerm> {
@@ -537,11 +601,25 @@ impl PyQuantumDAG {
     }
 
     /// Run high-performance statevector simulation and return the final statevector.
-    fn simulate<'py>(
+    ///
+    /// With `SF_F32=1` the opt-in f32 lane runs instead and a complex64
+    /// array is returned (the qsim-class f32 backend); the default path is
+    /// unchanged f64/complex128.
+    fn simulate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if sf_ir::f32lane::lane_enabled() {
+            let state = self.inner.simulate_f32();
+            return Ok(numpy::PyArray1::from_vec(py, state).into_any());
+        }
+        let state = self.inner.simulate();
+        Ok(numpy::PyArray1::from_vec(py, state).into_any())
+    }
+
+    /// Explicit f32-lane simulation (complex64 output) regardless of SF_F32.
+    fn simulate_f32<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
-        let state = self.inner.simulate();
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex32>>> {
+        let state = self.inner.simulate_f32();
         Ok(numpy::PyArray1::from_vec(py, state))
     }
 
@@ -618,6 +696,21 @@ impl PyQuantumDAG {
     fn simulate_to_state(&self, method: &str, device: &str, bond_dim: usize) -> PyResult<PyState> {
         match method {
             "statevector" => {
+                // Opt-in f32 lane (SF_F32=1): simulate in complex64, then scale
+                // up once to the complex128 handle so the public State API
+                // (numpy/sample/expectation) stays byte-for-byte unchanged.
+                if device != "gpu" && sf_ir::f32lane::lane_enabled() {
+                    let sv32 = self.inner.simulate_f32();
+                    let sv: Vec<num_complex::Complex64> = sv32
+                        .into_iter()
+                        .map(|z| num_complex::Complex64::new(z.re as f64, z.im as f64))
+                        .collect();
+                    return Ok(PyState::new(Box::new(StatevectorState::new(
+                        sv,
+                        self.inner.n_qubits,
+                        device,
+                    ))));
+                }
                 let sv = if device == "gpu" {
                     self.inner
                         .simulate_on("gpu")
@@ -644,7 +737,14 @@ impl PyQuantumDAG {
                 // Canonicalize so boundary contraction (expval) and per-site
                 // sampling are numerically stable right after construction.
                 mps.canonicalize_right();
-                Ok(PyState::new(Box::new(MPSStateWrapper::new(mps, device))))
+                let report = MpsTruncationReport {
+                    discarded_weight: mps.discarded_weight,
+                    max_discarded_weight: mps.max_discarded_weight,
+                    truncation_events: mps.truncation_events,
+                };
+                let mut state = PyState::new(Box::new(MPSStateWrapper::new(mps, device)));
+                state.mps_report = Some(report);
+                Ok(state)
             }
             "stabilizer" => {
                 let gates = self.inner.to_gate_records();
@@ -835,37 +935,192 @@ impl PyQuantumDAG {
     /// noise_ops: list of (qubit, kraus_flat) where kraus_flat is a flat list of
     /// f64 values encoding Kraus matrices. Each 2x2 Kraus matrix = 8 floats
     /// (re00, im00, re01, im01, re10, im10, re11, im11).
+    /// noise_2q_ops: optional list of 2q channels; each channel is a flat
+    /// list of 4x4 Kraus matrices (32 floats each), applied sequentially
+    /// after every 2-qubit gate (after the fused gate + 1q-noise sweep).
+    #[pyo3(signature = (noise_ops, noise_2q_ops=None))]
     fn simulate_dm_noisy<'py>(
         &self,
         py: Python<'py>,
         noise_ops: Vec<(usize, Vec<f64>)>,
+        noise_2q_ops: Option<Vec<Vec<f64>>>,
     ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
-        use sf_ir::dm::DensityMatrixState;
-        let mut state = DensityMatrixState::new(self.inner.n_qubits);
-        let instructions = self.inner.to_instructions();
+        let noise_2q_ops = noise_2q_ops.unwrap_or_default();
+        let data = dm_noisy_core(&self.inner, &noise_ops, &noise_2q_ops);
+        Ok(numpy::PyArray1::from_vec(py, data))
+    }
 
-        for inst in &instructions {
-            let u = inst.op_type.to_matrix();
-            state.apply_unitary(&u, &inst.qubits);
-
-            for (noise_qubit, kraus_flat) in &noise_ops {
-                if inst.qubits.contains(noise_qubit) {
-                    let kraus_matrices: Vec<nalgebra::DMatrix<num_complex::Complex64>> = kraus_flat
-                        .chunks(8)
-                        .map(|flat| {
-                            let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(2, 2);
-                            m[(0, 0)] = num_complex::Complex64::new(flat[0], flat[1]);
-                            m[(0, 1)] = num_complex::Complex64::new(flat[2], flat[3]);
-                            m[(1, 0)] = num_complex::Complex64::new(flat[4], flat[5]);
-                            m[(1, 1)] = num_complex::Complex64::new(flat[6], flat[7]);
-                            m
-                        })
-                        .collect();
-                    state.apply_kraus(&kraus_matrices, *noise_qubit);
+    /// Noisy density-matrix simulation returning the Rust state handle
+    /// directly: the DM data is moved into the handle (zero extra copies),
+    /// avoiding the numpy round-trip (vec -> numpy -> vec) that
+    /// ``simulate_dm_noisy`` + ``State.from_dm`` would incur on the noisy
+    /// path. Also returns the PUBLIC row-major rho (qubit-0-first, the
+    /// ``metadata["density_matrix"]`` convention) built by one in-Rust
+    /// gather, replacing the Python ``numpy()`` + ``_reverse_qubits_dm``
+    /// round-trip.
+    // Silence the uninit_vec lint for the deliberately uninitialized public
+    // rho buffer inside (pass 1 writes every element before any read).
+    #[allow(clippy::uninit_vec)]
+    #[pyo3(signature = (noise_ops, noise_2q_ops=None))]
+    fn simulate_dm_noisy_state<'py>(
+        &self,
+        py: Python<'py>,
+        noise_ops: Vec<(usize, Vec<f64>)>,
+        noise_2q_ops: Option<Vec<Vec<f64>>>,
+    ) -> PyResult<(PyState, Bound<'py, numpy::PyArray1<num_complex::Complex64>>)> {
+        let trace = std::env::var_os("SF_DM_TRACE").is_some();
+        let t_core = std::time::Instant::now();
+        let noise_2q_ops = noise_2q_ops.unwrap_or_default();
+        let data = dm_noisy_core(&self.inner, &noise_ops, &noise_2q_ops);
+        let t_core = t_core.elapsed();
+        let n = self.inner.n_qubits;
+        let dim = 1usize << n;
+        // Public rho[k][b] = data[rev(k) + rev(b)*dim] (verified against
+        // the validated scatter gather, and against an independent numpy
+        // oracle at n=10). The storage layout
+        // i = ket | (bra << n) means the row-major view of the vec is
+        // M[bra][ket], so the public matrix equals the both-axes
+        // bit-reversed M, transposed. Applied as two contiguous,
+        // cache-friendly passes — blocked transpose (doubles as the copy;
+        // it writes every element, so the destination needs no zero-init),
+        // then the row swap r <-> rev(r) fused with the in-row column
+        // bit-reversal — each written so every element is produced by
+        // exactly one task and the regions are cache-line aligned, so they
+        // run under Rayon. A direct per-element gather is a scattered
+        // permutation (latency-bound, ~50-100 ms at n=10); these passes
+        // are memcpy-speed.
+        // Send+Sync wrapper for the two buffers used by the parallel perm
+        // passes, with method access so the Rayon closures capture the
+        // wrapper as a whole (a bare field access would capture the raw
+        // pointer field, which is not Sync). Each pass is written so every
+        // element is produced by exactly one task and the regions are
+        // cache-line aligned.
+        #[derive(Clone, Copy)]
+        struct DmPermPtrs {
+            src: *const num_complex::Complex64,
+            dst: *mut num_complex::Complex64,
+        }
+        unsafe impl Send for DmPermPtrs {}
+        unsafe impl Sync for DmPermPtrs {}
+        impl DmPermPtrs {
+            #[inline(always)]
+            unsafe fn get(&self, i: usize) -> num_complex::Complex64 {
+                *self.src.add(i)
+            }
+            #[inline(always)]
+            unsafe fn set(&self, i: usize, v: num_complex::Complex64) {
+                *self.dst.add(i) = v;
+            }
+            /// Start of destination row `r`. Method access so Rayon closures
+            /// capture the whole wrapper (a bare `p.dst` field access would
+            /// capture the raw pointer, which is not Sync).
+            #[inline(always)]
+            unsafe fn dst_row(&self, r: usize, dim: usize) -> *mut num_complex::Complex64 {
+                self.dst.add(r * dim)
+            }
+        }
+        // Uninitialized destination: pass 1 writes every element of the
+        // matrix (it is the blocking copy), so the usual zero-fill would
+        // be a wasted 16 MB write. Complex64 is Copy (no Drop), so a raw
+        // set_len over the reserved buffer is fine as long as nothing
+        // reads it before pass 1 completes — which the passes guarantee.
+        let mut public: Vec<num_complex::Complex64> = Vec::with_capacity(dim * dim);
+        unsafe { public.set_len(dim * dim) };
+        let t_p1 = std::time::Instant::now();
+        {
+            const BS: usize = 32;
+            let p = DmPermPtrs {
+                src: data.as_ptr(),
+                dst: public.as_mut_ptr(),
+            };
+            if dim >= BS {
+                // One task per BS-row source band; band `bi` writes the
+                // disjoint destination columns [i0, i0+BS) of every row.
+                (0..dim / BS).into_par_iter().for_each(|bi| {
+                    let i0 = bi * BS;
+                    let mut j0 = 0;
+                    while j0 < dim {
+                        for b in 0..BS.min(dim - j0) {
+                            let dst_base = (j0 + b) * dim + i0;
+                            let src_base = i0 * dim + (j0 + b);
+                            unsafe {
+                                for a in 0..BS {
+                                    p.set(dst_base + a, p.get(src_base + a * dim));
+                                }
+                            }
+                        }
+                        j0 += BS;
+                    }
+                });
+            } else {
+                for i in 0..dim {
+                    for j in 0..dim {
+                        public[j * dim + i] = data[i * dim + j];
+                    }
                 }
             }
         }
-        Ok(numpy::PyArray1::from_vec(py, state.data))
+        let t_p1 = t_p1.elapsed();
+        let t_p2 = std::time::Instant::now();
+        {
+            // Merged row swap r <-> rev(r) + in-row column bit-reversal in
+            // ONE pass (previously two sweeps over `public`): each row pair
+            // is handled once, by the task owning its smaller index, and
+            // the column reversal is applied while both rows are still
+            // cache-hot from the swap. Rows fixed by the reversal
+            // (r == rev(r)) get the column reversal alone. The row fits in
+            // cache, so pairwise column swaps suffice; the pair table is
+            // precomputed once (no per-index reverse_bits).
+            unsafe fn colrev_row(row: *mut num_complex::Complex64, pairs: &[(usize, usize)]) {
+                for &(c, rc) in pairs {
+                    std::ptr::swap(row.add(c), row.add(rc));
+                }
+            }
+            let col_pairs: Vec<(usize, usize)> = (0..dim)
+                .map(|c| (c, rev_n(c, n)))
+                .filter(|&(c, rc)| c < rc)
+                .collect();
+            let row_pairs: Vec<(usize, usize)> = (0..dim)
+                .map(|r| (r, rev_n(r, n)))
+                .filter(|&(r, rr)| r < rr)
+                .collect();
+            let p = DmPermPtrs {
+                src: data.as_ptr(),
+                dst: public.as_mut_ptr(),
+            };
+            row_pairs.par_iter().for_each_init(
+                || vec![num_complex::Complex64::new(0.0, 0.0); dim],
+                |tmp, &(r, rr)| unsafe {
+                    let row_r = p.dst_row(r, dim);
+                    let row_rr = p.dst_row(rr, dim);
+                    // tmp = colrev(old row rr) = new row r
+                    std::ptr::copy_nonoverlapping(row_rr, tmp.as_mut_ptr(), dim);
+                    colrev_row(tmp.as_mut_ptr(), &col_pairs);
+                    // row r = colrev(old row r) = new row rr
+                    colrev_row(row_r, &col_pairs);
+                    std::ptr::copy_nonoverlapping(row_r, row_rr, dim);
+                    std::ptr::copy_nonoverlapping(tmp.as_ptr(), row_r, dim);
+                },
+            );
+            let fixed: Vec<usize> = (0..dim).filter(|&r| rev_n(r, n) == r).collect();
+            fixed.par_iter().for_each(|&r| unsafe {
+                colrev_row(p.dst_row(r, dim), &col_pairs);
+            });
+        }
+        let t_p2 = t_p2.elapsed();
+        if trace {
+            eprintln!(
+                "SF_DM_TRACE core={:.2}ms pass1(transpose)={:.2}ms pass23(rowswap+inrev)={:.2}ms",
+                t_core.as_secs_f64() * 1e3,
+                t_p1.as_secs_f64() * 1e3,
+                t_p2.as_secs_f64() * 1e3,
+            );
+        }
+        let arr = numpy::PyArray1::from_vec(py, public);
+        let mut dm = sf_ir::dm::DensityMatrixState::new(n);
+        dm.data = data;
+        let state = PyState::new(Box::new(DensityMatrixStateWrapper::new(dm, "cpu")));
+        Ok((state, arr))
     }
 
     fn __repr__(&self) -> String {
@@ -967,6 +1222,181 @@ impl PyQuantumDAG {
             ))),
         }
     }
+}
+
+/// Reverse the low `n` bits of `x` (qubit-order reversal of an index).
+#[inline]
+fn rev_n(x: usize, n: usize) -> usize {
+    x.reverse_bits() >> (usize::BITS as usize - n)
+}
+
+/// Shared core of the noisy density-matrix simulation: runs the gate list
+/// with the pre-parsed 1q Kraus channels, fusing each gate with its
+/// touching channels into single superoperator sweeps (one memory pass
+/// instead of 1 + #touching passes).  Optional 2q channels are applied
+/// sequentially after every 2-qubit gate (after the fused sweep).
+/// Returns the interleaved DM vector.
+fn dm_noisy_core(
+    dag: &QuantumDAG,
+    noise_ops: &[(usize, Vec<f64>)],
+    noise_2q_ops: &[Vec<f64>],
+) -> Vec<num_complex::Complex64> {
+    use sf_ir::dm::DensityMatrixState;
+    let trace = std::env::var_os("SF_DM_TRACE").is_some();
+    let (mut acc1, mut acc2) = (0.0f64, 0.0f64);
+    let mut state = DensityMatrixState::new(dag.n_qubits);
+    let instructions = dag.to_instructions();
+
+    // Pre-parse each Kraus channel ONCE (it is re-applied after every
+    // instruction that touches the qubit; re-parsing per instruction
+    // was pure overhead on top of the DM pass itself).
+    let kraus_channels: Vec<(usize, Vec<nalgebra::DMatrix<num_complex::Complex64>>)> = noise_ops
+        .iter()
+        .map(|(noise_qubit, kraus_flat)| {
+            let matrices = kraus_flat
+                .chunks(8)
+                .map(|flat| {
+                    let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(2, 2);
+                    m[(0, 0)] = num_complex::Complex64::new(flat[0], flat[1]);
+                    m[(0, 1)] = num_complex::Complex64::new(flat[2], flat[3]);
+                    m[(1, 0)] = num_complex::Complex64::new(flat[4], flat[5]);
+                    m[(1, 1)] = num_complex::Complex64::new(flat[6], flat[7]);
+                    m
+                })
+                .collect();
+            (*noise_qubit, matrices)
+        })
+        .collect();
+
+    // 2q channels: each entry is ONE channel's flat Kraus set (4x4 matrices,
+    // 32 floats each, row-major re/im pairs). Applied in add-order after
+    // every 2q gate, after the fused gate+1q sweep.
+    let kraus_2q: Vec<Vec<nalgebra::DMatrix<num_complex::Complex64>>> = noise_2q_ops
+        .iter()
+        .map(|flat| {
+            flat.chunks(32)
+                .map(|ch| {
+                    let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(4, 4);
+                    for r in 0..4 {
+                        for c in 0..4 {
+                            let base = 2 * (r * 4 + c);
+                            m[(r, c)] =
+                                num_complex::Complex64::new(ch[base], ch[base + 1]);
+                        }
+                    }
+                    m
+                })
+                .collect()
+        })
+        .collect();
+
+    // A run of consecutive noisy 1-qubit gates on pairwise-distinct qubits
+    // shares one sweep per pair: the two fused 4×4 channel superoperators
+    // are applied per joint 16-block, halving the memory traffic of two
+    // sequential sweeps with identical per-element arithmetic. The pending
+    // batch is flushed before any instruction that touches one of its
+    // qubits (or is not a plain 1-qubit gate), so program order and
+    // semantics are unchanged.
+    type Sup4 = [[num_complex::Complex64; 4]; 4];
+    fn flush_pending(state: &mut DensityMatrixState, pending: &mut Vec<(usize, Sup4)>) -> f64 {
+        let t = std::time::Instant::now();
+        match pending.len() {
+            0 => {}
+            1 => state.apply_1q_superop(pending[0].0, &pending[0].1),
+            _ => state.apply_1q_superop_pair(
+                pending[0].0,
+                &pending[0].1,
+                pending[1].0,
+                &pending[1].1,
+            ),
+        }
+        pending.clear();
+        t.elapsed().as_secs_f64()
+    }
+    let mut pending: Vec<(usize, Sup4)> = Vec::with_capacity(2);
+
+    for inst in &instructions {
+        let u = inst.op_type.to_matrix();
+        // Collect the Kraus channels that touch this instruction's
+        // qubits — when any do, apply gate+noise in ONE fused
+        // superoperator sweep (one memory pass instead of 1+N).
+        let touching: Vec<(usize, &[nalgebra::DMatrix<num_complex::Complex64>])> = kraus_channels
+            .iter()
+            .filter(|(noise_qubit, _)| inst.qubits.contains(noise_qubit))
+            .map(|(noise_qubit, kraus_matrices)| (*noise_qubit, kraus_matrices.as_slice()))
+            .collect();
+
+        // Plain noisy 1-qubit gate → batch (a second disjoint gate joins it
+        // in one sweep; a repeat/other instruction flushes first).
+        if inst.qubits.len() == 1 && !touching.is_empty() && !inst.op_type.is_measurement() {
+            let q = inst.qubits[0];
+            if pending.iter().any(|(pq, _)| *pq == q) {
+                let dt = flush_pending(&mut state, &mut pending);
+                if trace {
+                    acc1 += dt;
+                }
+            }
+            let fused: Vec<nalgebra::DMatrix<num_complex::Complex64>> =
+                touching[0].1.iter().map(|k| k * &u).collect();
+            pending.push((q, DensityMatrixState::kraus_superop_1q(&fused)));
+            if pending.len() == 2 {
+                let dt = flush_pending(&mut state, &mut pending);
+                if trace {
+                    acc1 += dt;
+                }
+            }
+            continue;
+        }
+        let dt = flush_pending(&mut state, &mut pending);
+        if trace {
+            acc1 += dt;
+        }
+
+        if touching.is_empty() {
+            let t = std::time::Instant::now();
+            state.apply_unitary(&u, &inst.qubits);
+            if trace {
+                if inst.qubits.len() == 1 {
+                    acc1 += t.elapsed().as_secs_f64();
+                } else {
+                    acc2 += t.elapsed().as_secs_f64();
+                }
+            }
+        } else {
+            let t = std::time::Instant::now();
+            state.apply_gate_noise_fused(&u, &inst.qubits, &touching);
+            if trace {
+                if inst.qubits.len() == 1 {
+                    acc1 += t.elapsed().as_secs_f64();
+                } else {
+                    acc2 += t.elapsed().as_secs_f64();
+                }
+            }
+        }
+        // 2q channels: applied after every 2q (non-measurement) instruction,
+        // after the fused gate+1q sweep — add-order sequential composition.
+        if !kraus_2q.is_empty() && inst.qubits.len() == 2 && !inst.op_type.is_measurement() {
+            let t = std::time::Instant::now();
+            for ks in &kraus_2q {
+                state.apply_kraus_2q(ks, inst.qubits[0], inst.qubits[1]);
+            }
+            if trace {
+                acc2 += t.elapsed().as_secs_f64();
+            }
+        }
+    }
+    let dt = flush_pending(&mut state, &mut pending);
+    if trace {
+        acc1 += dt;
+    }
+    if trace {
+        eprintln!(
+            "SF_DM_TRACE sweeps sum_1q={:.2}ms sum_2q={:.2}ms",
+            acc1 * 1e3,
+            acc2 * 1e3
+        );
+    }
+    state.data
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1833,6 +2263,9 @@ fn _sf_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Standalone compute on existing statevectors
     m.add_function(wrap_pyfunction!(hamiltonian_expval, m)?)?;
 
+    // Process memory introspection (memory-efficiency instrumentation)
+    m.add_function(wrap_pyfunction!(rss_bytes, m)?)?;
+
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
@@ -1854,4 +2287,10 @@ fn gpu_diagnose() -> String {
     {
         "GPU feature not compiled".to_string()
     }
+}
+
+/// Resident set size of the current process in bytes (0 if unavailable).
+#[pyfunction]
+fn rss_bytes() -> usize {
+    sf_ir::sysmem::rss_bytes()
 }
