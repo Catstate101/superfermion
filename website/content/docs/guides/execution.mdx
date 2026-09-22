@@ -90,6 +90,12 @@ noise = sf.NoiseModel().add_depolarizing(0.001).add_amplitude_damping(0.002)
 result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
 ```
 
+Key and layout conventions:
+
+- `counts` / `probabilities` keys are **little-endian** — qubit `q` is bit `q` of `int(key, 2)` — identical to `statevector`, `mps` and the default sampling path (`x(2)` on 3 qubits reports `"100"`).
+- `result.metadata["density_matrix"]` is a 2-D array in **big-endian** order (qubit 0 = most significant): for `x(0)` on 2 qubits the weight sits at `rho[2, 2]`.
+- `sf.State.numpy()` returns the density matrix as a flat **little-endian** array (length 4^n); reshape to `(2**n, 2**n)` to read the matrix (the bit-reversed image of the metadata rho).
+
 ### Method comparison
 
 | Method | Max Qubits | Exact | Supports Gradients | Supports Noise |

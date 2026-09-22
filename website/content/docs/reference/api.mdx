@@ -234,6 +234,8 @@ noise = sf.NoiseModel().add_depolarizing(0.01)
 result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
 ```
 
+`counts`/`probabilities` keys follow the shared little-endian key convention (qubit `q` = bit `q` of `int(key, 2)`); `result.metadata["density_matrix"]` is big-endian (qubit 0 = most significant). See the execution guide for the full layout notes.
+
 ---
 
 ## 5. Compilation — `sf.compile()`
