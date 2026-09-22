@@ -40,6 +40,19 @@ def _rev_index(n: int) -> np.ndarray:
     return rev
 
 
+def _dm_keys(n_qubits: int) -> List[str]:
+    """Counts/probabilities keys for the density-matrix read path.
+
+    The public rho is big-endian (q0-first; see ``_reverse_qubits_dm``), so a
+    diagonal entry's index ``i`` is not the SF key index.  Every other method
+    (statevector, MPS, default sampling) and the Rust density-matrix state
+    handle key by the little-endian index — qubit q is bit q of
+    ``int(key, 2)`` — so this helper bit-reverses the big-endian rho index,
+    keeping ``int(key, 2)`` directly comparable across methods.
+    """
+    return [format(int(i), f'0{n_qubits}b') for i in _rev_index(n_qubits)]
+
+
 def _reverse_qubits_dm(rho: np.ndarray, n: int) -> np.ndarray:
     """Convert rho from the engine's internal little-endian layout to the
     public big-endian (q0-first) convention.
@@ -159,18 +172,25 @@ def _dm_to_probs(rho: np.ndarray) -> np.ndarray:
 
 
 def _sample_dm(rho: np.ndarray, shots: int, rng: np.random.Generator) -> Dict[str, int]:
+    """Sample computational-basis outcomes from the (big-endian) rho.
+
+    Counts keys follow the shared little-endian key convention (qubit q is
+    bit q of ``int(key, 2)``) via ``_dm_keys`` — the same convention the Rust
+    density-matrix state handle's own sampler and every other method use.
+    """
     n_qubits = int(round(math.log2(rho.shape[0])))
     probs = _dm_to_probs(rho)
     probs = np.maximum(probs, 0)
     probs /= probs.sum()
     indices = rng.choice(len(probs), size=shots, p=probs)
-    # Vectorized count: bincount over the dim unique outcomes, then format
-    # only the observed bitstrings (same exact counts as the per-shot loop).
+    # Vectorized count: bincount over the dim unique outcomes, then key only
+    # the observed bitstrings (same exact counts as the per-shot loop).
     counts_arr = np.bincount(indices, minlength=len(probs))
+    keys = _dm_keys(n_qubits)
     counts: Dict[str, int] = {}
     for idx, c in enumerate(counts_arr):
         if c:
-            counts[format(idx, f'0{n_qubits}b')] = int(c)
+            counts[keys[idx]] = int(c)
     return counts
 
 

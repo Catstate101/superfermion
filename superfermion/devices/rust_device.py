@@ -397,6 +397,7 @@ class RustDevice:
         from superfermion.backends.density_matrix import (
             _reverse_qubits_dm,
             _dm_to_probs,
+            _dm_keys,
             _sample_dm,
             _apply_readout_noise,
         )
@@ -458,8 +459,12 @@ class RustDevice:
         # O(d²) instead of the O(d³) rho @ rho matmul. np.vdot conjugates
         # its first argument, so one BLAS pass replaces abs+square+sum.
         purity = float(np.vdot(rho, rho).real)
+        # rho is the public big-endian rho; keys follow the shared
+        # little-endian convention (qubit q = bit q), like every other
+        # method — see _dm_keys.
+        keys = _dm_keys(n)
         probabilities = {
-            format(i, f'0{n}b'): float(p)
+            keys[i]: float(p)
             for i, p in enumerate(probs) if p > 1e-12
         }
 
