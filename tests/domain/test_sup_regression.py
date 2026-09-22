@@ -384,6 +384,31 @@ class TestMpsShotsZeroGuard:
         assert r.probabilities
 
 
+# ── (h) truncated MPS shots=0 contract ──────────────────────────────────────
+
+class TestMpsTruncatedShots0Contract:
+    def test_truncated_result_is_normalized(self):
+        """(h) truncated MPS shots=0: statevector/probabilities describe the
+        physical (normalized) state — matching what sample() measures; the
+        raw survivor norm stays visible in truncation_report()."""
+        qc = Circuit(8)
+        rng = np.random.default_rng(3)
+        for _ in range(6):
+            for i in range(8):
+                qc.ry(float(rng.uniform(0, 3.1416)), i)
+            for i in range(0, 7, 2):
+                qc.cnot(i, i + 1)
+            for i in range(1, 7, 2):
+                qc.cnot(i, i + 1)
+        with pytest.warns(RuntimeWarning, match="truncated"):
+            r = sf.run(qc, method="mps", bond_dim=1, shots=0, seed=7)
+        sv = np.asarray(r.statevector, dtype=np.complex128)
+        assert abs(float(np.real(np.vdot(sv, sv))) - 1.0) < 1e-9
+        assert abs(sum(r.probabilities.values()) - 1.0) < 1e-9
+        rep = qc.to_ir().simulate_to_state("mps", "cpu", 1).truncation_report()
+        assert rep["discarded_weight"] > 0.0
+
+
 # ── (i) SUP-12: compiler U-convention fidelity suite ─────────────────────────
 
 class TestCompilerFidelity:

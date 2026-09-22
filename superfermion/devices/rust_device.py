@@ -357,6 +357,15 @@ class RustDevice:
                 sv = state.numpy()
             except Exception:
                 pass
+            if sv is not None:
+                # The MPS handle returns the raw survivor vector: after
+                # truncation its norm² is Π(1−ε) < 1.  Present the physical
+                # state (sample() normalizes before measuring); the raw
+                # truncation truth stays in the RuntimeWarning above and in
+                # ``state.truncation_report()``.
+                nrm = float(np.sqrt(np.real(np.vdot(sv, sv))))
+                if nrm > 0.0:
+                    sv = sv / nrm
 
         if shots > 0:
             probabilities = {k: v / shots for k, v in counts.items()}
