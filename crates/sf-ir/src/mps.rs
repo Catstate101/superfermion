@@ -398,10 +398,16 @@ impl MPSState {
         }
     }
 
-    /// Conservative lower bound on the state fidelity: 1 − Σε.
+    /// Conservative truncation metric: 1 − Σε, clamped to [0, 1].
     ///
-    /// Each truncating step removes at most an ε fraction of the squared
-    /// state norm, so the surviving norm² is ≥ 1 − Σε for a normalized input.
+    /// ``discarded_weight`` accumulates the per-step *relative* discarded
+    /// fractions ε of the squared state norm, so by the union bound the
+    /// surviving norm² is ≥ 1 − Σε for a normalized input.  In truncation
+    /// benchmarks (brickwork sweeps vs exact statevectors) this value also
+    /// stayed below the measured physical fidelity of the normalized MPS
+    /// (F = |⟨ψ_exact|ψ̃⟩|² / ‖ψ̃‖²); that is empirical, not a certified
+    /// bound — compounding across truncating steps is not controlled.
+    /// Use ``discarded_weight`` as the primary truncation metric.
     pub fn fidelity_lower_bound(&self) -> f64 {
         (1.0 - self.discarded_weight).clamp(0.0, 1.0)
     }

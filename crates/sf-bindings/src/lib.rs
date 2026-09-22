@@ -270,7 +270,8 @@ impl PyState {
     ///   discarded_weight     — Σε over all 2q-gate QR steps (0.0 = exact)
     ///   max_discarded_weight — largest single-step discard
     ///   truncation_events    — steps that discarded non-negligible weight
-    ///   fidelity_lower_bound — 1 − Σε, clamped to [0, 1]
+    ///   fidelity_lower_bound — 1 − Σε, clamped to [0, 1]; a conservative
+    ///                          floor (see MPSState::fidelity_lower_bound)
     fn truncation_report<'py>(
         &self,
         py: Python<'py>,
