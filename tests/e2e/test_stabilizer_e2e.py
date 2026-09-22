@@ -59,7 +59,9 @@ class TestStabilizerCliffordGates:
     def test_swap_gate(self):
         qc = Circuit(2).x(0).swap(0, 1)
         result = sf.run(qc, device="cpu", method="stabilizer", shots=1000)
-        assert result.counts.get("01", 0) == 1000
+        # LE keys (qubit q = bit q of int(key, 2)): q1=1, q0=0 -> "10".
+        # (Was "01" under the old q0-first stabilizer key order.)
+        assert result.counts.get("10", 0) == 1000
 
 
 class TestStabilizerNonCliffordRejects:

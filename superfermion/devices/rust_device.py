@@ -498,6 +498,7 @@ class RustDevice:
 
     def _run_stabilizer(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
         """Stabilizer simulation for Clifford circuits."""
+        from superfermion.backends.stabilizer import _stab_keys
         seed = kwargs.get("seed", 42)
         # Hard cap of the Rust tableau: raise a clean ValueError instead of
         # the pyo3 PanicException (a BaseException that `except Exception`
@@ -529,6 +530,10 @@ class RustDevice:
 
         if shots > 0:
             counts = state.sample(shots, seed)
+            # The Rust tableau sampler emits q0-first keys; re-key to the
+            # shared little-endian convention (qubit q = bit q of int(key, 2)),
+            # matching statevector / MPS / density-matrix reads (see _stab_keys).
+            counts = _stab_keys(counts)
         else:
             counts = {}
 

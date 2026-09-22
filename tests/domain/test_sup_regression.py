@@ -343,6 +343,25 @@ class TestProbabilitiesPopulated:
         for k, p in sf.run(c, method="density_matrix", shots=0).probabilities.items():
             assert abs(p - abs(sv[int(k, 2)]) ** 2) < 1e-10
 
+    def test_stabilizer_keys_little_endian(self):
+        """(f) stabilizer counts/probabilities keys use the shared LE key
+        convention (qubit q = bit q), like statevector/MPS/DM/default.
+        Regression: the Rust tableau sampler emitted q0-first keys
+        (x(2)@n=3 -> '001' instead of '100')."""
+        rc = sf.run(Circuit(3).x(2), method="stabilizer", shots=1000, seed=7)
+        assert set(rc.counts) == {"100"}
+        assert set(rc.probabilities) == {"100"}
+        rh = sf.run(Circuit(3).h(0), method="stabilizer", shots=4000, seed=7)
+        assert set(rh.counts) == {"000", "001"}
+        # asymmetric cross-method check: int(key, 2) indexes the statevector
+        c = Circuit(3).x(0).h(1).cnot(1, 2)
+        sv = np.asarray(sf.run(c, method="statevector", shots=0).statevector)
+        support = {format(i, "03b") for i in range(8) if abs(sv[i]) ** 2 > 1e-12}
+        counts = sf.run(c, method="stabilizer", shots=4000, seed=7).counts
+        assert set(counts) == support
+        for k in counts:
+            assert abs(sv[int(k, 2)]) ** 2 > 1e-12, f"key {k} has zero amplitude"
+
     def test_stabilizer_path(self):
         """(f) stabilizer shots>0 from counts; shots=0 stays empty (no counts)."""
         r = sf.run(self._C3, method="stabilizer", shots=1000, seed=7)

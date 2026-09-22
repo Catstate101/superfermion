@@ -54,6 +54,21 @@ def is_clifford_circuit(circuit: Circuit) -> bool:
     return True
 
 
+def _stab_keys(counts: Dict[str, int]) -> Dict[str, int]:
+    """Re-key stabilizer counts from q0-first to the shared LE convention.
+
+    The Rust tableau sampler (``crates/sf-ir/src/stabilizer.rs::sample``)
+    measures qubits in ``q = 0..n`` order and joins the bits left-to-right,
+    so its keys are q0-*first* (big-endian): qubit 0 is the leftmost
+    character.  Every other method — statevector, MPS, density_matrix,
+    default sampling — keys by the little-endian index (qubit q is bit q of
+    ``int(key, 2)``; ``"001"`` = qubit 0 is ``|1>``).  A full bit-reversal
+    maps one to the other.  The raw Rust state handle's own ``sample()``
+    still returns q0-first keys — only the RunResult reads are re-keyed.
+    """
+    return {bs[::-1]: c for bs, c in counts.items()}
+
+
 def maybe_clifford_dispatch(
     circuit: Circuit,
     shots: int,
@@ -257,8 +272,9 @@ class _Tableau:
             bits: List[int] = []
             for q in range(n):
                 bits.append(tab._measure_z(q, rng))
-            # SF endianness: q0 = MSB, so bitstring is reversed
-            bs = "".join(str(b) for b in bits)
+            # Shared little-endian key convention (qubit q = bit q):
+            # the rightmost character is qubit 0, so reverse the q-order bits.
+            bs = "".join(str(b) for b in reversed(bits))
             counts[bs] = counts.get(bs, 0) + 1
         return counts
 
