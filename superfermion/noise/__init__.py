@@ -130,7 +130,20 @@ class NoiseModel:
         )
 
     def add_depolarizing(self, p: float, n_qubits: int = 1) -> "NoiseModel":
-        """Add depolarizing noise with error probability p."""
+        """Add depolarizing noise with error probability p.
+
+        Placement: the channel is applied after every gate that touches a
+        qubit — a two-qubit gate therefore gets two 1-qubit channels (one
+        per qubit).  ``n_qubits=2`` selects the 15-Pauli 2-qubit channel,
+        applied after each two-qubit gate instead.
+
+        Normalization: ``p`` is the total non-identity-Pauli probability
+        (per Pauli: p/3 for 1 qubit, p/15 for 2 qubits).  Qiskit's
+        ``depolarizing_error`` uses the lambda convention
+        ``E(rho) = (1 - lam) rho + lam * Tr(rho) * I / 2**n`` (per Pauli:
+        lam/4, lam/16), so at equal nominal numbers this channel is heavier
+        by exactly 4/3 (1 qubit) and 16/15 (2 qubits).
+        """
         channel = NoiseChannel("depolarizing", p)
         if n_qubits == 1:
             self.single_qubit_channels.append(channel)
