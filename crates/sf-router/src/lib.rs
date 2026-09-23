@@ -50,6 +50,12 @@ impl Router {
     /// 1. Runs N trials with different initial layouts (first is trivial)
     /// 2. Each trial does forward + backward passes
     /// 3. Returns the result with the fewest SWAPs
+    ///
+    /// Layouts come from a fixed default seed (`sabre::DEFAULT_SEED`) so the
+    /// routed circuit is reproducible across runs; `SF_ROUTER_SEED=entropy`
+    /// restores the historical entropy-seeded behavior and
+    /// `SF_ROUTER_SEED=<u64>` pins a specific seed. Total SWAP work is
+    /// bounded by `sabre::swap_step_cap` (`SF_ROUTER_MAX_SWAPS` overrides).
     pub fn route(&self, dag: &QuantumDAG) -> Result<(QuantumDAG, QubitMapping), RouterError> {
         if dag.n_qubits > self.topology.n_qubits() {
             return Err(RouterError::InsufficientQubits(
@@ -60,7 +66,7 @@ impl Router {
 
         let config = sabre::SabreConfig {
             n_trials: 5,
-            seed: None,
+            seed: sabre::seed_from_env(),
             ..Default::default()
         };
         let router = SabreRouter::with_config(&self.topology, config);

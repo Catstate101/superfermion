@@ -40,9 +40,47 @@ impl Default for SabreConfig {
             decay_delta: 0.001,
             decay_reset_interval: 5,
             n_trials: 5,
-            seed: None,
+            // Deterministic by default: the routed circuit (and therefore
+            // the compiled gate list) must not depend on process entropy.
+            seed: Some(DEFAULT_SEED),
         }
     }
+}
+
+/// Default seed for the multi-trial random layouts. Fixed so repeated
+/// compilations of the same circuit emit identical routed gate lists.
+pub const DEFAULT_SEED: u64 = 0x5AB2_E001;
+
+/// Resolve the multi-trial seed from the environment: unset or unparsable
+/// -> `DEFAULT_SEED` (deterministic); `entropy`/`none` -> `None` (restores
+/// the historical entropy-seeded, run-to-run varying behavior);
+/// `SF_ROUTER_SEED=<u64>` -> that seed.
+pub fn seed_from_env() -> Option<u64> {
+    match std::env::var("SF_ROUTER_SEED") {
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            if t == "entropy" || t == "none" {
+                None
+            } else {
+                Some(t.parse().unwrap_or(DEFAULT_SEED))
+            }
+        }
+        Err(_) => Some(DEFAULT_SEED),
+    }
+}
+
+/// Total SWAP-step budget for one `route_multi_trial` call (all trials,
+/// both directions). The per-pass safety net `gates * n_logical * 4 + 1000`
+/// only trips after millions of steps on a large circuit, and multi-trial
+/// multiplies that by `2 * n_trials` passes — a single unlucky layout can
+/// then dominate wall time (the benchpress Clifford corpus hit >180 s that
+/// way while the same input normally routes in ~16 s). Default:
+/// `max(64_000, 8 * n_gates)`; `SF_ROUTER_MAX_SWAPS` overrides.
+pub fn swap_step_cap(n_gates: usize) -> usize {
+    std::env::var("SF_ROUTER_MAX_SWAPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| 64_000usize.max(n_gates.saturating_mul(8)))
 }
 
 /// SABRE router implementation.
@@ -107,12 +145,17 @@ impl<'a> SabreRouter<'a> {
 
     /// Run a single forward routing pass with the given initial layout.
     /// Returns (routed_dag, final_mapping, swap_count).
+    /// `swap_limit` caps the SWAPs this single pass may insert, on top of
+    /// the internal `gates * n_logical * 4 + 1000` safety net. Callers that
+    /// already know a tighter bound (e.g. the best complete result so far)
+    /// pass it here so a thrashing layout aborts early.
     fn forward_pass(
         &self,
         gates: &[GateNode],
         initial_layout: &QubitMapping,
         n_logical: usize,
         n_cbits: usize,
+        swap_limit: usize,
     ) -> Result<(QuantumDAG, QubitMapping, usize), RouterError> {
         let mut mapping = initial_layout.clone();
         let n_physical = self.coupling.n_qubits().max(n_logical);
@@ -136,7 +179,7 @@ impl<'a> SabreRouter<'a> {
         let n_phys = self.coupling.n_qubits();
         let mut decay: Vec<f64> = vec![1.0; n_phys];
 
-        let swap_budget = gates.len() * n_logical.max(1) * 4 + 1000;
+        let swap_budget = (gates.len() * n_logical.max(1) * 4 + 1000).min(swap_limit);
         let mut swaps_used: usize = 0;
         let mut swaps_since_progress: usize = 0;
 
@@ -461,7 +504,7 @@ impl<'a> SabreRouter<'a> {
     ) -> Result<(QuantumDAG, QubitMapping), RouterError> {
         let gates = self.build_gate_graph(dag);
         let (routed, mapping, _) =
-            self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits)?;
+            self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits, usize::MAX)?;
         Ok((routed, mapping))
     }
 
@@ -476,12 +519,12 @@ impl<'a> SabreRouter<'a> {
 
         // Forward pass
         let (fwd_dag, fwd_mapping, fwd_swaps) =
-            self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits)?;
+            self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits, usize::MAX)?;
 
         // Build reversed gate list for backward pass
         let rev_gates = self.reverse_gates(&gates);
         let (bwd_dag, _bwd_mapping, bwd_swaps) =
-            self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits)?;
+            self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits, usize::MAX)?;
 
         // Pick the result with fewer SWAPs
         if bwd_swaps < fwd_swaps {
@@ -516,8 +559,14 @@ impl<'a> SabreRouter<'a> {
         reversed
     }
 
-    /// Multi-trial routing: run multiple trials with random initial layouts,
-    /// return the result with the fewest SWAPs.
+    /// Multi-trial routing: run multiple trials with (seeded) random initial
+    /// layouts, return the result with the fewest SWAPs.
+    ///
+    /// Work is bounded two ways: a complete result bounds every later pass
+    /// (a pass that needs at least as many SWAPs as the best result cannot
+    /// improve on it, since selection is strict `<`), and `swap_step_cap`
+    /// bounds the whole call. Only if no trial completes inside the cap does
+    /// it fall back to the historical uncapped identity-layout behavior.
     pub fn route_multi_trial(
         &self,
         dag: &QuantumDAG,
@@ -526,6 +575,8 @@ impl<'a> SabreRouter<'a> {
         let gates = self.build_gate_graph(dag);
         let n_physical = self.coupling.n_qubits();
         let n_trials = self.config.n_trials;
+        let cap = swap_step_cap(gates.len());
+        let mut spent: usize = 0;
 
         let mut rng: Box<dyn RngCore> = match self.config.seed {
             Some(s) => Box::new(StdRng::seed_from_u64(s)),
@@ -533,6 +584,7 @@ impl<'a> SabreRouter<'a> {
         };
 
         let mut best_result: Option<(QuantumDAG, QubitMapping, usize)> = None;
+        let rev_gates = self.reverse_gates(&gates);
 
         for trial in 0..n_trials {
             // Trial 0: trivial layout. Subsequent trials: random permutation.
@@ -548,24 +600,46 @@ impl<'a> SabreRouter<'a> {
                 QubitMapping::from_layout(&perm)
             };
 
-            // Run bidirectional pass
-            let rev_gates = self.reverse_gates(&gates);
+            // Per-pass allowance: beat the best complete result if one
+            // exists, never exceed what is left of the global cap. A pass
+            // that aborts is charged its whole allowance (upper bound — it
+            // stops exactly at the tighter of the two limits).
+            let best_swaps = best_result.as_ref().map(|(_, _, s)| *s);
+            let fwd_limit = best_swaps
+                .unwrap_or(cap)
+                .min(cap.saturating_sub(spent))
+                .max(1);
 
             // Forward
-            let fwd = self.forward_pass(&gates, &layout, dag.n_qubits, dag.n_cbits);
+            let fwd = self.forward_pass(&gates, &layout, dag.n_qubits, dag.n_cbits, fwd_limit);
             let (fwd_dag, fwd_mapping, fwd_swaps) = match fwd {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(_) => {
+                    spent += fwd_limit;
+                    continue;
+                }
             };
+            spent += fwd_swaps;
 
-            // Backward using forward's final layout
-            let bwd = self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits);
+            // Backward using forward's final layout. Only useful if it beats
+            // the forward pass (strict `<` below), so cap it at `fwd_swaps`.
+            let bwd_limit = fwd_swaps.min(cap.saturating_sub(spent)).max(1);
+            let bwd =
+                self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits, bwd_limit);
 
             let (result_dag, result_mapping, result_swaps) = match bwd {
-                Ok((bwd_dag, bwd_mapping, bwd_swaps)) if bwd_swaps < fwd_swaps => {
-                    (bwd_dag, bwd_mapping, bwd_swaps)
+                Ok((bwd_dag, bwd_mapping, bwd_swaps)) => {
+                    spent += bwd_swaps;
+                    if bwd_swaps < fwd_swaps {
+                        (bwd_dag, bwd_mapping, bwd_swaps)
+                    } else {
+                        (fwd_dag, fwd_mapping, fwd_swaps)
+                    }
                 }
-                _ => (fwd_dag, fwd_mapping, fwd_swaps),
+                Err(_) => {
+                    spent += bwd_limit;
+                    (fwd_dag, fwd_mapping, fwd_swaps)
+                }
             };
 
             let is_better = match &best_result {
@@ -578,10 +652,24 @@ impl<'a> SabreRouter<'a> {
             }
         }
 
-        match best_result {
-            Some((dag, mapping, _)) => Ok((dag, mapping)),
-            None => Err(RouterError::RoutingFailed(vec![])),
+        if let Some((best_dag, best_mapping, _)) = best_result {
+            return Ok((best_dag, best_mapping));
         }
+
+        // Every capped pass aborted. Fall back to the historical uncapped
+        // identity-layout pass so this call only fails where the pre-cap
+        // behavior would have failed too.
+        let layout = QubitMapping::identity(n_physical);
+        let (fwd_dag, fwd_mapping, fwd_swaps) =
+            self.forward_pass(&gates, &layout, dag.n_qubits, dag.n_cbits, usize::MAX)?;
+        let bwd =
+            self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits, fwd_swaps);
+        Ok(match bwd {
+            Ok((bwd_dag, bwd_mapping, bwd_swaps)) if bwd_swaps < fwd_swaps => {
+                (bwd_dag, bwd_mapping)
+            }
+            _ => (fwd_dag, fwd_mapping),
+        })
     }
 }
 
@@ -718,5 +806,34 @@ mod tests {
         let (routed, _) = router.route(&dag, &layout).unwrap();
         assert_eq!(routed.count_ops_of_type("SWAP"), 0);
         assert_eq!(routed.count_ops_of_type("CNOT"), 3);
+    }
+
+    #[test]
+    fn test_default_seed_deterministic() {
+        assert_eq!(SabreConfig::default().seed, Some(DEFAULT_SEED));
+        if std::env::var("SF_ROUTER_SEED").is_err() {
+            assert_eq!(seed_from_env(), Some(DEFAULT_SEED));
+            assert_eq!(swap_step_cap(15_000), 120_000);
+        }
+
+        // Two independent default-config routers must emit identical routed
+        // circuits for a layout-sensitive chain (previously entropy-seeded).
+        let coupling = CouplingMap::linear(9);
+        let mut dag = QuantumDAG::new(9, 0);
+        dag.add_op(OpType::CNOT, &[0, 8]);
+        dag.add_op(OpType::CNOT, &[8, 0]);
+        dag.add_op(OpType::CNOT, &[2, 7]);
+        dag.add_op(OpType::CNOT, &[1, 6]);
+        dag.add_op(OpType::CNOT, &[3, 8]);
+        dag.add_op(OpType::CNOT, &[0, 5]);
+
+        let (r1, _) = SabreRouter::new(&coupling)
+            .route_multi_trial(&dag, 9)
+            .unwrap();
+        let (r2, _) = SabreRouter::new(&coupling)
+            .route_multi_trial(&dag, 9)
+            .unwrap();
+        assert_eq!(r1.count_ops_of_type("SWAP"), r2.count_ops_of_type("SWAP"));
+        assert_eq!(r1.gate_count(), r2.gate_count());
     }
 }
