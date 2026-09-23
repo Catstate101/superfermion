@@ -415,7 +415,7 @@ impl QuantumStateImpl for StatevectorState {
         let mut dm = DensityMatrixState::new(n_keep);
         for ket in 0..dim_keep {
             for bra in 0..dim_keep {
-                dm.data[ket | (bra << n_keep)] = rho_matrix[ket][bra];
+                dm.set_at(ket, bra, rho_matrix[ket][bra]);
             }
         }
 
@@ -462,7 +462,7 @@ impl DensityMatrixStateWrapper {
         let mut rho = vec![vec![Complex64::new(0.0, 0.0); dim]; dim];
         for ket in 0..dim {
             for bra in 0..dim {
-                rho[ket][bra] = self.inner.data[ket | (bra << n)];
+                rho[ket][bra] = self.inner.at(ket, bra);
             }
         }
         rho
@@ -515,7 +515,7 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         }
         let n = self.inner.n_qubits;
         let dim = 1 << n;
-        let probs: Vec<f64> = (0..dim).map(|i| self.inner.data[i | (i << n)].re).collect();
+        let probs: Vec<f64> = (0..dim).map(|i| self.inner.at(i, i).re).collect();
 
         use rand::Rng;
         use rand::SeedableRng;
@@ -562,7 +562,7 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         let mut rho = nalgebra::DMatrix::<Complex64>::zeros(dim, dim);
         for ket in 0..dim {
             for bra in 0..dim {
-                rho[(ket, bra)] = self.inner.data[ket | (bra << n)];
+                rho[(ket, bra)] = self.inner.at(ket, bra);
             }
         }
         let eig = rho.symmetric_eigen();
@@ -581,7 +581,7 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         let mut rho = nalgebra::DMatrix::<Complex64>::zeros(dim, dim);
         for ket in 0..dim {
             for bra in 0..dim {
-                rho[(ket, bra)] = self.inner.data[ket | (bra << n)];
+                rho[(ket, bra)] = self.inner.at(ket, bra);
             }
         }
         Ok((&rho * &rho).trace().re)
@@ -609,8 +609,8 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         let mut sigma = nalgebra::DMatrix::<Complex64>::zeros(dim, dim);
         for ket in 0..dim {
             for bra in 0..dim {
-                rho[(ket, bra)] = self.inner.data[ket | (bra << n)];
-                sigma[(ket, bra)] = other_dm.inner.data[ket | (bra << n)];
+                rho[(ket, bra)] = self.inner.at(ket, bra);
+                sigma[(ket, bra)] = other_dm.inner.at(ket, bra);
             }
         }
 
@@ -633,7 +633,7 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         let mut flat = Vec::with_capacity(dim * dim);
         for ket in 0..dim {
             for bra in 0..dim {
-                flat.push(self.inner.data[ket | (bra << n)]);
+                flat.push(self.inner.at(ket, bra));
             }
         }
         Ok(flat)
@@ -643,7 +643,7 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         let n = self.inner.n_qubits;
         let dim = 1 << n;
         Ok((0..dim)
-            .map(|i| self.inner.data[i | (i << n)].re.max(0.0))
+            .map(|i| self.inner.at(i, i).re.max(0.0))
             .collect())
     }
 
@@ -691,7 +691,7 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
         let mut dm = DensityMatrixState::new(n_keep);
         for ket in 0..dim_keep {
             for bra in 0..dim_keep {
-                dm.data[ket | (bra << n_keep)] = rho_reduced[ket][bra];
+                dm.set_at(ket, bra, rho_reduced[ket][bra]);
             }
         }
 

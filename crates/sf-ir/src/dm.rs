@@ -1,8 +1,41 @@
 use nalgebra::DMatrix;
 use num_complex::Complex64;
+
+/// Bit-reversal of the low `n` bits of `x` (`rev_n` in the bindings).
+#[inline(always)]
+pub(crate) fn rev_bits(x: usize, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    x.reverse_bits() >> (usize::BITS as usize - n)
+}
+
+/// Storage layout of a density-matrix buffer.
+///
+/// `Engine` is the simulator's canonical interleaved layout
+/// `data[ket | (bra << n)]`: every constructor and every evolution kernel in
+/// this module produces/consumes it.
+///
+/// `Public` is the row-major *public* layout handed to Python as
+/// `metadata["density_matrix"]` (qubit-0-first / big-endian,
+/// `public[r][c] = rho_BE(r, c) = rho_LE(rev(r), rev(c))`).  The buffer is
+/// byte-for-byte the array the caller receives, so the state and the Python
+/// array share ONE 4^n buffer instead of keeping two alive.  Read access goes
+/// through `at`, which translates back to engine coordinates; the evolution
+/// kernels are engine-only and assert that invariant.
+pub enum DmLayout {
+    Engine,
+    Public,
+}
+
 pub struct DensityMatrixState {
-    pub data: Vec<Complex64>,
+    /// Raw 4^n buffer.  Private on purpose: the layout decides how it is
+    /// indexed (see `at`), so nothing outside this module may index it
+    /// directly — a missed accessor becomes a compile error, not a silently
+    /// wrong number.
+    data: Vec<Complex64>,
     pub n_qubits: usize,
+    layout: DmLayout,
 }
 
 impl DensityMatrixState {
@@ -11,11 +44,95 @@ impl DensityMatrixState {
         let mut data = vec![Complex64::new(0.0, 0.0); dim];
         // Initial state |0...0><0...0| is index 0 in the vectorized representation
         data[0] = Complex64::new(1.0, 0.0);
-        Self { data, n_qubits }
+        Self {
+            data,
+            n_qubits,
+            layout: DmLayout::Engine,
+        }
+    }
+
+    /// Adopt an existing vectorized buffer (`data[ket | (bra << n)]` layout,
+    /// see `new`) instead of allocating and zero-filling a fresh 4^n vector.
+    ///
+    /// Callers that already own a correctly sized, fully written buffer (e.g.
+    /// the evolve-then-return bindings) use this to avoid a throwaway 4^n
+    /// allocation + memset — at n=13 that is a 1 GiB buffer allocated and
+    /// discarded per call, which shows up directly in peak RSS.
+    pub fn from_data(data: Vec<Complex64>, n_qubits: usize) -> Self {
+        debug_assert_eq!(data.len(), 1usize << (2 * n_qubits));
+        Self {
+            data,
+            n_qubits,
+            layout: DmLayout::Engine,
+        }
+    }
+
+    /// Adopt a buffer already permuted into the PUBLIC row-major layout
+    /// (`public[r][c] = rho_LE(rev(r), rev(c))`, the array handed to Python as
+    /// `metadata["density_matrix"]`).  Read accessors translate the index back,
+    /// so no second 4^n buffer has to be materialised.
+    pub fn from_data_public(data: Vec<Complex64>, n_qubits: usize) -> Self {
+        debug_assert_eq!(data.len(), 1usize << (2 * n_qubits));
+        Self {
+            data,
+            n_qubits,
+            layout: DmLayout::Public,
+        }
+    }
+
+    /// Give the raw buffer back (bindings that return the flat vec).
+    pub fn into_data(self) -> Vec<Complex64> {
+        self.data
+    }
+
+    #[inline(always)]
+    pub fn layout(&self) -> &DmLayout {
+        &self.layout
+    }
+
+    /// Engine density-matrix entry (ket, bra) — layout-aware.
+    ///
+    /// Engine: `data[ket | (bra << n)]` (the historical index).  Public: the
+    /// buffer holds the big-endian matrix `public[r][c] = rho_LE(rev(r),
+    /// rev(c))`, so `rho_LE(ket, bra)` sits at `data[rev(ket) * dim +
+    /// rev(bra)]`.
+    #[inline(always)]
+    pub fn at(&self, ket: usize, bra: usize) -> Complex64 {
+        match self.layout {
+            DmLayout::Engine => self.data[ket | (bra << self.n_qubits)],
+            DmLayout::Public => {
+                let n = self.n_qubits;
+                let dim = 1usize << n;
+                self.data[rev_bits(ket, n) * dim + rev_bits(bra, n)]
+            }
+        }
+    }
+
+    /// Engine-layout write of entry (ket, bra).  Public-layout states are
+    /// read-only handles (no binding evolves them); a write to one would
+    /// silently desynchronise the Python view that shares the buffer, so it is
+    /// rejected loudly instead.
+    pub fn set_at(&mut self, ket: usize, bra: usize, v: Complex64) {
+        self.assert_engine("set_at");
+        self.data[ket | (bra << self.n_qubits)] = v;
+    }
+
+    /// Pointer/length of the raw buffer (bindings hand it to numpy as a view).
+    pub fn data_ptr(&self) -> *const Complex64 {
+        self.data.as_ptr()
+    }
+
+    #[inline(always)]
+    fn assert_engine(&self, what: &str) {
+        assert!(
+            matches!(self.layout, DmLayout::Engine),
+            "DensityMatrixState::{what} requires the engine layout (this state was returned in the public, view-shared layout and must not be evolved)"
+        );
     }
 
     /// Apply a unitary gate U to the density matrix: rho -> U rho U†
     pub fn apply_unitary(&mut self, u: &DMatrix<Complex64>, qubits: &[usize]) {
+        self.assert_engine("apply_unitary");
         match qubits.len() {
             1 => {
                 let q = qubits[0];
@@ -87,6 +204,7 @@ impl DensityMatrixState {
     /// closed (ket q, bra n+q) blocks) is pre-summed, then applied per
     /// block. No per-Kraus clones or intermediate buffers.
     pub fn apply_kraus(&mut self, kraus_set: &[DMatrix<Complex64>], qubit: usize) {
+        self.assert_engine("apply_kraus");
         let m = Self::kraus_superop_1q(kraus_set);
         crate::simd::dm_super_1q(&mut self.data, qubit, &m);
     }
@@ -102,6 +220,7 @@ impl DensityMatrixState {
         qb: usize,
         m_b: &[[Complex64; 4]; 4],
     ) {
+        self.assert_engine("apply_1q_superop_pair");
         crate::simd::dm_super_1q_pair(&mut self.data, qa, m_a, qb, m_b);
     }
 
@@ -109,6 +228,7 @@ impl DensityMatrixState {
     /// (same kernel `apply_kraus` uses; lets callers that already built
     /// the 4×4 reuse it without recomputing).
     pub fn apply_1q_superop(&mut self, q: usize, m: &[[Complex64; 4]; 4]) {
+        self.assert_engine("apply_1q_superop");
         crate::simd::dm_super_1q(&mut self.data, q, m);
     }
 
@@ -143,6 +263,7 @@ impl DensityMatrixState {
         q0: usize,
         q1: usize,
     ) {
+        self.assert_engine("apply_kraus_2q");
         let m = Self::kraus_superop_2q(kraus_set);
         crate::simd::dm_super_2q(&mut self.data, q0, q1, &m);
     }
@@ -165,6 +286,7 @@ impl DensityMatrixState {
         qubits: &[usize],
         noise: &[(usize, &[DMatrix<Complex64>])],
     ) {
+        self.assert_engine("apply_gate_noise_fused");
         match qubits.len() {
             1 => {
                 // One touching channel on the gate qubit (caller guarantees).

@@ -488,12 +488,12 @@ impl QuantumDAG {
                 _ => {
                     // Unsupported arity: keep the historical path (and its
                     // behavior) for exotic multi-qubit unitaries.
-                    let mut dm = crate::dm::DensityMatrixState {
-                        data: std::mem::take(&mut data),
-                        n_qubits: n,
-                    };
+                    let mut dm = crate::dm::DensityMatrixState::from_data(
+                        std::mem::take(&mut data),
+                        n,
+                    );
                     dm.apply_unitary(&u, &op.qubits);
-                    data = dm.data;
+                    data = dm.into_data();
                 }
             }
         }
