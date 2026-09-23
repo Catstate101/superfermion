@@ -104,6 +104,48 @@ fn pair_v2_enabled() -> bool {
     }
 }
 
+/// Per-kernel SIMD size floors (amplitudes), latched once per process.
+///
+/// The floors exist because below them the AVX2 dispatch + cold-kernel cost
+/// can outsized the saving (measured on the phase-gate micro at 4096:
+/// scalar 1.51 ms vs SIMD 3.85 ms). The previous single floor of 8192 was
+/// taken from that micro and applied to every gated kernel; the end-to-end
+/// statevector ladder tells a different story for whole-slice sweeps — at
+/// dim 4096 the scalar path costs ~0.91 us/amp vs ~0.07 us/amp at dim 8192
+/// on the identical workload, i.e. the 8192 floor left n=12 entirely on the
+/// slow path. The floor for the whole-slice gates is therefore 4096; the
+/// chunked kernels stay ungated. Overridable for A/B attribution runs:
+/// `SF_PAIR_MIN=<n>` (pair_pass), `SF_SCALE_MIN=<n>` (pattern_scale_const /
+/// pattern_scale_periodic).
+const PAIR_SIMD_MIN_DEFAULT: usize = 4096;
+const SCALE_SIMD_MIN_DEFAULT: usize = 4096;
+
+/// Size floor of the whole-slice `pair_pass` SIMD kernels (see
+/// `PAIR_SIMD_MIN_DEFAULT`); `SF_PAIR_MIN` overrides.
+#[inline]
+fn pair_simd_min() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("SF_PAIR_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(PAIR_SIMD_MIN_DEFAULT)
+    })
+}
+
+/// Size floor of the whole-slice `pattern_scale_*` SIMD kernels (see
+/// `SCALE_SIMD_MIN_DEFAULT`); `SF_SCALE_MIN` overrides.
+#[inline]
+fn scale_simd_min() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("SF_SCALE_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SCALE_SIMD_MIN_DEFAULT)
+    })
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // x86_64 AVX2+FMA building blocks
 // ──────────────────────────────────────────────────────────────────────
@@ -178,10 +220,10 @@ mod x86 {
 pub fn pair_pass(s: &mut [Complex64], stride: usize, m: [[Complex64; 2]; 2]) {
     #[cfg(target_arch = "x86_64")]
     {
-        // Below 8K amplitudes the SIMD dispatch overhead and cold-kernel
-        // path cost more than they save (measured on the phase-gate micro
-        // at 4096: scalar 1.51 ms vs SIMD 3.85 ms).
-        if simd_enabled() && s.len() >= 8192 && stride >= 2 {
+        // Whole-slice sweeps use the vector kernels from the per-kernel
+        // floor up (`pair_simd_min`); below it the dispatch + cold-kernel
+        // cost can outsized the saving.
+        if simd_enabled() && s.len() >= pair_simd_min() && stride >= 2 {
             unsafe {
                 if pair_v2_enabled() {
                     pair_pass_runs_avx2_v2(s.as_mut_ptr(), s.len(), stride, m);
@@ -191,7 +233,7 @@ pub fn pair_pass(s: &mut [Complex64], stride: usize, m: [[Complex64; 2]; 2]) {
             }
             return;
         }
-        if simd_enabled() && s.len() >= 8192 && stride == 1 {
+        if simd_enabled() && s.len() >= pair_simd_min() && stride == 1 {
             unsafe {
                 if pair_v2_enabled() {
                     pair_pass_stride1_avx2_v2(s.as_mut_ptr(), s.len(), m);
@@ -504,7 +546,7 @@ fn pattern_scale_const(s: &mut [Complex64], c: Complex64) {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        if simd_enabled() && s.len() >= 8192 {
+        if simd_enabled() && s.len() >= scale_simd_min() {
             unsafe { scale_const_avx2(s.as_mut_ptr(), s.len(), c) };
             return;
         }
@@ -522,7 +564,7 @@ fn pattern_scale_periodic(s: &mut [Complex64], off: usize, table: &[Complex64]) 
     let ph0 = off & (period - 1);
     #[cfg(target_arch = "x86_64")]
     {
-        if simd_enabled() && s.len() >= 8192 {
+        if simd_enabled() && s.len() >= scale_simd_min() {
             unsafe {
                 mul_by_table_phase_avx2(s.as_mut_ptr(), table.as_ptr(), s.len(), ph0, period)
             };
