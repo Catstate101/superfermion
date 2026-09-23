@@ -25,6 +25,23 @@ pub struct StabilizerTableau {
     sz_buf: Vec<u64>, // words elements, zeroed before each measure_z
 }
 
+/// One precomputed measurement of a `sample()` plan (see
+/// [`StabilizerTableau::build_sample_plan`]).
+///
+/// In the AG pass the supports (x, z) evolve identically for every shot —
+/// only the phase bits depend on the drawn random outcomes — so the pass is
+/// run once with the phases kept as GF(2) linear forms over the drawn bits.
+/// Each shot then just draws the fresh bits and evaluates the parities.
+enum PlanEntry {
+    /// Outcome is a fresh random bit; `var` is its index in the per-shot
+    /// drawn-bit vector (draws happen in q order, matching the historical
+    /// per-shot AG stream).
+    Random { var: u32 },
+    /// Outcome is the parity of previously drawn bits selected by `mask`
+    /// (bit `v` of the drawn-bit vector = variable `v`), XOR `c`.
+    Determined { mask: Vec<u64>, c: u8 },
+}
+
 impl StabilizerTableau {
     pub fn new(n: usize) -> Self {
         assert!(n <= 1024, "Tableau supports n ≤ 1024");
@@ -265,6 +282,10 @@ impl StabilizerTableau {
 
     // ── Measure Z_q (AG algorithm 1) ──
 
+    /// Single-shot reference implementation.  `sample()` no longer calls it
+    /// (it builds a measurement plan instead); it is kept as the reference
+    /// path for the replay tests and for future mid-circuit work.
+    #[allow(dead_code)]
     fn measure_z(&mut self, q: usize, rng: &mut StdRng) -> u8 {
         let n = self.n;
         let w = q / 64;
@@ -488,29 +509,28 @@ impl StabilizerTableau {
     // ── Sampling ──
 
     /// Sample `shots` bitstrings. Uses rayon for multi-core parallelism.
-    /// Each shot clones the tableau (measure_z is destructive, so a fresh
-    /// clone is required per shot).  The O(n³) per-shot cost is dominated by
-    /// the O(n²) measure_z row_mult work, not cloning.
+    ///
+    /// The per-shot AG pass (`measure_z` × n, O(n³) per shot) is replaced by
+    /// a precomputed measurement plan (see [`PlanEntry`]): the pass runs once
+    /// over the supports, then each shot only draws the random bits and
+    /// evaluates parities — O(n · random/64) per shot.  Draws use the same
+    /// `StdRng::seed_from_u64(base + shot)` and the same `u8`
+    /// `gen_range(0..2)` calls in the same q order as the historical pass,
+    /// so same-seed counts are unchanged.
     pub fn sample(&self, shots: usize, seed: Option<u64>) -> HashMap<String, usize> {
         if shots == 0 {
             return HashMap::new();
         }
         let base_seed = seed.unwrap_or_else(rand::random);
         let n = self.n;
+        let plan = self.build_sample_plan();
 
-        // Parallel sampling: each shot is independent (measure_z is destructive)
+        // Parallel sampling: each shot is independent.
         (0..shots)
             .into_par_iter()
             .map(|shot_idx| {
-                let mut tab = self.clone();
                 let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(shot_idx as u64));
-                let mut bits = Vec::with_capacity(n);
-                for q in 0..n {
-                    bits.push(tab.measure_z(q, &mut rng));
-                }
-                bits.iter()
-                    .map(|b| if *b == 1 { '1' } else { '0' })
-                    .collect::<String>()
+                self.eval_plan(&plan, n, &mut rng)
             })
             .fold(
                 HashMap::new,
@@ -528,6 +548,176 @@ impl StabilizerTableau {
                     a
                 },
             )
+    }
+
+    /// Run the AG pass once, tracking each row phase as a GF(2) linear form
+    /// over the drawn random bits, and emit one plan entry per qubit.
+    ///
+    /// This mirrors `measure_z` step for step: the pivot search and every row
+    /// multiplication depend only on the supports, and phase updates are
+    /// linear (bit 1 of the 2-bit phase: `r_i ^ r_p ^ (popp >> 1)` for the
+    /// random branch; the deterministic accumulator `sr = (sr + 2·r_si +
+    /// popp) mod 4` carries its low bit `s0` — which never depends on random
+    /// bits — into the linear form).
+    fn build_sample_plan(&self) -> Vec<PlanEntry> {
+        let n = self.n;
+        let words = self.words;
+        // Upper bound on fresh draws: every qubit either draws once or is a
+        // parity of earlier draws.
+        let mwords = n.div_ceil(64).max(1);
+        let mut tab = self.clone();
+        let mut r_mask: Vec<Vec<u64>> = vec![vec![0u64; mwords]; 2 * n];
+        // Gate applications (H/S/SDG/SX/SY...) and CZ/CY already set phase
+        // bits in `self.r`; the linear forms model only the *drawn* bits, so
+        // seed the constants from the current phases (value bit of each row).
+        let mut r_const: Vec<u8> = self.r.iter().map(|&v| (v & 1) as u8).collect();
+        let mut var_count: u32 = 0;
+        let mut plan: Vec<PlanEntry> = Vec::with_capacity(n);
+
+        for q in 0..n {
+            let w = q / 64;
+            let qmask = 1u64 << (q % 64);
+
+            // Random branch: first stabilizer row p ≥ n with x[p][q] = 1.
+            let mut p_rand: Option<usize> = None;
+            for p in n..2 * n {
+                if (tab.x[p][w] & qmask) != 0 {
+                    p_rand = Some(p);
+                    break;
+                }
+            }
+
+            if let Some(p) = p_rand {
+                // The multiplier row is read BEFORE row p is replaced, exactly
+                // like measure_z (`let rp = self.r[p];`), so snapshot it.
+                let rp_mask = r_mask[p].clone();
+                let rp_const = r_const[p];
+                let xp = tab.x[p].clone();
+                let zp = tab.z[p].clone();
+
+                // Multiply every row i ≠ p with x[i][q] = 1 by row p:
+                //   r[i] ← r[i] ^ r[p] ^ (popp >> 1)
+                for i in 0..2 * n {
+                    if i != p && (tab.x[i][w] & qmask) != 0 {
+                        let popp = Self::phase_of_product(&tab.x[i], &tab.z[i], &xp, &zp, n, words);
+                        for k in 0..mwords {
+                            r_mask[i][k] ^= rp_mask[k];
+                        }
+                        r_const[i] ^= rp_const ^ ((popp >> 1) & 1);
+                        for ww in 0..words {
+                            tab.x[i][ww] ^= xp[ww];
+                            tab.z[i][ww] ^= zp[ww];
+                        }
+                    }
+                }
+
+                // Destabilizer(p-n) ← old stabilizer p (swap + overwrite), then
+                // stabilizer p ← Z_q with the fresh random outcome as phase.
+                tab.x.swap(p - n, p);
+                tab.z.swap(p - n, p);
+                r_mask.swap(p - n, p);
+                r_const.swap(p - n, p);
+                for ww in 0..words {
+                    tab.x[p][ww] = 0;
+                    tab.z[p][ww] = 0;
+                }
+                tab.z[p][w] = qmask;
+                let var = var_count;
+                var_count += 1;
+                r_mask[p].fill(0);
+                r_mask[p][(var as usize) / 64] = 1u64 << ((var as usize) % 64);
+                r_const[p] = 0;
+                plan.push(PlanEntry::Random { var });
+            } else {
+                // Deterministic branch: accumulate destabilizer rows with
+                // x[i][q] = 1, exactly like measure_z (including the sx/sz
+                // scratch buffers and the 2-bit phase accumulator).
+                tab.sx_buf.fill(0);
+                tab.sz_buf.fill(0);
+                let mut s_mask = vec![0u64; mwords];
+                let mut s_const: u8 = 0;
+                let mut s_bit0: u8 = 0; // low bit of sr — never random
+                for i in 0..n {
+                    if (tab.x[i][w] & qmask) != 0 {
+                        let si = i + n;
+                        let popp = Self::phase_of_product(
+                            &tab.sx_buf,
+                            &tab.sz_buf,
+                            &tab.x[si],
+                            &tab.z[si],
+                            n,
+                            words,
+                        );
+                        // sr ← (sr + 2·r[si] + popp) mod 4 with sr = 2·S + s0:
+                        //   S  ← S ^ r[si] ^ (popp>>1) ^ carry
+                        //   s0 ← (s0 + (popp & 1)) & 1,  carry = s0 & (popp & 1)
+                        let p0 = popp & 1;
+                        let carry = s_bit0 & p0;
+                        for k in 0..mwords {
+                            s_mask[k] ^= r_mask[si][k];
+                        }
+                        s_const ^= r_const[si] ^ ((popp >> 1) & 1) ^ carry;
+                        s_bit0 = (s_bit0 + p0) & 1;
+                        for ww in 0..words {
+                            tab.sx_buf[ww] ^= tab.x[si][ww];
+                            tab.sz_buf[ww] ^= tab.z[si][ww];
+                        }
+                    }
+                }
+                plan.push(PlanEntry::Determined {
+                    mask: s_mask,
+                    c: s_const,
+                });
+            }
+        }
+
+        // Vars are introduced in q order, so masks can be trimmed to the
+        // words actually referenced — keeps the per-shot parity loop minimal.
+        let used = (var_count as usize).div_ceil(64);
+        if used < mwords {
+            for e in plan.iter_mut() {
+                if let PlanEntry::Determined { mask, .. } = e {
+                    mask.truncate(used);
+                }
+            }
+        }
+        plan
+    }
+
+    /// Evaluate the plan for one shot.  Draws exactly one `u8`
+    /// `gen_range(0..2)` per random measurement, in q order — the same stream
+    /// sequence the historical per-shot AG pass consumed.
+    fn eval_plan(&self, plan: &[PlanEntry], n: usize, rng: &mut StdRng) -> String {
+        let mwords = plan
+            .iter()
+            .map(|e| match e {
+                PlanEntry::Determined { mask, .. } => mask.len(),
+                PlanEntry::Random { .. } => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        let mut bits = vec![0u64; mwords];
+        let mut out = String::with_capacity(n);
+        for e in plan {
+            let b: u8 = match e {
+                PlanEntry::Random { var } => {
+                    let b: u8 = rng.gen_range(0..2);
+                    if mwords > 0 {
+                        bits[(*var as usize) / 64] |= (b as u64) << ((*var as usize) % 64);
+                    }
+                    b
+                }
+                PlanEntry::Determined { mask, c } => {
+                    let mut par = *c & 1;
+                    for (k, m) in mask.iter().enumerate() {
+                        par ^= ((m & bits[k]).count_ones() & 1) as u8;
+                    }
+                    par
+                }
+            };
+            out.push(if b == 1 { '1' } else { '0' });
+        }
+        out
     }
 }
 
@@ -760,6 +950,130 @@ mod tests {
         let z11 = *counts.get("11").unwrap_or(&0);
         assert!(z00 > 180 && z00 < 320);
         assert!(z11 > 180 && z11 < 320);
+    }
+
+    /// Random Clifford circuit for replay tests (H/S/CX/CZ, seeded).
+    fn random_clifford_gates(
+        n: usize,
+        circ_seed: u64,
+        gate_count: usize,
+    ) -> Vec<(String, Vec<usize>)> {
+        use rand::SeedableRng;
+        let mut grng = StdRng::seed_from_u64(circ_seed);
+        let mut gates: Vec<(String, Vec<usize>)> = Vec::with_capacity(gate_count);
+        for _ in 0..gate_count {
+            match grng.gen_range(0..4) {
+                0 => gates.push(("H".into(), vec![grng.gen_range(0..n)])),
+                1 => gates.push(("S".into(), vec![grng.gen_range(0..n)])),
+                2 => {
+                    let q0 = grng.gen_range(0..n);
+                    let mut q1 = grng.gen_range(0..n);
+                    if q1 == q0 {
+                        q1 = (q0 + 1) % n;
+                    }
+                    gates.push(("CX".into(), vec![q0, q1]));
+                }
+                _ => {
+                    let q0 = grng.gen_range(0..n);
+                    let mut q1 = grng.gen_range(0..n);
+                    if q1 == q0 {
+                        q1 = (q0 + 1) % n;
+                    }
+                    gates.push(("CZ".into(), vec![q0, q1]));
+                }
+            }
+        }
+        gates
+    }
+
+    #[test]
+    fn test_sample_plan_matches_measure_z_replay() {
+        // The precomputed plan evaluated with a seeded StdRng must equal
+        // replaying the historical per-shot AG pass (`measure_z` × n) with an
+        // identically seeded RNG - bit for bit, same draw stream.
+        use rand::SeedableRng;
+        for &n in &[5usize, 6, 8, 12, 70] {
+            for &circ_seed in &[1u64, 2] {
+                let gates = random_clifford_gates(n, circ_seed, 6 * n);
+                let tab = StabilizerTableau::from_gate_list(n, &gates).unwrap();
+                let plan = tab.build_sample_plan();
+                for &seed in &[7u64, 99, 123456] {
+                    let mut rng_new = StdRng::seed_from_u64(seed);
+                    let got = tab.eval_plan(&plan, n, &mut rng_new);
+                    let mut rng_ref = StdRng::seed_from_u64(seed);
+                    let mut tab_ref = tab.clone();
+                    let mut want = String::with_capacity(n);
+                    for q in 0..n {
+                        let b = tab_ref.measure_z(q, &mut rng_ref);
+                        want.push(if b == 1 { '1' } else { '0' });
+                    }
+                    assert_eq!(
+                        got, want,
+                        "plan mismatch n={} circ_seed={} seed={}",
+                        n, circ_seed, seed
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_ghz_plan_structure_and_parities() {
+        // GHZ: only the first measured qubit is random; every later outcome is
+        // a deterministic parity of it - exercises the Determined branch.
+        let n = 8usize;
+        let mut gates: Vec<(String, Vec<usize>)> = vec![("H".into(), vec![0])];
+        for q in 0..(n - 1) {
+            gates.push(("CX".into(), vec![q, q + 1]));
+        }
+        let tab = StabilizerTableau::from_gate_list(n, &gates).unwrap();
+        let plan = tab.build_sample_plan();
+        assert!(matches!(&plan[0], PlanEntry::Random { .. }));
+        for e in plan.iter().skip(1) {
+            assert!(matches!(e, PlanEntry::Determined { .. }));
+        }
+        let counts = tab.sample(300, Some(11));
+        for bs in counts.keys() {
+            assert!(
+                bs == "00000000" || bs == "11111111",
+                "unexpected GHZ string {}",
+                bs
+            );
+        }
+    }
+
+    #[test]
+    fn test_sample_counts_match_manual_measure_loop() {
+        // `sample()` (plan-based) must reproduce the historical per-shot pass
+        // (clone + n × measure_z with the same seeded StdRng) count for count.
+        use rand::SeedableRng;
+        let n = 5usize;
+        let gates: Vec<(String, Vec<usize>)> = vec![
+            ("H".into(), vec![0]),
+            ("CX".into(), vec![0, 1]),
+            ("H".into(), vec![2]),
+            ("CZ".into(), vec![2, 3]),
+            ("H".into(), vec![3]),
+            ("CX".into(), vec![1, 4]),
+            ("S".into(), vec![4]),
+            ("H".into(), vec![4]),
+        ];
+        let tab = StabilizerTableau::from_gate_list(n, &gates).unwrap();
+        let shots = 500usize;
+        let seed = 4242u64;
+        let counts = tab.sample(shots, Some(seed));
+        let mut manual: HashMap<String, usize> = HashMap::new();
+        for shot in 0..shots {
+            let mut rng = StdRng::seed_from_u64(seed.wrapping_add(shot as u64));
+            let mut t = tab.clone();
+            let mut s = String::with_capacity(n);
+            for q in 0..n {
+                let b = t.measure_z(q, &mut rng);
+                s.push(if b == 1 { '1' } else { '0' });
+            }
+            *manual.entry(s).or_insert(0) += 1;
+        }
+        assert_eq!(counts, manual);
     }
 
     #[test]
