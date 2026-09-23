@@ -343,6 +343,55 @@ class TestProbabilitiesPopulated:
         for k, p in sf.run(c, method="density_matrix", shots=0).probabilities.items():
             assert abs(p - abs(sv[int(k, 2)]) ** 2) < 1e-10
 
+    def test_density_matrix_clean_single_evolution(self):
+        """(x) clean DM path evolves once: metadata rho, purity and the state
+        handle must equal the historical two-evolution construction
+        (simulate_dm() + simulate_to_state("density_matrix") + numpy
+        conj/bit-reversal) to machine precision.  Pins the Lane-A
+        optimisation (one native call with empty Kraus lists) against any
+        value or layout drift."""
+        from superfermion.backends.density_matrix import _reverse_qubits_dm
+
+        for n in (4, 6):
+            c = Circuit(n)
+            for q in range(n):
+                c = c.h(q)
+            for q in range(n - 1):
+                c = c.cnot(q, q + 1)
+            c = c.rx(0.37, 0)
+
+            r = sf.run(c, method="density_matrix", shots=0, seed=7)
+            rho_new = np.asarray(r.metadata["density_matrix"])
+
+            dag = c.to_ir()
+            dim = 2 ** n
+            rho_vec = dag.simulate_dm()
+            rho_legacy = _reverse_qubits_dm(rho_vec.reshape(dim, dim).conj(), n)
+            state_legacy = dag.simulate_to_state("density_matrix")
+
+            assert rho_new.shape == (dim, dim)
+            assert np.max(np.abs(rho_new - rho_legacy)) < 1e-12
+            pur_legacy = float(np.vdot(rho_legacy, rho_legacy).real)
+            assert abs(r.metadata["purity"] - pur_legacy) < 1e-12
+            d_state = np.max(
+                np.abs(
+                    np.asarray(r.state.numpy()) - np.asarray(state_legacy.numpy())
+                )
+            )
+            assert d_state < 1e-12
+            # readout-only noise takes the same single-evolution branch and
+            # leaves the quantum state untouched
+            from superfermion.noise import NoiseModel
+
+            nm_ro = NoiseModel()
+            nm_ro.add_readout_error(0.02)
+            r_ro = sf.run(
+                c, method="density_matrix", shots=0, seed=7, noise_model=nm_ro
+            )
+            assert np.allclose(
+                np.asarray(r_ro.metadata["density_matrix"]), rho_new, atol=1e-12
+            )
+
     def test_stabilizer_keys_little_endian(self):
         """(f) stabilizer counts/probabilities keys use the shared LE key
         convention (qubit q = bit q), like statevector/MPS/DM/default.

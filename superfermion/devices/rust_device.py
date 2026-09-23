@@ -70,29 +70,119 @@ def _lsb_to_msb(sv: np.ndarray, n_qubits: int) -> np.ndarray:
     return tensor.reshape(-1)
 
 
-def _call_dm_noisy_state(dag: Any, noise_ops: Any, noise_ops_2q: Any) -> Any:
-    """Native noisy-DM call; forwards 2q channels when present.
+def _dm_binding_call(
+    method_name: str,
+    dag: Any,
+    noise_ops: Any,
+    noise_ops_2q: Any,
+    placement: Any,
+    noise_2q_targets: Any = None,
+) -> Any:
+    """Call a noisy-DM binding method tolerating older call signatures.
 
-    Tolerates builds whose binding predates the optional 2q parameter
-    (TypeError -> documented RuntimeWarning + 1q-only call) so a source
-    checkout never silently drops 2q noise on an older extension.
+    Tries the full ``(noise_ops, noise_2q_ops, placement, noise_2q_targets)``
+    signature first (only when the model actually carries 2q targets), then
+    degrades to ``(noise_ops, noise_2q_ops, placement)``,
+    ``(noise_ops, noise_2q_ops)`` and ``(noise_ops)`` with a documented
+    RuntimeWarning instead of silently changing semantics (2q targets
+    ignored / 2q channels dropped / non-default placement ignored).
+    ``AttributeError`` (method absent on older wheels) propagates so callers
+    can fall back.
     """
-    if noise_ops_2q:
+    fn = getattr(dag, method_name)
+    if noise_2q_targets is not None:
         try:
-            return dag.simulate_dm_noisy_state(noise_ops, noise_ops_2q)
+            return fn(noise_ops, noise_ops_2q, placement, noise_2q_targets)
         except TypeError:
             warnings.warn(
-                "This superfermion build does not support two-qubit noise "
-                "channels on the native density-matrix path; they are ignored "
-                "for this run (rebuild the extension to apply them).",
+                "This superfermion build does not support per-pair "
+                "two-qubit noise targets; the targeted 2q channels are "
+                "applied after every two-qubit gate instead.",
                 RuntimeWarning,
-                stacklevel=3,
+                stacklevel=4,
             )
-    return dag.simulate_dm_noisy_state(noise_ops)
+    try:
+        return fn(noise_ops, noise_ops_2q, placement)
+    except TypeError:
+        pass
+    if placement not in (None, "touch"):
+        warnings.warn(
+            "This superfermion build does not support the noise placement "
+            f"parameter on {method_name}; falling back to per-touch placement "
+            "(channels after every gate touching the qubit).",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+    try:
+        return fn(noise_ops, noise_ops_2q)
+    except TypeError:
+        pass
+    if noise_ops_2q:
+        warnings.warn(
+            "This superfermion build does not support two-qubit noise "
+            "channels on the native density-matrix path; they are ignored "
+            "for this run (rebuild the extension to apply them).",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+    return fn(noise_ops)
+
+
+def _call_dm_noisy_state(
+    dag: Any,
+    noise_ops: Any,
+    noise_ops_2q: Any,
+    placement: Any = None,
+    noise_2q_targets: Any = None,
+) -> Any:
+    """Native noisy-DM call: ``(state_handle, flat public rho)``.
+
+    The handle and the flat row-major rho are two separate 4^n buffers —
+    prefer :func:`_call_dm_noisy_state_view` when the build supports it.
+    """
+    return _dm_binding_call(
+        "simulate_dm_noisy_state",
+        dag,
+        noise_ops,
+        noise_ops_2q,
+        placement,
+        noise_2q_targets,
+    )
+
+
+def _call_dm_noisy_state_view(
+    dag: Any,
+    noise_ops: Any,
+    noise_ops_2q: Any,
+    placement: Any = None,
+    noise_2q_targets: Any = None,
+) -> Any:
+    """Single-buffer noisy-DM call: ``(state_handle, read-only 2-D rho view)``.
+
+    The engine buffer is permuted to the public row-major layout in place
+    and is shared by the handle and the returned array, so only ONE 4^n
+    buffer is live (``simulate_dm_noisy_state`` keeps two — the DM
+    peak-memory multiplier).  The array is read-only: writing it would
+    desynchronise the handle's density matrix.  ``AttributeError`` (binding
+    absent on older wheels) propagates for the caller's fallback ladder.
+    """
+    return _dm_binding_call(
+        "simulate_dm_noisy_state_view",
+        dag,
+        noise_ops,
+        noise_ops_2q,
+        placement,
+        noise_2q_targets,
+    )
 
 
 def _call_dm_noisy_vec(dag: Any, noise_ops: Any, noise_ops_2q: Any) -> Any:
-    """Legacy vec-returning fallback, 2q-aware in the same way."""
+    """Legacy vec-returning fallback, 2q-aware in the same way.
+
+    Predates the placement parameter (per-touch placement is implied); it is
+    only reached when both state bindings are absent, i.e. on wheels old
+    enough that no placement-aware binding exists either.
+    """
     if noise_ops_2q:
         try:
             return dag.simulate_dm_noisy(noise_ops, noise_ops_2q)
@@ -105,6 +195,89 @@ def _call_dm_noisy_vec(dag: Any, noise_ops: Any, noise_ops_2q: Any) -> Any:
                 stacklevel=3,
             )
     return dag.simulate_dm_noisy(noise_ops)
+
+
+def _dm_clean_state_and_rho(dag: Any, n: int) -> Any:
+    """Clean density matrix via ONE native evolution call.
+
+    The historical clean path ran ``simulate_dm()`` *and*
+    ``simulate_to_state("density_matrix")`` (whose binding arm calls
+    ``simulate_dm()`` again), then rebuilt the public rho in numpy via
+    ``conj()`` + ``_reverse_qubits_dm`` — two full evolutions plus two
+    full-size numpy passes. The noisy binding returns the same final state
+    and the public rho (permuted in Rust) from a single evolution; with
+    empty Kraus lists it is the exact clean path.
+
+    Preference order: the single-buffer view binding (handle and rho share
+    one 4^n buffer), then the two-buffer state binding, then the legacy
+    double-evolution path on older wheels.
+
+    Returns ``(state_handle, rho_2d)`` so callers get the same objects the
+    previous code produced.
+    """
+    try:
+        state, rho_view = _call_dm_noisy_state_view(dag, [], [])
+        return state, np.asarray(rho_view, dtype=np.complex128)
+    except AttributeError:
+        pass
+    try:
+        state, rho_flat = _call_dm_noisy_state(dag, [], [])
+    except AttributeError:
+        from superfermion.backends.density_matrix import _reverse_qubits_dm
+
+        rho_vec = dag.simulate_dm()
+        rho = _reverse_qubits_dm(rho_vec.reshape(2**n, 2**n).conj(), n)
+        state = dag.simulate_to_state("density_matrix")
+        return state, rho
+    return state, np.asarray(rho_flat, dtype=np.complex128).reshape(2**n, 2**n)
+
+
+def _dm_noisy_state_and_rho(
+    dag: Any,
+    noise_ops: Any,
+    noise_ops_2q: Any,
+    n: int,
+    placement: Any = None,
+    noise_2q_targets: Any = None,
+) -> Any:
+    """``(state_handle, rho_2d)`` for the noisy DM path.
+
+    Same fallback ladder as :func:`_dm_clean_state_and_rho`: single-buffer
+    view binding, then the two-buffer state binding, then the legacy vec +
+    pure-Python proxy path.
+    """
+    try:
+        state, rho_view = _call_dm_noisy_state_view(
+            dag, noise_ops, noise_ops_2q, placement, noise_2q_targets
+        )
+        return state, np.asarray(rho_view, dtype=np.complex128)
+    except AttributeError:
+        pass
+    try:
+        state, rho_flat = _call_dm_noisy_state(
+            dag, noise_ops, noise_ops_2q, placement, noise_2q_targets
+        )
+        return state, np.asarray(rho_flat, dtype=np.complex128).reshape(2**n, 2**n)
+    except AttributeError:
+        from superfermion.backends.density_matrix import _reverse_qubits_dm
+
+        if noise_2q_targets is not None:
+            warnings.warn(
+                "This superfermion build does not support per-pair "
+                "two-qubit noise targets on the legacy density-matrix "
+                "path; the targeted 2q channels are applied after every "
+                "two-qubit gate instead.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        rho_vec = _call_dm_noisy_vec(dag, noise_ops, noise_ops_2q)
+        rho_le = rho_vec.reshape(2**n, 2**n).conj()
+        rho = _reverse_qubits_dm(rho_le, n)
+        # State handle backed by the noisy rho — no duplicate noiseless
+        # simulate_to_state("density_matrix") call.
+        from superfermion.devices.noisy_dm_state import NoisyDensityMatrixState
+
+        return NoisyDensityMatrixState(rho_le, n), rho
 
 
 def _is_dynamic_circuit(circuit: Circuit) -> bool:
@@ -395,7 +568,6 @@ class RustDevice:
     def _run_density_matrix(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
         """Density matrix simulation — Rust core for both noiseless and noisy paths."""
         from superfermion.backends.density_matrix import (
-            _reverse_qubits_dm,
             _dm_to_probs,
             _dm_keys,
             _sample_dm,
@@ -415,43 +587,43 @@ class RustDevice:
                 if hasattr(noise_model, "to_rust_kraus_ops_2q")
                 else []
             )
+            # Per-pair 2q targets (Qiskit add_quantum_error parity) are only
+            # sent when a channel actually carries one, so builds without the
+            # extra binding argument keep working unchanged.
+            noise_2q_targets = None
+            if getattr(noise_model, "has_targeted_2q", False):
+                noise_2q_targets = noise_model.to_rust_kraus_ops_2q_targets()
             if noise_ops or noise_ops_2q:
                 # Native handle: the noisy DM data stays in Rust and is moved
                 # into the State handle (zero-copy), avoiding the numpy
-                # round-trip (simulate_dm_noisy -> from_dm). Older wheels
-                # without the binding fall back to the vec + Python proxy.
-                try:
-                    # Native handle: the noisy DM data stays in Rust and is
-                    # moved into the State handle; the binding also returns
-                    # the public row-major rho (one in-Rust gather) so the
-                    # Python numpy() + _reverse_qubits_dm round-trip is
-                    # skipped entirely. Optional 2q channels ride along on
-                    # builds that support the parameter (helpers warn +
-                    # degrade instead of silently dropping them otherwise).
-                    state, rho_flat = _call_dm_noisy_state(dag, noise_ops, noise_ops_2q)
-                    rho = np.asarray(rho_flat, dtype=np.complex128).reshape(2**n, 2**n)
-                except AttributeError:
-                    rho_vec = _call_dm_noisy_vec(dag, noise_ops, noise_ops_2q)
-                    rho_le = rho_vec.reshape(2**n, 2**n).conj()
-                    rho = _reverse_qubits_dm(rho_le, n)
-                    # State handle backed by the noisy rho — no duplicate
-                    # noiseless simulate_to_state("density_matrix") call.
-                    from superfermion.devices.noisy_dm_state import NoisyDensityMatrixState
-                    state = NoisyDensityMatrixState(rho_le, n)
+                # round-trip (simulate_dm_noisy -> from_dm). Prefers the
+                # single-buffer view binding (handle and public rho share one
+                # 4^n buffer — halves DM peak memory); older wheels fall back
+                # to the two-buffer state binding, then the vec + Python
+                # proxy. 2q channels, their per-pair targets and the opt-in
+                # gate placement ride along on builds that support them
+                # (helpers warn + degrade instead of silently changing
+                # semantics otherwise).
+                state, rho = _dm_noisy_state_and_rho(
+                    dag,
+                    noise_ops,
+                    noise_ops_2q,
+                    n,
+                    getattr(noise_model, "placement", "touch"),
+                    noise_2q_targets,
+                )
                 noisy_state_ready = True
             else:
                 # Readout-only noise: the quantum state is unchanged, so the
-                # Rust handle is kept (unchanged-path contract).
-                rho_vec = dag.simulate_dm()
-                rho = rho_vec.reshape(2**n, 2**n).conj()
-                rho = _reverse_qubits_dm(rho, n)
-                state = dag.simulate_to_state("density_matrix")
+                # Rust handle is kept (unchanged-path contract). Single
+                # evolution + in-Rust rho gather — see _dm_clean_state_and_rho.
+                state, rho = _dm_clean_state_and_rho(dag, n)
                 noisy_state_ready = False
         else:
-            rho_vec = dag.simulate_dm()
-            rho = rho_vec.reshape(2**n, 2**n).conj()
-            rho = _reverse_qubits_dm(rho, n)
-            state = dag.simulate_to_state("density_matrix")
+            # Clean run: one native evolution (the historical path evolved
+            # twice — simulate_dm() plus simulate_to_state("density_matrix")
+            # — and rebuilt rho in numpy). See _dm_clean_state_and_rho.
+            state, rho = _dm_clean_state_and_rho(dag, n)
             noisy_state_ready = False
 
         probs = _dm_to_probs(rho)

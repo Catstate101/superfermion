@@ -345,7 +345,9 @@ impl PyState {
         rho: numpy::PyReadonlyArray1<num_complex::Complex64>,
         n_qubits: usize,
     ) -> PyResult<Self> {
-        let flat: Vec<num_complex::Complex64> = rho.as_slice()?.to_vec();
+        // Borrow the input array directly: the permutation below only reads
+        // it, and copying it first would keep a second 4^n buffer live.
+        let flat = rho.as_slice()?;
         let dim = 1usize << n_qubits;
         if flat.len() != dim * dim {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -365,8 +367,10 @@ impl PyState {
                 data[ket | (bra << n_qubits)] = flat[ket * dim + bra];
             }
         }
-        let mut dm = sf_ir::dm::DensityMatrixState::new(n_qubits);
-        dm.data = data;
+        // Adopt `data` directly (`DensityMatrixState::new` would allocate
+        // and zero-fill a throwaway 4^n buffer here; same fix as
+        // `simulate_dm_noisy_state`).
+        let dm = sf_ir::dm::DensityMatrixState::from_data(data, n_qubits);
         Ok(PyState::new(Box::new(DensityMatrixStateWrapper::new(
             dm, "cpu",
         ))))
@@ -726,9 +730,10 @@ impl PyQuantumDAG {
                 ))))
             }
             "density_matrix" => {
+                // `simulate_dm` returns a fully-populated 4^n buffer; adopt
+                // it instead of allocating + zero-filling a throwaway one.
                 let dm_vec = self.inner.simulate_dm();
-                let mut dm = sf_ir::dm::DensityMatrixState::new(self.inner.n_qubits);
-                dm.data = dm_vec;
+                let dm = sf_ir::dm::DensityMatrixState::from_data(dm_vec, self.inner.n_qubits);
                 Ok(PyState::new(Box::new(DensityMatrixStateWrapper::new(
                     dm, device,
                 ))))
@@ -939,15 +944,33 @@ impl PyQuantumDAG {
     /// noise_2q_ops: optional list of 2q channels; each channel is a flat
     /// list of 4x4 Kraus matrices (32 floats each), applied sequentially
     /// after every 2-qubit gate (after the fused gate + 1q-noise sweep).
-    #[pyo3(signature = (noise_ops, noise_2q_ops=None))]
+    /// placement: None/"touch" (default) applies each 1q channel after every
+    /// instruction touching its qubit (a 2q gate picks up both qubits' 1q
+    /// channels); "gate" applies 1q channels only after 1q gates — the
+    /// Qiskit-noise-model placement.  See `placement_per_touch`.
+    /// noise_2q_targets: optional per-channel ordered (q0, q1) pair aligned
+    /// with `noise_2q_ops`; `None` entries (or a missing/short list) fire on
+    /// every 2q gate, a pair only on an instruction emitted in that exact
+    /// order (Qiskit `add_quantum_error` semantics).
+    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None))]
     fn simulate_dm_noisy<'py>(
         &self,
         py: Python<'py>,
         noise_ops: Vec<(usize, Vec<f64>)>,
         noise_2q_ops: Option<Vec<Vec<f64>>>,
+        placement: Option<&str>,
+        noise_2q_targets: Option<Vec<Option<(usize, usize)>>>,
     ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        let per_touch = placement_per_touch(placement)?;
         let noise_2q_ops = noise_2q_ops.unwrap_or_default();
-        let data = dm_noisy_core(&self.inner, &noise_ops, &noise_2q_ops);
+        let noise_2q_targets = noise_2q_targets.unwrap_or_default();
+        let data = dm_noisy_core(
+            &self.inner,
+            &noise_ops,
+            &noise_2q_ops,
+            &noise_2q_targets,
+            per_touch,
+        );
         Ok(numpy::PyArray1::from_vec(py, data))
     }
 
@@ -961,18 +984,30 @@ impl PyQuantumDAG {
     /// round-trip.
     // Silence the uninit_vec lint for the deliberately uninitialized public
     // rho buffer inside (pass 1 writes every element before any read).
+    /// Accepts the same `noise_2q_targets` ordered-pair list as
+    /// `simulate_dm_noisy`.
     #[allow(clippy::uninit_vec)]
-    #[pyo3(signature = (noise_ops, noise_2q_ops=None))]
+    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None))]
     fn simulate_dm_noisy_state<'py>(
         &self,
         py: Python<'py>,
         noise_ops: Vec<(usize, Vec<f64>)>,
         noise_2q_ops: Option<Vec<Vec<f64>>>,
+        placement: Option<&str>,
+        noise_2q_targets: Option<Vec<Option<(usize, usize)>>>,
     ) -> PyResult<(PyState, Bound<'py, numpy::PyArray1<num_complex::Complex64>>)> {
         let trace = std::env::var_os("SF_DM_TRACE").is_some();
+        let per_touch = placement_per_touch(placement)?;
         let t_core = std::time::Instant::now();
         let noise_2q_ops = noise_2q_ops.unwrap_or_default();
-        let data = dm_noisy_core(&self.inner, &noise_ops, &noise_2q_ops);
+        let noise_2q_targets = noise_2q_targets.unwrap_or_default();
+        let data = dm_noisy_core(
+            &self.inner,
+            &noise_ops,
+            &noise_2q_ops,
+            &noise_2q_targets,
+            per_touch,
+        );
         let t_core = t_core.elapsed();
         let n = self.inner.n_qubits;
         let dim = 1usize << n;
@@ -1118,9 +1153,111 @@ impl PyQuantumDAG {
             );
         }
         let arr = numpy::PyArray1::from_vec(py, public);
-        let mut dm = sf_ir::dm::DensityMatrixState::new(n);
-        dm.data = data;
+        // Adopt `data` directly: `DensityMatrixState::new(n)` would allocate
+        // and zero-fill a fresh 4^n buffer that is then immediately
+        // overwritten — a throwaway 1 GiB allocation + memset at n=13,
+        // visible as the third full-size buffer in peak RSS while `data`
+        // and `public` are both live.
+        let dm = sf_ir::dm::DensityMatrixState::from_data(data, n);
         let state = PyState::new(Box::new(DensityMatrixStateWrapper::new(dm, "cpu")));
+        Ok((state, arr))
+    }
+
+    /// Noisy density-matrix simulation returning the state handle together
+    /// with a **view of its buffer**, instead of a second permuted copy.
+    ///
+    /// The engine buffer is permuted from the internal layout
+    /// `data[ket | (bra << n)]` to the public row-major big-endian layout
+    /// (`public[r][c] = rho_LE(rev(r), rev(c))`) in place: on flat indices the
+    /// map is `phi(e) = rev(e & (dim-1)) * dim + rev(e >> n)`, an involution,
+    /// so one pass swapping the pairs `(f, phi(f))` with `f < phi(f)`
+    /// realises it with no destination buffer.  The buffer is then
+    /// adopted by the state with the matching layout
+    /// (`from_data_public`) and exposed to Python as a read-only 2-D numpy
+    /// view whose base object is the state — so the handle and
+    /// `metadata["density_matrix"]` share ONE 4^n buffer (peak DM memory
+    /// halves versus `simulate_dm_noisy_state`, whose public rho is a second
+    /// buffer).
+    /// buffer).  Accepts the same `noise_2q_targets` ordered-pair list as
+    /// `simulate_dm_noisy`.
+    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None))]
+    fn simulate_dm_noisy_state_view<'py>(
+        &self,
+        py: Python<'py>,
+        noise_ops: Vec<(usize, Vec<f64>)>,
+        noise_2q_ops: Option<Vec<Vec<f64>>>,
+        placement: Option<&str>,
+        noise_2q_targets: Option<Vec<Option<(usize, usize)>>>,
+    ) -> PyResult<(
+        Bound<'py, PyState>,
+        Bound<'py, numpy::PyArray2<num_complex::Complex64>>,
+    )> {
+        let trace = std::env::var_os("SF_DM_TRACE").is_some();
+        let per_touch = placement_per_touch(placement)?;
+        let noise_2q_ops = noise_2q_ops.unwrap_or_default();
+        let noise_2q_targets = noise_2q_targets.unwrap_or_default();
+        let t_core = std::time::Instant::now();
+        let mut data = dm_noisy_core(
+            &self.inner,
+            &noise_ops,
+            &noise_2q_ops,
+            &noise_2q_targets,
+            per_touch,
+        );
+        let t_core = t_core.elapsed();
+        let n = self.inner.n_qubits;
+        let dim = 1usize << n;
+        debug_assert_eq!(data.len(), dim * dim);
+
+        let t_perm = std::time::Instant::now();
+        {
+            let rev: Vec<usize> = (0..dim).map(|i| rev_n(i, n)).collect();
+            // Raw base address as `usize`: a bare `*mut` is not `Sync`, so the
+            // Rayon closure cannot capture the pointer itself (`usize` can).
+            // SAFETY: the pairs form a partition of the flat index range into
+            // 2-element orbits (phi is an involution), and each orbit is
+            // swapped exactly once — by the iteration owning its lower member
+            // `f` — so no two threads ever write the same element.
+            let base = data.as_mut_ptr() as usize;
+            (0..dim).into_par_iter().for_each(|r| {
+                let ptr = base as *mut num_complex::Complex64;
+                let rr = rev[r];
+                for c in 0..dim {
+                    let f = r * dim + c;
+                    let g = rev[c] * dim + rr;
+                    // Both (f, g) and (g, f) are visited; each pair is
+                    // swapped exactly once, on the smaller-index side.
+                    if f < g {
+                        unsafe { std::ptr::swap(ptr.add(f), ptr.add(g)) };
+                    }
+                }
+            });
+        }
+        let t_perm = t_perm.elapsed();
+        if trace {
+            eprintln!(
+                "SF_DM_TRACE core={:.2}ms perm_inplace={:.2}ms buffers=1",
+                t_core.as_secs_f64() * 1e3,
+                t_perm.as_secs_f64() * 1e3,
+            );
+        }
+
+        let ptr = data.as_ptr();
+        let dm = sf_ir::dm::DensityMatrixState::from_data_public(data, n);
+        let state = Bound::new(
+            py,
+            PyState::new(Box::new(DensityMatrixStateWrapper::new(dm, "cpu"))),
+        )?;
+        // SAFETY: `ptr` points into the buffer owned by `state`, which is set
+        // as the array's base object (numpy keeps it alive); nothing mutates
+        // or reallocates that buffer (no binding evolves an existing handle —
+        // the accessors reject it) and the array is made read-only below.
+        let view: numpy::ndarray::ArrayView2<'_, num_complex::Complex64> =
+            unsafe { numpy::ndarray::ArrayView2::from_shape_ptr((dim, dim), ptr) };
+        let arr =
+            unsafe { numpy::PyArray2::borrow_from_array(&view, state.clone().into_any()) };
+        // Read-only: a writable view could desynchronise the handle's rho.
+        arr.readwrite().make_nonwriteable();
         Ok((state, arr))
     }
 
@@ -1235,12 +1372,34 @@ fn rev_n(x: usize, n: usize) -> usize {
 /// with the pre-parsed 1q Kraus channels, fusing each gate with its
 /// touching channels into single superoperator sweeps (one memory pass
 /// instead of 1 + #touching passes).  Optional 2q channels are applied
-/// sequentially after every 2-qubit gate (after the fused sweep).
+/// sequentially after every 2-qubit gate (after the fused sweep); each
+/// channel may carry an ordered wire pair via `noise_2q_targets` and then
+/// fires only on gates emitted with exactly those qubits in that order.
 /// Returns the interleaved DM vector.
+/// Parse the optional `placement` argument of the noisy-DM bindings.
+///
+/// `None`/`"touch"` (default) — the 1q channels registered for a qubit are
+/// applied after EVERY instruction touching that qubit, so a 2q gate picks up
+/// both qubits' 1q channels (the historical Superfermion placement).
+/// `"gate"` — 1q channels are applied only after 1q gates, which is the
+/// Qiskit noise-model placement (`depolarizing_error(lam, 1)` on 1q
+/// instructions and `(lam, 2)` on 2q instructions).
+fn placement_per_touch(spec: Option<&str>) -> PyResult<bool> {
+    match spec.map(|s| s.to_ascii_lowercase()).as_deref() {
+        None | Some("touch") | Some("touching") | Some("per_touch") => Ok(true),
+        Some("gate") | Some("per_gate") | Some("gate_type") => Ok(false),
+        Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown placement '{other}' (expected 'touch' or 'gate')"
+        ))),
+    }
+}
+
 fn dm_noisy_core(
     dag: &QuantumDAG,
     noise_ops: &[(usize, Vec<f64>)],
     noise_2q_ops: &[Vec<f64>],
+    noise_2q_targets: &[Option<(usize, usize)>],
+    per_touch: bool,
 ) -> Vec<num_complex::Complex64> {
     use sf_ir::dm::DensityMatrixState;
     let trace = std::env::var_os("SF_DM_TRACE").is_some();
@@ -1270,26 +1429,35 @@ fn dm_noisy_core(
         .collect();
 
     // 2q channels: each entry is ONE channel's flat Kraus set (4x4 matrices,
-    // 32 floats each, row-major re/im pairs). Applied in add-order after
-    // every 2q gate, after the fused gate+1q sweep.
-    let kraus_2q: Vec<Vec<nalgebra::DMatrix<num_complex::Complex64>>> = noise_2q_ops
-        .iter()
-        .map(|flat| {
-            flat.chunks(32)
-                .map(|ch| {
-                    let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(4, 4);
-                    for r in 0..4 {
-                        for c in 0..4 {
-                            let base = 2 * (r * 4 + c);
-                            m[(r, c)] =
-                                num_complex::Complex64::new(ch[base], ch[base + 1]);
+    // 32 floats each, row-major re/im pairs) plus its optional ordered wire
+    // pair. Applied in add-order after every 2q gate, after the fused
+    // gate+1q sweep.  A `None` target fires on every 2q gate; a pair fires
+    // only when the instruction's qubits match it in order (Qiskit
+    // `add_quantum_error` parity — an error on (0, 1) is silent on
+    // `cx(1, 0)`).
+    let kraus_2q: Vec<(Option<(usize, usize)>, Vec<nalgebra::DMatrix<num_complex::Complex64>>)> =
+        noise_2q_ops
+            .iter()
+            .enumerate()
+            .map(|(idx, flat)| {
+                let target = noise_2q_targets.get(idx).copied().flatten();
+                let matrices = flat
+                    .chunks(32)
+                    .map(|ch| {
+                        let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(4, 4);
+                        for r in 0..4 {
+                            for c in 0..4 {
+                                let base = 2 * (r * 4 + c);
+                                m[(r, c)] =
+                                    num_complex::Complex64::new(ch[base], ch[base + 1]);
+                            }
                         }
-                    }
-                    m
-                })
-                .collect()
-        })
-        .collect();
+                        m
+                    })
+                    .collect();
+                (target, matrices)
+            })
+            .collect();
 
     // A run of consecutive noisy 1-qubit gates on pairwise-distinct qubits
     // shares one sweep per pair: the two fused 4×4 channel superoperators
@@ -1321,11 +1489,22 @@ fn dm_noisy_core(
         // Collect the Kraus channels that touch this instruction's
         // qubits — when any do, apply gate+noise in ONE fused
         // superoperator sweep (one memory pass instead of 1+N).
-        let touching: Vec<(usize, &[nalgebra::DMatrix<num_complex::Complex64>])> = kraus_channels
-            .iter()
-            .filter(|(noise_qubit, _)| inst.qubits.contains(noise_qubit))
-            .map(|(noise_qubit, kraus_matrices)| (*noise_qubit, kraus_matrices.as_slice()))
-            .collect();
+        //
+        // Placement (`per_touch`): the default applies a qubit's 1q channels
+        // after every instruction touching that qubit (so a 2q gate picks up
+        // both qubits' 1q channels); `placement="gate"` applies them only
+        // after 1q gates — a 2q gate then gets its 2q channels and nothing
+        // else (Qiskit-noise-model parity).
+        let touching: Vec<(usize, &[nalgebra::DMatrix<num_complex::Complex64>])> =
+            if per_touch || inst.qubits.len() == 1 {
+                kraus_channels
+                    .iter()
+                    .filter(|(noise_qubit, _)| inst.qubits.contains(noise_qubit))
+                    .map(|(noise_qubit, kraus_matrices)| (*noise_qubit, kraus_matrices.as_slice()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         // Plain noisy 1-qubit gate → batch (a second disjoint gate joins it
         // in one sweep; a repeat/other instruction flushes first).
@@ -1376,9 +1555,16 @@ fn dm_noisy_core(
         }
         // 2q channels: applied after every 2q (non-measurement) instruction,
         // after the fused gate+1q sweep — add-order sequential composition.
+        // A targeted channel only fires on its exact ordered pair.
         if !kraus_2q.is_empty() && inst.qubits.len() == 2 && !inst.op_type.is_measurement() {
+            let pair = (inst.qubits[0], inst.qubits[1]);
             let t = std::time::Instant::now();
-            for ks in &kraus_2q {
+            for (target, ks) in &kraus_2q {
+                if let Some(want) = target {
+                    if *want != pair {
+                        continue;
+                    }
+                }
                 state.apply_kraus_2q(ks, inst.qubits[0], inst.qubits[1]);
             }
             if trace {
@@ -1397,7 +1583,7 @@ fn dm_noisy_core(
             acc2 * 1e3
         );
     }
-    state.data
+    state.into_data()
 }
 
 // ═══════════════════════════════════════════════════════════
