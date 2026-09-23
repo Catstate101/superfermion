@@ -456,8 +456,10 @@ impl MPSState {
 
             let alpha = Complex64::new(1.0, 0.0);
             // Use Rayon parallelism for large bond dimensions (D >= 64) where
-            // the O(D^3) matmul cost justifies thread-pool overhead.
-            let par = if d_m >= 64 {
+            // the O(D^3) matmul cost justifies thread-pool overhead.  When the
+            // pool has a single thread (the benchmark protocol pins
+            // RAYON_NUM_THREADS=1) the dispatch is pure overhead, so skip it.
+            let par = if d_m >= 64 && rayon::current_num_threads() > 1 {
                 Parallelism::Rayon(0)
             } else {
                 Parallelism::None
@@ -511,17 +513,33 @@ impl MPSState {
         };
 
         let mut m_matrix = nalgebra::DMatrix::zeros(d_l1 * 2, 2 * d_r2);
+        let zero = Complex64::new(0.0, 0.0);
         for s_out in 0..4usize {
             let g0 = gate_eff[(s_out, 0)];
             let g1 = gate_eff[(s_out, 1)];
             let g2 = gate_eff[(s_out, 2)];
             let g3 = gate_eff[(s_out, 3)];
-            let block = &t00 * g0 + &t01 * g1 + &t10 * g2 + &t11 * g3;
+            // Fused accumulation straight into `m_matrix` in the historical
+            // (((t00·g0 + t01·g1) + t10·g2) + t11·g3) element order — the
+            // same association as the old `&t00 * g0 + ...` expression, but
+            // without 7 temporaries x 4 s_out (28 allocations per merge).
+            // Exactly-zero (and -0.0) scalars skip their term: adding
+            // 0·t is identity for finite entries.
             let row_off = (s_out >> 1) * d_l1;
             let col_off = (s_out & 1) * d_r2;
             for l in 0..d_l1 {
                 for r in 0..d_r2 {
-                    m_matrix[(row_off + l, col_off + r)] = block[(l, r)];
+                    let mut v = t00[(l, r)] * g0;
+                    if g1 != zero {
+                        v += t01[(l, r)] * g1;
+                    }
+                    if g2 != zero {
+                        v += t10[(l, r)] * g2;
+                    }
+                    if g3 != zero {
+                        v += t11[(l, r)] * g3;
+                    }
+                    m_matrix[(row_off + l, col_off + r)] = v;
                 }
             }
         }
@@ -1108,37 +1126,43 @@ impl MPSState {
         }
 
         // Final measurement simulation (linear bit-by-bit)
-        // For performance, we pre-calculate bond-bond contractions
         let _master_rng = StdRng::seed_from_u64(_seed);
+        let n = self.n_qubits;
+
+        // Scratch buffers hoisted out of the shot loop (previously one
+        // DVector allocation per shot + one per qubit for the projection).
+        let mut left_vec = DVector::from_vec(vec![Complex64::new(1.0, 0.0)]);
+        let mut next_vec = DVector::zeros(1);
+        let mut key_chars = vec!['0'; n];
 
         for shot_idx in 0..shots {
-            let mut bitstring = String::with_capacity(self.n_qubits);
-            let mut left_vec = DVector::from_vec(vec![Complex64::new(1.0, 0.0)]); // D_L1 = 1
+            // Reset the running boundary vector to the scalar 1 (D_L1 = 1).
+            left_vec.resize_vertically_mut(1, Complex64::new(0.0, 0.0));
+            left_vec[0] = Complex64::new(1.0, 0.0);
 
             // Unique seed for this shot to ensure diversity
             let mut rng = StdRng::seed_from_u64(_seed.wrapping_add(shot_idx as u64));
 
-            for i in 0..self.n_qubits {
+            for i in 0..n {
                 let t = &self.tensors[i];
                 let d_l = t.shape().0 / 2;
                 let d_r = t.shape().1;
 
-                // Compute unnormalized P(0) and P(1) for this qubit
+                // Compute the unnormalized P(0) and P(1) in one pass over the
+                // (r, l) pairs.  Each outcome keeps its exact historical
+                // sum order (r ascending, l ascending inside), so the drawn
+                // bits are bit-for-bit identical to the old two-loop form.
                 let mut prob0 = 0.0_f64;
-                for r in 0..d_r {
-                    let mut sum = Complex64::new(0.0, 0.0);
-                    for l in 0..d_l {
-                        sum += left_vec[l] * t[(l, r)];
-                    }
-                    prob0 += sum.norm_sqr();
-                }
                 let mut prob1 = 0.0_f64;
                 for r in 0..d_r {
-                    let mut sum = Complex64::new(0.0, 0.0);
+                    let mut sum0 = Complex64::new(0.0, 0.0);
+                    let mut sum1 = Complex64::new(0.0, 0.0);
                     for l in 0..d_l {
-                        sum += left_vec[l] * t[(l + d_l, r)];
+                        sum0 += left_vec[l] * t[(l, r)];
+                        sum1 += left_vec[l] * t[(l + d_l, r)];
                     }
-                    prob1 += sum.norm_sqr();
+                    prob0 += sum0.norm_sqr();
+                    prob1 += sum1.norm_sqr();
                 }
 
                 // Normalize: P(0) = p0 / (p0 + p1)
@@ -1147,11 +1171,12 @@ impl MPSState {
 
                 let random_val: f64 = rng.gen();
                 let b = if random_val < p0_normalized { '0' } else { '1' };
-                bitstring.push(b);
+                key_chars[n - 1 - i] = b;
 
-                // Update left_vec (projection)
+                // Update left_vec (projection) into the reused scratch buffer
+                // (every element 0..d_r is overwritten, no zero-fill needed).
                 let p_idx = if b == '0' { 0 } else { 1 };
-                let mut next_vec = DVector::zeros(d_r);
+                next_vec.resize_vertically_mut(d_r, Complex64::new(0.0, 0.0));
                 for r in 0..d_r {
                     let mut sum = Complex64::new(0.0, 0.0);
                     for l in 0..d_l {
@@ -1167,11 +1192,11 @@ impl MPSState {
                         *elem *= inv_norm;
                     }
                 }
-                left_vec = next_vec;
+                std::mem::swap(&mut left_vec, &mut next_vec);
             }
             // Emit bitstrings q0-last (qubit 0 = rightmost char), matching the
             // statevector backend's sample() convention.
-            let key: String = bitstring.chars().rev().collect();
+            let key: String = key_chars.iter().collect();
             *counts.entry(key).or_insert(0) += 1;
         }
         counts
