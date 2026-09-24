@@ -1254,8 +1254,7 @@ impl PyQuantumDAG {
         // the accessors reject it) and the array is made read-only below.
         let view: numpy::ndarray::ArrayView2<'_, num_complex::Complex64> =
             unsafe { numpy::ndarray::ArrayView2::from_shape_ptr((dim, dim), ptr) };
-        let arr =
-            unsafe { numpy::PyArray2::borrow_from_array(&view, state.clone().into_any()) };
+        let arr = unsafe { numpy::PyArray2::borrow_from_array(&view, state.clone().into_any()) };
         // Read-only: a writable view could desynchronise the handle's rho.
         arr.readwrite().make_nonwriteable();
         Ok((state, arr))
@@ -1435,29 +1434,30 @@ fn dm_noisy_core(
     // only when the instruction's qubits match it in order (Qiskit
     // `add_quantum_error` parity — an error on (0, 1) is silent on
     // `cx(1, 0)`).
-    let kraus_2q: Vec<(Option<(usize, usize)>, Vec<nalgebra::DMatrix<num_complex::Complex64>>)> =
-        noise_2q_ops
-            .iter()
-            .enumerate()
-            .map(|(idx, flat)| {
-                let target = noise_2q_targets.get(idx).copied().flatten();
-                let matrices = flat
-                    .chunks(32)
-                    .map(|ch| {
-                        let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(4, 4);
-                        for r in 0..4 {
-                            for c in 0..4 {
-                                let base = 2 * (r * 4 + c);
-                                m[(r, c)] =
-                                    num_complex::Complex64::new(ch[base], ch[base + 1]);
-                            }
+    let kraus_2q: Vec<(
+        Option<(usize, usize)>,
+        Vec<nalgebra::DMatrix<num_complex::Complex64>>,
+    )> = noise_2q_ops
+        .iter()
+        .enumerate()
+        .map(|(idx, flat)| {
+            let target = noise_2q_targets.get(idx).copied().flatten();
+            let matrices = flat
+                .chunks(32)
+                .map(|ch| {
+                    let mut m = nalgebra::DMatrix::<num_complex::Complex64>::zeros(4, 4);
+                    for r in 0..4 {
+                        for c in 0..4 {
+                            let base = 2 * (r * 4 + c);
+                            m[(r, c)] = num_complex::Complex64::new(ch[base], ch[base + 1]);
                         }
-                        m
-                    })
-                    .collect();
-                (target, matrices)
-            })
-            .collect();
+                    }
+                    m
+                })
+                .collect();
+            (target, matrices)
+        })
+        .collect();
 
     // A run of consecutive noisy 1-qubit gates on pairwise-distinct qubits
     // shares one sweep per pair: the two fused 4×4 channel superoperators

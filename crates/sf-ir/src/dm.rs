@@ -161,6 +161,7 @@ impl DensityMatrixState {
 
     /// Internal: apply a gate to the vectorized statevector representation
     /// (in-place, single fused pass — no allocation).
+    #[allow(dead_code)] // internal helper retained from the pre-fusion path
     fn apply_1q_gate(&mut self, u: &DMatrix<Complex64>, q: usize) {
         let m = [[u[(0, 0)], u[(0, 1)]], [u[(1, 0)], u[(1, 1)]]];
         crate::simd::dm_1q_fused(&mut self.data, q, m);
@@ -168,6 +169,7 @@ impl DensityMatrixState {
 
     /// Internal: 2q gate on the vectorized state (in-place, single fused
     /// pass — no allocation).
+    #[allow(dead_code)] // internal helper retained from the pre-fusion path
     fn apply_2q_gate(&mut self, u: &DMatrix<Complex64>, q0: usize, q1: usize) {
         let mut g = [[Complex64::new(0.0, 0.0); 4]; 4];
         for r in 0..4 {
@@ -244,8 +246,7 @@ impl DensityMatrixState {
                     let kk = k[(ket, ketp)];
                     for bra in 0..4 {
                         for brap in 0..4 {
-                            m[4 * ket + bra][4 * ketp + brap] +=
-                                kk * k[(bra, brap)].conj();
+                            m[4 * ket + bra][4 * ketp + brap] += kk * k[(bra, brap)].conj();
                         }
                     }
                 }
@@ -257,12 +258,7 @@ impl DensityMatrixState {
     /// Apply a 2-qubit Kraus channel ρ → Σ_c K_c ρ K_c† in ONE fused sweep
     /// over the joint 16-blocks (the same kernel the fused gate+noise 2q
     /// path uses).
-    pub fn apply_kraus_2q(
-        &mut self,
-        kraus_set: &[DMatrix<Complex64>],
-        q0: usize,
-        q1: usize,
-    ) {
+    pub fn apply_kraus_2q(&mut self, kraus_set: &[DMatrix<Complex64>], q0: usize, q1: usize) {
         self.assert_engine("apply_kraus_2q");
         let m = Self::kraus_superop_2q(kraus_set);
         crate::simd::dm_super_2q(&mut self.data, q0, q1, &m);
@@ -270,6 +266,7 @@ impl DensityMatrixState {
 
     /// Internal: in-place single-axis transform on the vectorized state
     /// (now a thin wrapper over the fused kernel — no allocation).
+    #[allow(dead_code)] // internal helper retained from the pre-fusion path
     fn apply_1q_gate_to_vec(&mut self, u: &DMatrix<Complex64>, q: usize) {
         self.apply_1q_gate(u, q);
     }

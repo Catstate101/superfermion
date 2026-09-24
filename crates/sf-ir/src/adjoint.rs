@@ -69,8 +69,9 @@ thread_local! {
     /// n >= 16 (identical fwd time on consecutive calls).  Complex64 is
     /// Copy with no Drop, so the take/put-back round trip is plain memory
     /// ownership.
+    #[allow(clippy::missing_const_for_thread_local)] // init already const; clippy 1.93 false positive
     static ADJ_CACHE_BUF: std::cell::RefCell<Vec<Complex64>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn apply_1q_inplace(
@@ -282,7 +283,7 @@ fn gen_dot(
                     // Chunked partials, combined sequentially: summands are
                     // identical to the serial path, the grouping is not
                     // (~1 ulp).
-                    let n_chunks = (dim + chunk - 1) / chunk;
+                    let n_chunks = dim.div_ceil(chunk);
                     let partials: Vec<Complex64> = (0..n_chunks)
                         .into_par_iter()
                         .map(|ci| {
@@ -446,7 +447,7 @@ pub fn adjoint_grad(
     let mut t_fwd = 0.0f64;
     let mut t_phi = 0.0f64;
     let mut t_ip_prep = 0.0f64;
-    let mut t_ip_pauli = 0.0f64;
+    let t_ip_pauli = 0.0f64;
     let mut t_ip_dot = 0.0f64;
     let mut t_bw_psi = 0.0f64;
     let mut t_bw_phi = 0.0f64;

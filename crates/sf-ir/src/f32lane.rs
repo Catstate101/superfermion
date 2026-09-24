@@ -776,7 +776,7 @@ fn inplace_1q_general(
     if use_par {
         // Chunks aligned to the pair-block size so SIMD blocks never
         // straddle a chunk boundary.
-        let chunk = (((state.len() / 16).max(1024) + block - 1) / block) * block;
+        let chunk = (state.len() / 16).max(1024).div_ceil(block) * block;
         state
             .par_chunks_mut(chunk)
             .for_each(|s| pair_pass(s, stride, m));
@@ -1289,7 +1289,7 @@ fn apply_perm(state: &[Complex32], out: &mut [Complex32], plan: &PermPlan, use_p
     if use_par {
         let lanes = rayon::current_num_threads().max(1);
         let chunk = ((dim / (lanes * 8)).max(1 << 13) + 7) & !7usize;
-        let n_ranges = (dim + chunk - 1) / chunk;
+        let n_ranges = dim.div_ceil(chunk);
         let src = SendPtr32(state.as_ptr() as *mut Complex32);
         let dst = SendPtr32(out.as_mut_ptr());
         (0..n_ranges).into_par_iter().for_each(|c| {
@@ -1315,6 +1315,7 @@ fn apply_perm(state: &[Complex32], out: &mut [Complex32], plan: &PermPlan, use_p
 // repeated simulations at the same size never re-zero the destination
 // (same pooling strategy as the f64 lane).
 std::thread_local! {
+    #[allow(clippy::missing_const_for_thread_local)] // init already const; clippy 1.93 false positive
     static F32_PERM_SCRATCH: std::cell::RefCell<Vec<Complex32>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }

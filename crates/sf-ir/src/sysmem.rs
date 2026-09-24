@@ -45,8 +45,10 @@ pub fn rss_bytes() -> usize {
             cb: u32,
         ) -> i32;
     }
-    let mut c = ProcessMemoryCounters::default();
-    c.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+    let mut c = ProcessMemoryCounters {
+        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        ..Default::default()
+    };
     let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
     if ok != 0 {
         c.working_set_size

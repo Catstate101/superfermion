@@ -864,8 +864,7 @@ impl MPSState {
                     let sj = Complex64::new(snorm, 0.0);
                     for q_out in 0..2usize {
                         for rr in 0..d_r2 {
-                            t2[(q_out * k + j, rr)] =
-                                sj * v.read(q_out * d_r2 + rr, ci).conj();
+                            t2[(q_out * k + j, rr)] = sj * v.read(q_out * d_r2 + rr, ci).conj();
                         }
                     }
                 }
@@ -922,9 +921,7 @@ impl MPSState {
                     (c, nrm_sq)
                 })
                 .collect();
-            meas.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            meas.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let mut sel2: Vec<usize> = Vec::with_capacity(std::cmp::min(bond_dim, r));
             for &(c, nrm_sq) in &meas {
                 if sel2.len() >= bond_dim {

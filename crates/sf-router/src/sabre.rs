@@ -503,8 +503,13 @@ impl<'a> SabreRouter<'a> {
         initial_layout: &QubitMapping,
     ) -> Result<(QuantumDAG, QubitMapping), RouterError> {
         let gates = self.build_gate_graph(dag);
-        let (routed, mapping, _) =
-            self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits, usize::MAX)?;
+        let (routed, mapping, _) = self.forward_pass(
+            &gates,
+            initial_layout,
+            dag.n_qubits,
+            dag.n_cbits,
+            usize::MAX,
+        )?;
         Ok((routed, mapping))
     }
 
@@ -518,13 +523,23 @@ impl<'a> SabreRouter<'a> {
         let gates = self.build_gate_graph(dag);
 
         // Forward pass
-        let (fwd_dag, fwd_mapping, fwd_swaps) =
-            self.forward_pass(&gates, initial_layout, dag.n_qubits, dag.n_cbits, usize::MAX)?;
+        let (fwd_dag, fwd_mapping, fwd_swaps) = self.forward_pass(
+            &gates,
+            initial_layout,
+            dag.n_qubits,
+            dag.n_cbits,
+            usize::MAX,
+        )?;
 
         // Build reversed gate list for backward pass
         let rev_gates = self.reverse_gates(&gates);
-        let (bwd_dag, _bwd_mapping, bwd_swaps) =
-            self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits, usize::MAX)?;
+        let (bwd_dag, _bwd_mapping, bwd_swaps) = self.forward_pass(
+            &rev_gates,
+            &fwd_mapping,
+            dag.n_qubits,
+            dag.n_cbits,
+            usize::MAX,
+        )?;
 
         // Pick the result with fewer SWAPs
         if bwd_swaps < fwd_swaps {
@@ -624,8 +639,13 @@ impl<'a> SabreRouter<'a> {
             // Backward using forward's final layout. Only useful if it beats
             // the forward pass (strict `<` below), so cap it at `fwd_swaps`.
             let bwd_limit = fwd_swaps.min(cap.saturating_sub(spent)).max(1);
-            let bwd =
-                self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits, bwd_limit);
+            let bwd = self.forward_pass(
+                &rev_gates,
+                &fwd_mapping,
+                dag.n_qubits,
+                dag.n_cbits,
+                bwd_limit,
+            );
 
             let (result_dag, result_mapping, result_swaps) = match bwd {
                 Ok((bwd_dag, bwd_mapping, bwd_swaps)) => {
@@ -662,8 +682,13 @@ impl<'a> SabreRouter<'a> {
         let layout = QubitMapping::identity(n_physical);
         let (fwd_dag, fwd_mapping, fwd_swaps) =
             self.forward_pass(&gates, &layout, dag.n_qubits, dag.n_cbits, usize::MAX)?;
-        let bwd =
-            self.forward_pass(&rev_gates, &fwd_mapping, dag.n_qubits, dag.n_cbits, fwd_swaps);
+        let bwd = self.forward_pass(
+            &rev_gates,
+            &fwd_mapping,
+            dag.n_qubits,
+            dag.n_cbits,
+            fwd_swaps,
+        );
         Ok(match bwd {
             Ok((bwd_dag, bwd_mapping, bwd_swaps)) if bwd_swaps < fwd_swaps => {
                 (bwd_dag, bwd_mapping)

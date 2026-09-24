@@ -488,10 +488,8 @@ impl QuantumDAG {
                 _ => {
                     // Unsupported arity: keep the historical path (and its
                     // behavior) for exotic multi-qubit unitaries.
-                    let mut dm = crate::dm::DensityMatrixState::from_data(
-                        std::mem::take(&mut data),
-                        n,
-                    );
+                    let mut dm =
+                        crate::dm::DensityMatrixState::from_data(std::mem::take(&mut data), n);
                     dm.apply_unitary(&u, &op.qubits);
                     data = dm.into_data();
                 }
@@ -1465,6 +1463,7 @@ std::thread_local! {
     /// Per-thread pool for the out-of-place permutation destination buffer
     /// (kept at the largest size seen), so repeated simulations reuse one
     /// allocation instead of allocating + zeroing 16·4^n bytes per call.
+    #[allow(clippy::missing_const_for_thread_local)] // init already const; clippy 1.93 false positive
     static PERM_SCRATCH: std::cell::RefCell<Vec<num_complex::Complex64>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -1546,7 +1545,7 @@ pub fn apply_2x2_kernel_f64(
 fn apply_dm_1q(
     data: &mut [num_complex::Complex64],
     q: usize,
-    n: usize,
+    _n: usize,
     u: &nalgebra::DMatrix<num_complex::Complex64>,
 ) {
     // Fused single-pass kernel: the ket (bit q) and bra (bit n+q) transforms
@@ -1563,7 +1562,7 @@ fn apply_dm_2q(
     data: &mut [num_complex::Complex64],
     q0: usize,
     q1: usize,
-    n: usize,
+    _n: usize,
     u: &nalgebra::DMatrix<num_complex::Complex64>,
 ) {
     // Fused single-pass kernel over the closed 16-blocks: ket 4×4 then bra
@@ -1690,7 +1689,7 @@ fn inplace_1q_general(
     if use_par {
         // Chunks aligned to the pair-block size so SIMD blocks never straddle
         // a chunk boundary.
-        let chunk = (((state.len() / 16).max(1024) + block - 1) / block) * block;
+        let chunk = (state.len() / 16).max(1024).div_ceil(block) * block;
         state
             .par_chunks_mut(chunk)
             .for_each(|s| crate::simd::pair_pass(s, stride, m));
@@ -2525,10 +2524,7 @@ fn fold_diags_into_fused(insts: Vec<SimInst>) -> Vec<SimInst> {
         }
 
         // ── Repair: re-partition the forward run so spanning pairs fit ───
-        let mut fwd_blocks: Vec<SimInst> = insts[fwd_start..fwd_start + fwd_len]
-            .iter()
-            .cloned()
-            .collect();
+        let mut fwd_blocks: Vec<SimInst> = insts[fwd_start..fwd_start + fwd_len].to_vec();
         let any_repair = slots.iter().any(|s| matches!(s, Some(Slot::Repair)));
         if any_repair {
             let wanted: Vec<(usize, usize)> = slots
@@ -2936,7 +2932,7 @@ fn build_perm_gather_tables(cols: &[usize]) -> Vec<usize> {
     // Fold byte chunks of the destination index: entry b holds the XOR of
     // the single-bit masks for the set bits of b (DP on the lowest set
     // bit). Bits ≥ n never occur in a valid `d`, so they read as 0.
-    let n_chunks = (n + 7) / 8;
+    let n_chunks = n.div_ceil(8);
     let mut tables = vec![0usize; n_chunks * 256];
     for c in 0..n_chunks {
         for b in 1usize..256 {
@@ -3105,7 +3101,7 @@ fn apply_perm_run(
         // Contiguous destination ranges, whole cache lines so no line is
         // written by two workers.
         let chunk = ((dim / (lanes * 8)).max(1 << 13) + 7) & !7usize;
-        let n_ranges = (dim + chunk - 1) / chunk;
+        let n_ranges = dim.div_ceil(chunk);
         (0..n_ranges).into_par_iter().for_each(|c| {
             let start = c * chunk;
             let end = (start + chunk).min(dim);
@@ -3812,7 +3808,7 @@ fn apply_phase_run_fast(
         for k in 1..len {
             let idx = off + (k ^ (k >> 1));
             let q = (k as u64).trailing_zeros() as usize;
-            let bq = ((idx >> q) & 1) as usize;
+            let bq = (idx >> q) & 1;
             let zq = fast.z[q];
             let cols = &fast.col[q];
             let mut mask = 0usize;

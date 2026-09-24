@@ -642,9 +642,7 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
     fn probabilities(&self) -> Result<Vec<f64>, MethodError> {
         let n = self.inner.n_qubits;
         let dim = 1 << n;
-        Ok((0..dim)
-            .map(|i| self.inner.at(i, i).re.max(0.0))
-            .collect())
+        Ok((0..dim).map(|i| self.inner.at(i, i).re.max(0.0)).collect())
     }
 
     fn partial_trace(
