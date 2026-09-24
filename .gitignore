@@ -77,6 +77,9 @@ Thumbs.db
 !website/app/icon.png
 !website/app/apple-icon.png
 
+# Bench figure snapshots (extracted executed-notebook outputs, committed on purpose)
+!notebooks/figures/*.png
+
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
