@@ -386,6 +386,117 @@ impl DensityMatrixState {
             }
         }
     }
+
+    /// Apply a 2q unitary U followed by the touching 1q channels AND, in
+    /// add-order, the 2q channels on the same qubit pair — ALL in one fused
+    /// superoperator sweep over the joint 16-blocks. The combined Kraus set
+    /// is K'' = K_pair,m · … · K_pair,1 · (K_b ⊗ K_a) · U, which is exact:
+    /// sequential channel composition expands to pairwise Kraus products,
+    /// Σ_c K_c (Σ_d K_d ρ K_d†) K_c† = Σ_{c,d} (K_c K_d) ρ (K_c K_d)† —
+    /// the same identity the fused gate+1q path uses. One memory pass
+    /// instead of 1 + m passes (one per firing 2q channel).
+    pub fn apply_gate_noise_fused_2q(
+        &mut self,
+        u: &DMatrix<Complex64>,
+        qubits: &[usize],
+        noise: &[(usize, &[DMatrix<Complex64>])],
+        channels_2q: &[&[DMatrix<Complex64>]],
+    ) {
+        self.assert_engine("apply_gate_noise_fused_2q");
+        debug_assert_eq!(qubits.len(), 2);
+        let (q0, q1) = (qubits[0], qubits[1]);
+        // Split the touching channels by qubit (at most one channel per
+        // qubit comes from the noise model) — same convention as
+        // `apply_gate_noise_fused`.
+        let mut on_q0: Option<&[DMatrix<Complex64>]> = None;
+        let mut on_q1: Option<&[DMatrix<Complex64>]> = None;
+        for (nq, ks) in noise {
+            if *nq == q0 {
+                on_q0 = Some(ks);
+            } else if *nq == q1 {
+                on_q1 = Some(ks);
+            }
+        }
+        // Lift a 2×2 Kraus op onto the 4-dim ket space.
+        // Row/col = 2·bit(q0) + bit(q1):
+        //   lift_q0 = K ⊗ I₂   (acts on the q0 bit)
+        //   lift_q1 = I₂ ⊗ K   (acts on the q1 bit)
+        fn lift_q0(k: &DMatrix<Complex64>) -> DMatrix<Complex64> {
+            let mut l = DMatrix::<Complex64>::zeros(4, 4);
+            for r in 0..2 {
+                for rp in 0..2 {
+                    for s in 0..2 {
+                        l[(2 * r + s, 2 * rp + s)] = k[(r, rp)];
+                    }
+                }
+            }
+            l
+        }
+        fn lift_q1(k: &DMatrix<Complex64>) -> DMatrix<Complex64> {
+            let mut l = DMatrix::<Complex64>::zeros(4, 4);
+            for r in 0..2 {
+                for rp in 0..2 {
+                    for s in 0..2 {
+                        l[(2 * s + r, 2 * s + rp)] = k[(r, rp)];
+                    }
+                }
+            }
+            l
+        }
+        // Base Kraus set for gate-then-1q-noise: K' = K_b · K_a · U over all
+        // channel pairs (empty side = identity); with no touching 1q
+        // channels the set is {U}.
+        let mut combos: Vec<DMatrix<Complex64>> = Vec::with_capacity(16);
+        match (on_q0, on_q1) {
+            (Some(a), Some(b)) => {
+                for ka in a {
+                    for kb in b {
+                        combos.push(lift_q1(kb) * lift_q0(ka) * u);
+                    }
+                }
+            }
+            (Some(a), None) => {
+                for ka in a {
+                    combos.push(lift_q0(ka) * u);
+                }
+            }
+            (None, Some(b)) => {
+                for kb in b {
+                    combos.push(lift_q1(kb) * u);
+                }
+            }
+            (None, None) => combos.push(u.clone()),
+        }
+        // Sequential composition of the pair channels in add-order (the
+        // order the sequential call site applies them): each channel's
+        // Kraus set multiplies the accumulated composite from the left.
+        for ks in channels_2q {
+            let mut next: Vec<DMatrix<Complex64>> = Vec::with_capacity(combos.len() * ks.len());
+            for kc in ks.iter() {
+                for kp in &combos {
+                    next.push(kc * kp);
+                }
+            }
+            combos = next;
+        }
+        // M = Σ_c (K''_c ⊗ K''_c*) — the 16×16 block superoperator
+        // (row = 4·ket + bra, col = 4·ket' + bra').
+        let mut m = [[Complex64::new(0.0, 0.0); 16]; 16];
+        for kp in &combos {
+            for ket in 0..4 {
+                for bra in 0..4 {
+                    let row = 4 * ket + bra;
+                    for ketp in 0..4 {
+                        for brap in 0..4 {
+                            let col = 4 * ketp + brap;
+                            m[row][col] += kp[(ket, ketp)] * kp[(bra, brap)].conj();
+                        }
+                    }
+                }
+            }
+        }
+        crate::simd::dm_super_2q(&mut self.data, q0, q1, &m);
+    }
 }
 
 #[cfg(test)]
@@ -628,5 +739,127 @@ mod tests {
         let tr = dm_trace(&channel);
         assert_relative_eq!(tr.re, 1.0, epsilon = 1e-10);
         assert!(tr.im.abs() < 1e-10);
+    }
+
+    /// Valid trace-preserving 2q channel with 4 Kraus ops
+    /// {√(1−3p/4) I⊗I, √(p/4) X⊗X, √(p/4) Y⊗Y, √(p/4) Z⊗Z}, built in the
+    /// bit-packed embedding row = 2·bit(q0) + bit(q1) that `kraus_superop_2q`
+    /// and `dm_super_2q` use.
+    fn depolarizing_2q_kraus(p: f64) -> Vec<DMatrix<Complex64>> {
+        fn kron_packed(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> DMatrix<Complex64> {
+            let mut m = DMatrix::<Complex64>::zeros(4, 4);
+            for a1 in 0..2 {
+                for a2 in 0..2 {
+                    for b1 in 0..2 {
+                        for b2 in 0..2 {
+                            m[(2 * a1 + a2, 2 * b1 + b2)] = a[a1][b1] * b[a2][b2];
+                        }
+                    }
+                }
+            }
+            m
+        }
+        let z = Complex64::new(0.0, 0.0);
+        let o = Complex64::new(1.0, 0.0);
+        let i = Complex64::i();
+        let i2 = [[o, z], [z, o]];
+        let x2 = [[z, o], [o, z]];
+        let y2 = [[z, -i], [i, z]];
+        let z2 = [[o, z], [z, -o]];
+        let s0 = (1.0 - 3.0 * p / 4.0).sqrt();
+        let sp = (p / 4.0).sqrt();
+        vec![
+            kron_packed(&i2, &i2) * Complex64::new(s0, 0.0),
+            kron_packed(&x2, &x2) * Complex64::new(sp, 0.0),
+            kron_packed(&y2, &y2) * Complex64::new(sp, 0.0),
+            kron_packed(&z2, &z2) * Complex64::new(sp, 0.0),
+        ]
+    }
+
+    #[test]
+    fn test_fused_gate_noise_pair_channel_matches_sequential() {
+        let mut fused = DensityMatrixState::new(3);
+        let mut seq = DensityMatrixState::new(3);
+        let h = OpType::H.to_matrix();
+        let cnot = OpType::CNOT.to_matrix();
+        let dep_a = depolarizing_kraus(0.05);
+        let dep_b = depolarizing_kraus(0.07);
+        let pair = depolarizing_2q_kraus(0.06);
+
+        for st in [&mut fused, &mut seq] {
+            st.apply_unitary(&h, &[0]);
+            st.apply_unitary(
+                &OpType::Rx(crate::ops::Parameter::Const(0.4)).to_matrix(),
+                &[1],
+            );
+        }
+
+        // Sequential: cnot, both 1q channels, then the 2q channel.
+        seq.apply_unitary(&cnot, &[1, 2]);
+        seq.apply_kraus(&dep_a, 1);
+        seq.apply_kraus(&dep_b, 2);
+        seq.apply_kraus_2q(&pair, 1, 2);
+        // Fused: one sweep over the combined Kraus set.
+        fused.apply_gate_noise_fused_2q(
+            &cnot,
+            &[1, 2],
+            &[(1, dep_a.as_slice()), (2, dep_b.as_slice())],
+            &[pair.as_slice()],
+        );
+
+        for i in 0..(1usize << 6) {
+            assert_relative_eq!(fused.data[i].re, seq.data[i].re, epsilon = 1e-12);
+            assert_relative_eq!(fused.data[i].im, seq.data[i].im, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_fused_gate_noise_pair_channel_only_matches_sequential() {
+        let mut fused = DensityMatrixState::new(3);
+        let mut seq = DensityMatrixState::new(3);
+        let h = OpType::H.to_matrix();
+        let cnot = OpType::CNOT.to_matrix();
+        let pair = depolarizing_2q_kraus(0.08);
+
+        for st in [&mut fused, &mut seq] {
+            st.apply_unitary(&h, &[0]);
+        }
+
+        seq.apply_unitary(&cnot, &[0, 2]);
+        seq.apply_kraus_2q(&pair, 0, 2);
+        fused.apply_gate_noise_fused_2q(&cnot, &[0, 2], &[], &[pair.as_slice()]);
+
+        for i in 0..(1usize << 6) {
+            assert_relative_eq!(fused.data[i].re, seq.data[i].re, epsilon = 1e-12);
+            assert_relative_eq!(fused.data[i].im, seq.data[i].im, epsilon = 1e-12);
+        }
+        let tr = dm_trace(&fused);
+        assert_relative_eq!(tr.re, 1.0, epsilon = 1e-10);
+        assert!(tr.im.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_fused_gate_noise_two_pair_channels_match_sequential() {
+        let mut fused = DensityMatrixState::new(3);
+        let mut seq = DensityMatrixState::new(3);
+        let h = OpType::H.to_matrix();
+        let cnot = OpType::CNOT.to_matrix();
+        let ch1 = depolarizing_2q_kraus(0.04);
+        let ch2 = depolarizing_2q_kraus(0.09);
+
+        for st in [&mut fused, &mut seq] {
+            st.apply_unitary(&h, &[0]);
+        }
+
+        // Sequential add-order: ch1 then ch2.
+        seq.apply_unitary(&cnot, &[1, 2]);
+        seq.apply_kraus_2q(&ch1, 1, 2);
+        seq.apply_kraus_2q(&ch2, 1, 2);
+        fused.apply_gate_noise_fused_2q(&cnot, &[1, 2], &[], &[ch1.as_slice(), ch2.as_slice()]);
+
+        for i in 0..(1usize << 6) {
+            assert_relative_eq!(fused.data[i].re, seq.data[i].re, epsilon = 1e-12);
+            assert_relative_eq!(fused.data[i].im, seq.data[i].im, epsilon = 1e-12);
+        }
     }
 }
