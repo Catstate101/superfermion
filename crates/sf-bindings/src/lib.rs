@@ -1532,6 +1532,32 @@ fn dm_noisy_core(
             acc1 += dt;
         }
 
+        // 2q channels fused into the same sweep as the gate (+ its touching
+        // 1q channels): when pair channels fire on this instruction, the
+        // combined Kraus set K'' = K_pair,m · … · K_pair,1 · (K_b ⊗ K_a) · U
+        // is applied in ONE memory pass instead of one pass per channel
+        // after the gate+1q sweep. The sequential path below stays intact
+        // for every instruction the fused route does not take.
+        if !kraus_2q.is_empty() && inst.qubits.len() == 2 && !inst.op_type.is_measurement() {
+            let pair = (inst.qubits[0], inst.qubits[1]);
+            let fired: Vec<&[nalgebra::DMatrix<num_complex::Complex64>]> = kraus_2q
+                .iter()
+                .filter(|(target, _)| match target {
+                    Some(want) => *want == pair,
+                    None => true,
+                })
+                .map(|(_, ks)| ks.as_slice())
+                .collect();
+            if !fired.is_empty() {
+                let t = std::time::Instant::now();
+                state.apply_gate_noise_fused_2q(&u, &inst.qubits, &touching, &fired);
+                if trace {
+                    acc2 += t.elapsed().as_secs_f64();
+                }
+                continue;
+            }
+        }
+
         if touching.is_empty() {
             let t = std::time::Instant::now();
             state.apply_unitary(&u, &inst.qubits);
