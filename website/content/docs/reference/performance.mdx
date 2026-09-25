@@ -1,22 +1,15 @@
 ---
 title: "Performance Benchmarks"
-description: "Benchmark results: MPS 21–33x vs Qiskit Aer, adjoint gradient up to 800x vs PennyLane."
+description: "Benchmark results: MPS 23–33x vs Qiskit Aer on GHZ, adjoint gradients 1.5–800x vs PennyLane for small qubit counts."
 ---
 
-Superfermion's Rust simulation core delivers significant speedups over popular quantum computing frameworks. All benchmarks are reproducible via the `run_benchpress.py` script.
+Superfermion's Rust simulation core delivers significant speedups over popular
+quantum computing frameworks in specific regimes. Methodology and per-trial
+data live in [`notebooks/benchmarks_walkthrough.ipynb`](https://github.com/Catstate101/superfermion/blob/main/notebooks/benchmarks_walkthrough.ipynb)
+(identical circuits, 15 trials, medians reported, GC disabled, correctness
+gates on fidelity/distributions).
 
 ## Simulation Benchmarks
-
-### Statevector Simulation
-
-vs Qiskit Aer `AerSimulator` (statevector method). Single-threaded comparison on an x86_64 CPU.
-
-| Circuit | Qubits | Superfermion | Qiskit Aer | Speedup |
-|---------|--------|-------------|------------|---------|
-| GHZ | 20 | 12 ms | 38 ms | **3.2x** |
-| Quantum Volume | 20 | 18 ms | 65 ms | **3.6x** |
-| Clifford (1000 gates) | 20 | 8 ms | 35 ms | **4.4x** |
-| Random SU(2) | 20 | 22 ms | 68 ms | **3.1x** |
 
 ### Stabilizer Simulation
 
@@ -38,32 +31,32 @@ Weakly entangled circuits (bond dimension 64).
 | Heisenberg XXZ | 100 | 180 ms | 5,900 ms | **33x** |
 | GHZ | 200 | 25 ms | — (OOM) | — |
 
+Note: GHZ is the trivially-best case for MPS (bond dimension 2) — it
+demonstrates framework overhead, not tensor-network scaling on heavily
+entangled workloads.
+
 ## Gradient Benchmarks
 
 ### Adjoint Differentiation
 
-The adjoint method computes all parameter gradients in one backward pass.
+The adjoint method computes all parameter gradients in one backward pass,
+independently of parameter count (Jones & Gacon 2020).
+
+vs PennyLane's end-user `qml.grad` pipeline (hardware-efficient ansatz,
+depth 1):
 
 | Circuit | Params | Superfermion (adjoint) | PennyLane (adjoint) | Speedup |
 |---------|--------|----------------------|----------------------|---------|
-| SU(2) layer, 8 qubits | 16 | 1.2 ms | 42 ms | **35x** |
-| SU(2) layer, 12 qubits | 24 | 2.8 ms | 240 ms | **86x** |
-| UCCSD, H2O | 44 | 8 ms | 6,400 ms | **800x** |
-| QAOA p=4, 10 qubits | 80 | 5 ms | 310 ms | **62x** |
+| SU(2) layer, 4 qubits | 8 | 0.1 ms | 80 ms | **~800x** |
+| SU(2) layer, 8 qubits | 16 | 0.3 ms | 44 ms | **~137x** |
+| SU(2) layer, 12 qubits | 24 | 14 ms | 58 ms | **4x** |
+| SU(2) layer, 16 qubits | 32 | 83 ms | 126 ms | **1.5x** |
 
-The adjoint advantage grows with circuit depth — deeper circuits show larger relative speedups because the adjoint cost is roughly 2x the forward pass regardless of parameter count.
-
-### VQE End-to-End
-
-H₂ molecule, UCCSD ansatz, 100 optimizer iterations.
-
-| Framework | Time | Energy Accuracy |
-|-----------|------|-----------------|
-| **Superfermion** (adjoint) | **1.2 s** | 10⁻⁸ Hartree |
-| PennyLane (adjoint) | 120 s | 10⁻⁸ Hartree |
-| Qiskit Nature (parameter-shift) | 340 s | 10⁻⁸ Hartree |
-
-**100x faster** than PennyLane, **280x faster** than Qiskit Nature for the same accuracy.
+**Read the trend, not just the big number:** the large speedups at small
+qubit counts come from dispatch overhead — a single FFI call vs PennyLane's
+full autograd transform. At n ≥ 18, PennyLane's adjoint backend is faster
+than ours. The robust claim is *parameter-count-independent* gradient cost:
+vs our own parameter-shift, adjoint is 44–198x faster as circuit depth grows.
 
 ## Circuit Construction
 
@@ -79,15 +72,23 @@ H₂ molecule, UCCSD ansatz, 100 optimizer iterations.
 git clone https://github.com/Catstate101/superfermion.git
 cd superfermion
 pip install -e ".[benchmarks]"
-python run_benchpress.py
+jupyter lab notebooks/benchmarks_walkthrough.ipynb
 ```
 
-Results are saved to `benchpress_full_results.json`.
+The walkthrough notebook contains the methodology, stored per-trial data,
+and live small-scale reproductions when Qiskit/PennyLane are installed
+(with graceful fallback to the stored results otherwise).
 
 ## Why the Speedup
 
-1. **Rust with Rayon** — statevector simulation parallelized across all CPU cores with zero GIL contention
-2. **No interpreter overhead** — gate application, sampling, and expectation values run entirely in Rust; Python calls cross the FFI boundary once
-3. **faer linear algebra** — pure-Rust BLAS-quality QR/SVD for MPS, avoiding LAPACK overhead
-4. **Word-packed stabilizer** — Clifford tableau operations on packed 64-bit words, O(n²) time for n qubits
-5. **Memory locality** — custom `StatevectorState` struct with column-major layout optimized for AVX auto-vectorization
+1. **Rust with Rayon** — statevector simulation parallelized across CPU
+   cores with zero GIL contention
+2. **No interpreter overhead** — gate application, sampling, and
+   expectation values run entirely in Rust; Python calls cross the FFI
+   boundary once
+3. **faer linear algebra** — pure-Rust BLAS-quality QR for MPS, avoiding
+   LAPACK overhead
+4. **Word-packed stabilizer** — Clifford tableau operations on packed
+   64-bit words, O(n²) time for n qubits
+5. **Memory locality** — custom `StatevectorState` struct with
+   column-major layout optimized for AVX auto-vectorization
