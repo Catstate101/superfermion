@@ -209,11 +209,23 @@ For weakly entangled circuits. Scales to 200+ qubits.
 result = sf.run(qc, method="mps", bond_dim=64, shots=1000)
 ```
 
-MPS `shots=0` densifies the tensor network into a full statevector. For more than 26 qubits this raises a `MemoryError` with guidance — pass `shots>0` to sample directly from the tensor network instead. MPS sampling and statevector output use the same little-endian qubit order as the statevector backend (`"001"` means qubit 0 is `|1⟩`).
+MPS `shots=0` densifies the tensor network into a full statevector. For more than 26 qubits this raises a `MemoryError` with guidance — pass `shots>0` to sample directly from the tensor network instead, or `densify=False` to receive only the `State` handle. MPS sampling and statevector output use the same little-endian qubit order as the statevector backend (`"001"` means qubit 0 is `|1⟩`).
+
+For MPS-native observables and densification, without going through `sf.run`:
+
+```python
+from superfermion import mps_expval, mps_todense
+
+# Expectation value on the tensor network (never densifies to 2^n)
+energy = mps_expval(qc, "ZZII", bond_dim=64)   # str / dict / SparsePauliOp
+
+# Densify with a parallel (numba) left-to-right sweep
+sv = mps_todense(qc, bond_dim=64)              # little-endian, length 2^n
+```
 
 ### Stabilizer
 
-For Clifford-only circuits. Polynomial time, scales to ~1000 qubits.
+For Clifford-only circuits. Polynomial time, scales to ~4000 qubits.
 
 ```python
 clifford = sf.Circuit(100).h(0)
@@ -520,6 +532,11 @@ print(f"Correction: {correction}")
 manager = QECManager()
 result = manager.run_logical_lifecycle("surface_2d")
 print(f"Logical state: {result['logical_state']}")
+
+# Repetition code: any length n >= 2, optional repeated rounds
+rep = RepetitionCode(n=5)
+print(rep.syndrome_map())        # [[0, 1], [1, 2], [2, 3], [3, 4]] (check -> data qubits)
+circuit = rep.build(rounds=3)    # 3 repeated syndrome-extraction rounds
 ```
 
 See the **[QEC Guide](/docs/qec)** for all 10 codes and 4 decoders.
@@ -577,7 +594,7 @@ from superfermion.bridge import (
     from_qasm, to_qasm,
     from_cirq, to_cirq,
     from_pennylane, to_pennylane,
-    to_braket, to_ionq,
+    to_braket, to_ionq, to_stim,
 )
 from superfermion.serialization import to_qasm3, from_qasm3
 
@@ -615,6 +632,10 @@ sf_circuit = from_qasm3(qasm3_str)
 # Braket + IonQ export
 braket_circuit = to_braket(sf_circuit)
 ionq_circuit = to_ionq(sf_circuit)
+
+# Stim (Clifford-only) — fast tableau sampling + detector ecosystem
+stim_circuit, record_cbits = to_stim(sf_circuit)
+samples = stim_circuit.compile_sampler().sample(1000)
 
 # JSON round-trip
 json_str = sf_circuit.to_json()
@@ -694,6 +715,10 @@ from superfermion.nn.torch_layer import TorchQuantumLayer
 
 # TensorFlow
 from superfermion.nn.tf_layer import TFQuantumLayer
+
+# Data embedding: feature_names route inputs to named circuit params; the
+# rest become trainable weights (gradients flow to both).
+# layer = TorchQuantumLayer(circuit, obs, feature_names=["x0"])
 ```
 
 See the **[ML Integration Guide](/docs/ml-integration)** for complete examples with all three frameworks.

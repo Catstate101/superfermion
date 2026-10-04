@@ -242,8 +242,8 @@ pub enum OpType {
     CRz(Parameter),
     /// Controlled-Phase: CP(φ) = diag(1, 1, 1, e^{iφ})
     CP(Parameter),
-    /// Controlled-U3: CU(θ,φ,λ) = diag(I, U3(θ,φ,λ)) — control first
-    Cu(Parameter, Parameter, Parameter),
+    /// Controlled-U3: CU(θ,φ,λ,γ) = diag(I, e^{iγ}·U3(θ,φ,λ)) — control first
+    Cu(Parameter, Parameter, Parameter, Parameter),
 
     // ─── Three-qubit gates ────────────────────────────────
     /// Toffoli (CCX)
@@ -313,7 +313,7 @@ impl OpType {
             | OpType::CRx(_)
             | OpType::CRz(_)
             | OpType::CP(_)
-            | OpType::Cu(_, _, _) => 2,
+            | OpType::Cu(_, _, _, _) => 2,
             // Three-qubit
             OpType::CCX | OpType::CSWAP => 3,
             // Special
@@ -338,7 +338,7 @@ impl OpType {
             | OpType::CRx(_)
             | OpType::CRz(_)
             | OpType::CP(_)
-            | OpType::Cu(_, _, _) => true,
+            | OpType::Cu(_, _, _, _) => true,
             _ => false,
         }
     }
@@ -600,22 +600,24 @@ impl OpType {
                 ])
             }
 
-            // Cu(θ,φ,λ) = diag(1, 1, U3(θ,φ,λ)) — controlled U3
-            // (U3 entries identical to the single-qubit U arm above)
-            OpType::Cu(theta, phi, lam) => {
+            // Cu(θ,φ,λ,γ) = diag(1, 1, e^{iγ}·U3(θ,φ,λ)) — controlled U3 with
+            // an extra gamma phase on the control-1 subspace (Qiskit CUGate).
+            OpType::Cu(theta, phi, lam, gamma) => {
                 let t = theta.evaluate();
                 let p = phi.evaluate();
                 let l = lam.evaluate();
+                let g = gamma.evaluate();
                 let ct = Complex64::new((t / 2.0).cos(), 0.0);
                 let st = Complex64::new((t / 2.0).sin(), 0.0);
                 let el = Complex64::from_polar(1.0, l);
                 let ep = Complex64::from_polar(1.0, p);
                 let epl = Complex64::from_polar(1.0, p + l);
+                let eg = Complex64::from_polar(1.0, g);
                 Some(vec![
                     vec![one, zero, zero, zero],
                     vec![zero, one, zero, zero],
-                    vec![zero, zero, ct, -el * st],
-                    vec![zero, zero, ep * st, epl * ct],
+                    vec![zero, zero, eg * ct, -eg * el * st],
+                    vec![zero, zero, eg * ep * st, eg * epl * ct],
                 ])
             }
 
@@ -717,7 +719,12 @@ impl OpType {
             OpType::R1(p) => OpType::R1(p.bind(values)),
             OpType::P(p) => OpType::P(p.bind(values)),
             OpType::U(a, b, c) => OpType::U(a.bind(values), b.bind(values), c.bind(values)),
-            OpType::Cu(a, b, c) => OpType::Cu(a.bind(values), b.bind(values), c.bind(values)),
+            OpType::Cu(a, b, c, d) => OpType::Cu(
+                a.bind(values),
+                b.bind(values),
+                c.bind(values),
+                d.bind(values),
+            ),
             OpType::Rzz(p) => OpType::Rzz(p.bind(values)),
             OpType::Rxx(p) => OpType::Rxx(p.bind(values)),
             OpType::Ryy(p) => OpType::Ryy(p.bind(values)),
@@ -748,7 +755,7 @@ impl OpType {
             | OpType::CRz(p)
             | OpType::CP(p) => vec![p],
             OpType::U(a, b, c) => vec![a, b, c],
-            OpType::Cu(a, b, c) => vec![a, b, c],
+            OpType::Cu(a, b, c, d) => vec![a, b, c, d],
             OpType::Custom(_, params) => params.iter().collect(),
             OpType::Unitary(_) => vec![],
             _ => vec![],
@@ -774,7 +781,7 @@ impl OpType {
             OpType::Rz(_) => "Rz".to_string(),
             OpType::R1(_) => "R1".to_string(),
             OpType::U(_, _, _) => "U".to_string(),
-            OpType::Cu(_, _, _) => "Cu".to_string(),
+            OpType::Cu(_, _, _, _) => "Cu".to_string(),
             OpType::P(_) => "P".to_string(),
             OpType::CNOT => "CNOT".to_string(),
             OpType::CZ => "CZ".to_string(),

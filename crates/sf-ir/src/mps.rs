@@ -1084,35 +1084,114 @@ impl MPSState {
     }
 
     pub fn to_statevector(&self) -> Vec<Complex64> {
-        // Convert MPS to full statevector
-        let dim = 1 << self.n_qubits;
-        let mut state = vec![Complex64::new(0.0, 0.0); dim];
-        state[0] = Complex64::new(1.0, 0.0);
-
-        // Final statevector reconstruction by contracting tensors correctly
-        // This is O(2^N * D^2), only for testing small circuits!
-        for i in 0..dim {
-            let mut left_vec = nalgebra::DVector::from_vec(vec![Complex64::new(1.0, 0.0)]);
-            for idx in 0..self.n_qubits {
-                let t = &self.tensors[idx];
-                let (d_l_rows, d_r) = t.shape();
-                let d_l = d_l_rows / 2;
-                let bit = (i >> idx) & 1;
-
-                let mut next_vec = nalgebra::DVector::zeros(d_r);
-                for r in 0..d_r {
-                    let mut sum = Complex64::new(0.0, 0.0);
-                    for l in 0..d_l {
-                        sum += left_vec[l] * t[(l + bit * d_l, r)];
-                    }
-                    next_vec[r] = sum;
-                }
-                left_vec = next_vec;
-            }
-            state[i] = left_vec[0];
+        // Sparse-prefix fast path first (area-law states like GHZ keep O(1)
+        // live rows: exact zeros stay exact, so the zero test below never
+        // misfires; dense states bail out early to the GEMM sweep).
+        if let Some(v) = self.to_statevector_sparse() {
+            return v;
         }
+        self.to_statevector_gemm()
+    }
 
-        state
+    /// Sparse-prefix densify: track only nonzero prefix rows.
+    ///
+    /// Returns `None` (caller falls back to the GEMM sweep) as soon as the
+    /// live set exceeds 1024 rows, bounding wasted work far below dense cost.
+    /// Zero test is exact (`== 0.0`): truncated/canonical MPS tensors keep
+    /// structural zeros exact, so no false sparsity is possible.
+    fn to_statevector_sparse(&self) -> Option<Vec<Complex64>> {
+        const LIMIT: usize = 1024;
+        let n = self.n_qubits;
+        if n == 0 {
+            return Some(vec![Complex64::new(1.0, 0.0)]);
+        }
+        // (prefix index, bond vector)
+        let mut active: Vec<(usize, Vec<Complex64>)> = vec![(0, vec![Complex64::new(1.0, 0.0)])];
+        for idx in 0..n {
+            let t = &self.tensors[idx];
+            let (rows, dr) = t.shape();
+            let dl = rows / 2;
+            let mut next: Vec<(usize, Vec<Complex64>)> = Vec::new();
+            for (i, vec) in &active {
+                if vec.len() != dl {
+                    return None;
+                }
+                for s in 0..2usize {
+                    let mut child = vec![Complex64::new(0.0, 0.0); dr];
+                    for r in 0..dr {
+                        let mut sum = Complex64::new(0.0, 0.0);
+                        for l in 0..dl {
+                            sum += vec[l] * t[(l + s * dl, r)];
+                        }
+                        child[r] = sum;
+                    }
+                    // Child index: qubit idx lives at BIT idx (little-endian),
+                    // so the longer prefix keeps its bits: i + (s << idx).
+                    // (NOT i*2+s — that would append at bit 0 and only works
+                    // for bit-reversal-symmetric states like GHZ.)
+                    if child.iter().any(|&z| z != Complex64::new(0.0, 0.0)) {
+                        next.push((i + (s << idx), child));
+                        if next.len() > LIMIT {
+                            return None;
+                        }
+                    }
+                }
+            }
+            active = next;
+        }
+        let dim = 1usize << n;
+        let mut state = vec![Complex64::new(0.0, 0.0); dim];
+        for (i, v) in &active {
+            // Right boundary bond must be 1 (pure state); otherwise the
+            // scalar read is undefined — fall back to the GEMM sweep.
+            if v.len() != 1 {
+                return None;
+            }
+            state[*i] = v[0];
+        }
+        Some(state)
+    }
+
+    /// GEMM-sweep densify for general bonds.
+    fn to_statevector_gemm(&self) -> Vec<Complex64> {
+        // State after site idx is a (2^idx, D) matrix M with M[i, l] the
+        // amplitude of prefix-bitstring i ending in left-bond l. Site step:
+        //   M'[i + s*2^idx, r] = sum_l M[i, l] * T[(l + s*D_L), r]
+        // i.e. two GEMMs per site (s = 0, 1) assembled with block copies.
+        // Total O(2^n * D^2) with BLAS efficiency and O(n) allocations —
+        // the previous per-amplitude scalar loop spent most of its time
+        // allocating (2 allocs per amplitude per site). Qubit convention
+        // unchanged: qubit q lives at bit q of the output index
+        // (little-endian). NOTE: faer-parallel (direct-write, Rayon pool)
+        // and zero-alloc scalar variants were tried and measured slower
+        // here (dispatch overhead dominates these tall-skinny shapes);
+        // sequential nalgebra GEMM wins. Closing the rest of the gap to
+        // threaded-BLAS frameworks needs OpenBLAS linkage (future work).
+        let n = self.n_qubits;
+        let mut m = nalgebra::DMatrix::<Complex64>::from_element(1, 1, Complex64::new(1.0, 0.0));
+        for idx in 0..n {
+            let t = &self.tensors[idx];
+            let (rows, d_r) = t.shape();
+            let d_l = rows / 2;
+            let p = m.nrows();
+            debug_assert_eq!(m.ncols(), d_l);
+            let mut m_next = nalgebra::DMatrix::<Complex64>::zeros(p * 2, d_r);
+            for s in 0..2usize {
+                // T_s = rows [s*d_l, (s+1)*d_l) of T, shape (d_l, d_r).
+                // Block copy (one call per site per s) keeps assembly at
+                // O(n) view operations instead of O(2^n) per-row copies.
+                let t_s =
+                    nalgebra::DMatrix::<Complex64>::from_fn(d_l, d_r, |l, r| t[(l + s * d_l, r)]);
+                let prod = &m * &t_s;
+                m_next
+                    .index_mut((s * p..(s + 1) * p, 0..d_r))
+                    .copy_from(&prod);
+            }
+            m = m_next;
+        }
+        debug_assert_eq!(m.nrows(), 1usize << n);
+        // Right boundary bond is 1; take column 0.
+        m.column(0).iter().copied().collect()
     }
 
     /// Direct bit-by-bit sampling from MPS: O(N * D^2 * shots)
@@ -1507,6 +1586,26 @@ mod tests {
         }
 
         assert_relative_eq!(mps_norm_sq(&mps), 1.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn test_sparse_densify_little_endian_layout() {
+        // |001> (X on qubit 0): the amplitude must land at index 1, not 4.
+        // Regression test for the MSB-append (i*2+s) indexing bug in the
+        // sparse-prefix path, which bit-reversal-symmetric states like GHZ
+        // could not catch (both orders coincide there).
+        let mut mps = MPSState::new(3, 64);
+        let x = OpType::X.to_matrix();
+        mps.apply_1q_gate(0, &x);
+        let sv = mps.to_statevector();
+        assert_eq!(sv.len(), 8);
+        for (i, amp) in sv.iter().enumerate() {
+            let want = if i == 1 { 1.0 } else { 0.0 };
+            assert!(
+                (amp.re - want).abs() < 1e-12 && amp.im.abs() < 1e-12,
+                "i={i} amp={amp:?}"
+            );
+        }
     }
 
     #[test]

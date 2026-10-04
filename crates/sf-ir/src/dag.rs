@@ -733,9 +733,12 @@ impl QuantumDAG {
                     }
                 }
                 current_u = temp_u;
-            } else if n_op == 2 {
-                // For 2-qubit gates, build manually to avoid complex kronecker logic
-                // (Simplified for now, real implementation would use sparse representations)
+            } else {
+                // 2+ qubit gates (CX, CCX, CSWAP, ...): build the column
+                // images by applying the gate to each basis vector via
+                // apply_gate_into (which handles all arities correctly).
+                // (A previous version only handled n_op == 2, silently
+                // treating CCX/CSWAP as identity in unitaries.)
                 let mut res = vec![Complex64::new(0.0, 0.0); dim];
                 for i in 0..dim {
                     let mut vec_in = vec![Complex64::new(0.0, 0.0); dim];
@@ -1351,7 +1354,34 @@ impl QuantumDAG {
                 }
             }
         } else {
-            dst.copy_from_slice(src);
+            // 3+ qubit gates (CCX, CSWAP, ...): general strided application.
+            // Convention (same as the 2-qubit branch above): the gate matrix
+            // is MSB-first in listed-qubit order, i.e. matrix row/col bit
+            // (k-1-j) corresponds to qubits[j]. (A previous version copied
+            // src->dst here, silently treating 3q gates as identity.)
+            let qs: Vec<usize> = op.qubits.to_vec();
+            let k = qs.len();
+            let dim = src.len();
+            for i in 0..dim {
+                let mut row = 0usize;
+                let mut base = i;
+                for (j, &q) in qs.iter().enumerate() {
+                    let b = (i >> q) & 1;
+                    row |= b << (k - 1 - j);
+                    base &= !(1usize << q);
+                }
+                let mut acc = num_complex::Complex64::new(0.0, 0.0);
+                for c in 0..(1usize << k) {
+                    let mut src_idx = base;
+                    for (j, &q) in qs.iter().enumerate() {
+                        if (c >> (k - 1 - j)) & 1 == 1 {
+                            src_idx |= 1usize << q;
+                        }
+                    }
+                    acc += gate_u[(row, c)] * src[src_idx];
+                }
+                dst[i] = acc;
+            }
         }
     }
 
@@ -3957,7 +3987,10 @@ fn op_type_to_name_params(op: &OpType) -> (String, Vec<f64>) {
         OpType::R1(p) => ("r1".into(), vec![p.evaluate()]),
         OpType::P(p) => ("p".into(), vec![p.evaluate()]),
         OpType::U(a, b, c) => ("u".into(), vec![a.evaluate(), b.evaluate(), c.evaluate()]),
-        OpType::Cu(a, b, c) => ("cu".into(), vec![a.evaluate(), b.evaluate(), c.evaluate()]),
+        OpType::Cu(a, b, c, d) => (
+            "cu".into(),
+            vec![a.evaluate(), b.evaluate(), c.evaluate(), d.evaluate()],
+        ),
         OpType::CNOT => ("cx".into(), vec![]),
         OpType::CZ => ("cz".into(), vec![]),
         OpType::CY => ("cy".into(), vec![]),

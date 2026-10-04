@@ -63,11 +63,11 @@ result = sf.run(qc, method="mps", bond_dim=64, shots=1024)
 
 Higher bond dimension = more accuracy, more memory. Start at 64.
 
-MPS `shots=0` densifies the tensor network into a full statevector. For more than 26 qubits this raises a `MemoryError` with guidance — pass `shots>0` to sample directly from the tensor network instead. MPS sampling and statevector output use the same qubit order as the statevector backend.
+MPS `shots=0` densifies the tensor network into a full statevector. For more than 26 qubits this raises a `MemoryError` with guidance — pass `shots>0` to sample directly from the tensor network instead, or `densify=False` to skip densification and receive only the MPS `State` handle (`result.state.numpy()` densifies once on demand). MPS sampling and statevector output use the same qubit order as the statevector backend.
 
 ### Stabilizer
 
-Clifford-only circuits. **Polynomial time**, scales to ~1000 qubits.
+Clifford-only circuits. **Polynomial time**, scales to ~4000 qubits.
 
 ```python
 clifford = sf.Circuit(100).h(0)
@@ -102,7 +102,7 @@ Key and layout conventions:
 |--------|-----------|-------|-------------------|----------------|
 | `statevector` | ~25 | Yes | Yes | No |
 | `mps` | 200+ | Approximate | No | No |
-| `stabilizer` | ~1000 | Yes (Clifford) | No | No |
+| `stabilizer` | ~4000 | Yes (Clifford) | No | No |
 | `density_matrix` | ~12 | Yes | No | Yes |
 
 ## `sf.State` — the Rust quantum state

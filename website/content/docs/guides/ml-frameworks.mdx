@@ -109,6 +109,28 @@ print(f"Gradients: {grads.numpy()}")
 
 TensorFlow integration uses `tf.custom_gradient` — the backward pass calls `sf.State.grad()` for exact gradients.
 
+## Data Embedding (`feature_names`)
+
+All three layers accept a `feature_names` list naming which circuit
+parameters are fed from the input (`x` / `inputs`) instead of being trained.
+The remaining parameters become trainable weights, and gradients flow to
+both the input and the weights.
+
+```python
+import torch
+import superfermion as sf
+from superfermion.nn.torch_layer import TorchQuantumLayer
+
+x0, w0 = sf.param("x0"), sf.param("w0")
+circuit = sf.Circuit(1).rx(x0, 0).ry(w0, 0)
+
+layer = TorchQuantumLayer(circuit, [([3], 1.0, 0.0)], feature_names=["x0"])
+out = layer(torch.tensor([0.5]))   # x0 <- 0.5; w0 stays the trainable weight
+```
+
+`feature_names` defaults to `None` — the legacy behavior where every
+parameter is a weight and the input is ignored.
+
 ## Batch Evaluation
 
 All three layers support batched parameter evaluation:

@@ -178,11 +178,13 @@ class RunResult:
         from counts.
 
         Args:
-            observable: Pauli observable terms as list of (paulis, coef_re, coef_im).
+            observable: Pauli observable — str ("ZIII", MSB-first), dict,
+                SparsePauliOp, or Rust term list [(paulis, coef_re, coef_im)].
 
         Returns:
             Expectation value as float.
         """
+        observable = _coerce_observable(observable, _result_n_qubits(self))
         if self.state is not None:
             return self.state.expectation(observable)
         if self.counts:
@@ -197,11 +199,13 @@ class RunResult:
         PennyLane analogue: ``qml.var``.
 
         Args:
-            observable: Pauli observable terms as list of (paulis, coef_re, coef_im).
+            observable: Pauli observable — str ("ZIII", MSB-first), dict,
+                SparsePauliOp, or Rust term list [(paulis, coef_re, coef_im)].
 
         Returns:
             Variance as float.
         """
+        observable = _coerce_observable(observable, _result_n_qubits(self))
         if self.state is not None:
             return self.state.variance(observable)
         if self.counts:
@@ -231,13 +235,15 @@ class RunResult:
         Uses adjoint differentiation from state (if available).
 
         Args:
-            observable: Pauli observable terms.
+            observable: Pauli observable — str ("ZIII", MSB-first), dict,
+                SparsePauliOp, or Rust term list [(paulis, coef_re, coef_im)].
             dag: QuantumDAG for gradient computation.
             param_values: Parameter values dict.
 
         Returns:
             Dict mapping parameter name to gradient value.
         """
+        observable = _coerce_observable(observable, _result_n_qubits(self))
         if self.state is not None:
             if dag is None or param_values is None:
                 raise ValueError("grad() requires dag and param_values arguments")
@@ -342,6 +348,35 @@ class RunResult:
             f"outcomes={len(self.counts or self.get_probabilities())}, "
             f"has_state={has_state})"
         )
+
+
+def _coerce_observable(observable, n_qubits=None):
+    """Accept user-friendly observable forms; convert to Rust term list.
+
+    Accepted (verified against parameter-shift ground truth to ~1e-16):
+      - str, e.g. "ZIII": Pauli string, MSB-first — leftmost char = qubit 0
+        (matches PennyLane ``qml.Z(0)`` / Qiskit wire convention).
+      - dict, e.g. {"ZI": 0.5, "IX": 0.3}.
+      - SparsePauliOp / Hamiltonian-like objects.
+      - Rust term list [(paulis, coef_re, coef_im)]: passed through unchanged.
+
+    Anything unrecognized is passed through unchanged (legacy behavior).
+    """
+    if isinstance(observable, (list, tuple)):
+        return observable
+    try:
+        from superfermion.qml.gradient.adjoint import _observable_to_rust_terms
+        return _observable_to_rust_terms(observable, n_qubits or 0)
+    except (TypeError, ValueError, ImportError, AttributeError):
+        return observable
+
+
+def _result_n_qubits(result) -> "Optional[int]":
+    """Best-effort qubit count for observable coercion (None if unknown)."""
+    try:
+        return result.circuit.n_qubits
+    except Exception:
+        return None
 
 
 def _estimate_expval_from_counts(

@@ -504,9 +504,19 @@ class RustDevice:
         )
 
     def _run_mps(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
-        """MPS simulation (CPU only, tensor network for large circuits)."""
+        """MPS simulation (CPU only, tensor network for large circuits).
+
+        Added kwargs (all optional, defaults preserve legacy behavior):
+            bond_dim: max MPS bond dimension (default 64).
+            densify: when True (default) and shots==0, materialize the full
+                2^n statevector + probabilities dict (legacy path; O(2^n)).
+                Pass densify=False to skip that work and receive only the
+                MPS state handle — then sample via shots>0 runs or call
+                ``result.state.numpy()`` once. Recommended for n > 20.
+        """
         bond_dim = kwargs.get("bond_dim", 64)
         seed = kwargs.get("seed", 42)
+        densify = kwargs.get("densify", True)
         dag = circuit.to_ir()
 
         state = dag.simulate_to_state("mps", "cpu", bond_dim)
@@ -518,7 +528,7 @@ class RustDevice:
             counts = {}
 
         sv = None
-        if shots == 0:
+        if shots == 0 and densify:
             if circuit.n_qubits > 26:
                 raise MemoryError(
                     "MPS simulation with shots=0 densifies the state into a full "
@@ -527,9 +537,16 @@ class RustDevice:
                     "Use shots>0 to sample directly from the tensor network instead."
                 )
             try:
-                sv = state.numpy()
+                # Fast path: densify the uncanonicalized MPS evolution
+                # (sparse-prefix for area-law states, GEMM sweep otherwise)
+                # instead of re-contracting the canonical handle. Same
+                # amplitudes up to floating-point reassociation (~1e-15).
+                sv = np.asarray(dag.evolve_mps(bond_dim).to_statevector())
             except Exception:
-                pass
+                try:
+                    sv = state.numpy()
+                except Exception:
+                    pass
             if sv is not None:
                 # The MPS handle returns the raw survivor vector: after
                 # truncation its norm² is Π(1−ε) < 1.  Present the physical
@@ -543,11 +560,25 @@ class RustDevice:
         if shots > 0:
             probabilities = {k: v / shots for k, v in counts.items()}
         elif sv is not None:
-            probabilities = {
-                format(i, f"0{circuit.n_qubits}b"): float(p)
-                for i, p in enumerate(np.abs(sv) ** 2)
-                if p > 1e-15
-            }
+            # Eager small dict, lazy large dict (same pattern as the
+            # statevector path): building 2^n formatted strings eagerly
+            # dominates runtime past ~12 qubits. LazyDict is a dict
+            # subclass, so access semantics are unchanged.
+            nq = circuit.n_qubits
+
+            def _exact_mps_probabilities() -> Dict[str, float]:
+                probs = np.abs(sv) ** 2
+                return {
+                    format(i, f"0{nq}b"): float(p)
+                    for i, p in enumerate(probs)
+                    if p > 1e-15
+                }
+
+            probabilities = (
+                _exact_mps_probabilities()
+                if nq <= _EAGER_PROBS_MAX_QUBITS
+                else LazyDict(_exact_mps_probabilities)
+            )
         else:
             probabilities = {}
 
@@ -562,6 +593,7 @@ class RustDevice:
                 "backend": "rust-cpu",
                 "method": "mps",
                 "bond_dim": bond_dim,
+                "densified": sv is not None,
             },
         )
 
@@ -672,13 +704,13 @@ class RustDevice:
         """Stabilizer simulation for Clifford circuits."""
         from superfermion.backends.stabilizer import _stab_keys
         seed = kwargs.get("seed", 42)
-        # Hard cap of the Rust tableau: raise a clean ValueError instead of
-        # the pyo3 PanicException (a BaseException that `except Exception`
-        # cannot catch) surfacing from crates/sf-ir/src/stabilizer.rs.
-        if circuit.n_qubits > 1024:
+        # Tableau cap lives in crates/sf-ir/src/stabilizer.rs (word-packed
+        # dynamic rows; raised 1024 -> 4096). Keep this guard in sync and
+        # raise ValueError instead of the uncatchable PanicException.
+        if circuit.n_qubits > 4096:
             raise ValueError(
-                "method='stabilizer' supports at most 1024 qubits "
-                f"(got {circuit.n_qubits}): the Rust tableau has a hard cap.\n"
+                "method='stabilizer' supports at most 4096 qubits "
+                f"(got {circuit.n_qubits}): the Rust tableau cap.\n"
                 "  Use method='mps' or method='statevector' for larger "
                 "circuits."
             )
@@ -695,7 +727,7 @@ class RustDevice:
             if type(e).__name__ == "PanicException":
                 raise ValueError(
                     f"method='stabilizer' failed in the Rust tableau: {e}.\n"
-                    "  The tableau supports at most 1024 qubits; use "
+                    "  The tableau supports at most 4096 qubits; use "
                     "method='mps' or 'statevector' for larger circuits."
                 ) from e
             raise

@@ -5,10 +5,10 @@ description: "Import and export circuits between Superfermion, Qiskit, Cirq, Pen
 
 ## Import/Export Matrix
 
-| Direction | Qiskit | Cirq | PennyLane | OpenQASM 2 | OpenQASM 3 | Braket | IonQ |
-|-----------|--------|------|-----------|------------|------------|--------|------|
-| Import → SF | `from_qiskit` | `from_cirq` | `from_pennylane` | `from_qasm` | `from_qasm3` | — | — |
-| Export SF → | `to_qiskit` | `to_cirq` | `to_pennylane` | `to_qasm` | `to_qasm3` | `to_braket` | `to_ionq` |
+| Direction | Qiskit | Cirq | PennyLane | OpenQASM 2 | OpenQASM 3 | Braket | IonQ | Stim |
+|-----------|--------|------|-----------|------------|------------|--------|------|------|
+| Import → SF | `from_qiskit` | `from_cirq` | `from_pennylane` | `from_qasm` | `from_qasm3` | — | — | — |
+| Export SF → | `to_qiskit` | `to_cirq` | `to_pennylane` | `to_qasm` | `to_qasm3` | `to_braket` | `to_ionq` | `to_stim` |
 
 ## Qiskit
 
@@ -33,6 +33,27 @@ qiskit_qc.measure_all()   # measurements so get_counts() has results
 result = AerSimulator().run(qiskit_qc).result()
 print(result.get_counts())
 ```
+
+## Stim
+
+Export a Clifford circuit to [Stim](https://github.com/quantumlib/Stim) for fast
+tableau sampling and access to the detector / `pymatching` / `sinter`
+ecosystem. Non-Clifford gates raise `ValueError`.
+
+```python
+from superfermion.bridge import to_stim
+import superfermion as sf
+
+qc = sf.Circuit(4).h(0)
+for i in range(3):
+    qc.cnot(i, i + 1)
+
+stim_circuit, record_cbits = to_stim(qc)   # record_cbits: SF cbit per measurement
+samples = stim_circuit.compile_sampler().sample(1000)
+```
+
+`record_cbits[k]` is the SF classical-bit index of the k-th measurement in
+Stim's record order (`None` if the measurement had no explicit cbit).
 
 ## Cirq
 

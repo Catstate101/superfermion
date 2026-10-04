@@ -108,6 +108,18 @@ impl PyMPSState {
             .collect()
     }
 
+    /// Densify to a full 2^n statevector (little-endian, qubit q at bit q).
+    ///
+    /// Uses the sparse-prefix fast path for area-law states, GEMM sweep
+    /// otherwise. Same amplitudes as `State.numpy()` on the canonical
+    /// handle up to floating-point reassociation (~1e-15).
+    fn to_statevector<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        Ok(numpy::PyArray1::from_vec(py, self.inner.to_statevector()))
+    }
+
     /// Return the virtual-to-physical qubit permutation from lazy-SWAP routing.
     /// perm[virtual_qubit] = physical_site. Identity if no long-range gates.
     fn perm(&self) -> Vec<usize> {
@@ -160,6 +172,12 @@ pub struct PyState {
     inner: Box<dyn QuantumStateImpl>,
     /// Set only for method="mps" handles: evolution truncation telemetry.
     mps_report: Option<MpsTruncationReport>,
+    /// Memoized dense vector. States are immutable after creation, so the
+    /// first `numpy()` call stores its result here and later calls return
+    /// a copy instead of re-contracting (matters for MPS, where each
+    /// densification costs O(n·2^n·D²)). Mutex (not RefCell): pyclass
+    /// requires Sync.
+    dense_cache: std::sync::Mutex<Option<Vec<num_complex::Complex64>>>,
 }
 
 #[pymethods]
@@ -249,10 +267,21 @@ impl PyState {
         &self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        // Fast path: return a copy of the memoized vector.
+        // (Poisoned mutex — only if a previous holder panicked — falls
+        // through to recompute rather than failing.)
+        if let Ok(guard) = self.dense_cache.lock() {
+            if let Some(cached) = guard.as_ref() {
+                return Ok(numpy::PyArray1::from_vec(py, cached.clone()));
+            }
+        }
         let v = self
             .inner
             .to_vec()
             .map_err(|e| method_error(py, e.to_string()))?;
+        if let Ok(mut guard) = self.dense_cache.lock() {
+            *guard = Some(v.clone());
+        }
         Ok(numpy::PyArray1::from_vec(py, v))
     }
 
@@ -298,6 +327,7 @@ impl PyState {
         Ok(PyState {
             inner: new_state,
             mps_report: None,
+            dense_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -329,6 +359,7 @@ impl PyState {
         Ok(PyState {
             inner: Box::new(StatevectorState::new(v, n_qubits, "cpu")),
             mps_report: None,
+            dense_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -415,6 +446,7 @@ impl PyState {
         PyState {
             inner,
             mps_report: None,
+            dense_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -753,20 +785,10 @@ impl PyQuantumDAG {
                 Ok(state)
             }
             "stabilizer" => {
-                let gates = self.inner.to_gate_records();
-                let gate_list: Vec<(String, Vec<usize>)> = gates
-                    .iter()
-                    .filter(|(name, _, _)| {
-                        let up = name.to_uppercase();
-                        up != "BARRIER" && up != "MEASURE" && up != "RESET"
-                    })
-                    .map(|(name, qubits, _params)| (name.to_uppercase(), qubits.clone()))
-                    .collect();
-                let tab = sf_ir::stabilizer::StabilizerTableau::from_gate_list(
-                    self.inner.n_qubits,
-                    &gate_list,
-                )
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+                // Typed fast path: dispatch on OpType directly (no per-gate
+                // String allocation / uppercasing / qubit-vec cloning).
+                let tab = sf_ir::stabilizer::StabilizerTableau::from_dag(&self.inner)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
                 Ok(PyState::new(Box::new(StabilizerStateWrapper::new(
                     tab, device,
                 ))))
@@ -1324,7 +1346,8 @@ impl PyQuantumDAG {
                 let theta = params.first().cloned().unwrap_or(Parameter::Const(0.0));
                 let phi = params.get(1).cloned().unwrap_or(Parameter::Const(0.0));
                 let lam = params.get(2).cloned().unwrap_or(Parameter::Const(0.0));
-                Ok(OpType::Cu(theta, phi, lam))
+                let gamma = params.get(3).cloned().unwrap_or(Parameter::Const(0.0));
+                Ok(OpType::Cu(theta, phi, lam, gamma))
             }
             "rzz" => {
                 let theta = params.first().cloned().unwrap_or(Parameter::Const(0.0));

@@ -4,30 +4,58 @@ Superfermion Linear QEC Codes - Standard Bit-Flip, Phase-Flip, Shor, and Steane 
 import superfermion as sf
 
 class RepetitionCode:
-    """Standard 3-qubit repetition code for bit or phase flip."""
+    """Standard repetition code for bit or phase flip, any length n>=2.
+
+    Layout: n data qubits [0..n-1] + (n-1) ancillas [n..2n-2]; ancilla k
+    measures parity d_k (+) d_{k+1}. Syndrome map (check -> data qubits):
+    ``[[k, k+1] for k in range(n-1)]`` — Stim-compatible ordering.
+    """
     def __init__(self, n=3, code_type="bit"):
+        if n < 2:
+            raise ValueError(f"RepetitionCode needs n>=2, got {n}.")
         self.n = n
         self.code_type = code_type
 
-    def build(self) -> sf.Circuit:
-        c = sf.Circuit(self.n + 2) # n data + 2 ancilla
+    def syndrome_map(self):
+        """Parity-check map: check k touches data qubits [k, k+1]."""
+        return [[k, k + 1] for k in range(self.n - 1)]
+
+    def build(self, rounds=1) -> sf.Circuit:
+        """Build encoding + syndrome-extraction circuit.
+
+        Args:
+            rounds: number of repeated syndrome-extraction rounds
+                (default 1). Round r measures into fresh classical bits
+                ``r*(n-1)..(r+1)*(n-1)-1``; data qubits are measured once
+                at the end (into the trailing bits) for easy decoding.
+        """
+        if rounds < 1:
+            raise ValueError(f"rounds must be >= 1, got {rounds}.")
+        n = self.n
+        n_anc = n - 1
+        # data + one ancilla block reused across rounds (reset each round)
+        c = sf.Circuit(2 * n - 1, n_anc * rounds + n)
         # Encoding
-        for i in range(1, self.n):
+        for i in range(1, n):
             c.cnot(0, i)
-        
+
         if self.code_type == "phase":
-            for i in range(self.n):
+            for i in range(n):
                 c.h(i)
-                
-        # Syndrome Measurement
-        # Parity checks: d0-d1 and d1-d2
-        c.cnot(0, self.n)
-        c.cnot(1, self.n)
-        c.cnot(1, self.n+1)
-        c.cnot(2, self.n+1)
-        
-        c.measure(self.n, 0)
-        c.measure(self.n+1, 1)
+
+        # Syndrome Measurement (repeated rounds)
+        # Parity checks: d_k (+) d_{k+1} into ancilla n+k
+        for r in range(rounds):
+            for k in range(n - 1):
+                c.cnot(k, n + k)
+                c.cnot(k + 1, n + k)
+            for k in range(n - 1):
+                c.measure(n + k, r * n_anc + k)
+            if r + 1 < rounds:
+                for k in range(n - 1):
+                    c.reset(n + k)
+        for i in range(n):
+            c.measure(i, n_anc * rounds + i)
         return c
 
 class ShorCode:

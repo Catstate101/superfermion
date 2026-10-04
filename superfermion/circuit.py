@@ -236,9 +236,11 @@ class Circuit:
         resolved_params = [self._resolve_param(p) for p in (params or [])]
         condition = self._pending_condition
         self._pending_condition = None
-        if condition is not None and self._use_rust:
-            # Rust GateSequence cannot carry classical conditions; convert to
-            # Python GateRecords (lazy) so the condition is preserved.
+        if self._use_rust and (condition is not None
+                               or any(isinstance(p, SymbolicParameter) for p in resolved_params)):
+            # Rust GateSequence can carry neither classical conditions nor
+            # symbolic parameter names (it stores a placeholder 0.0). Convert to
+            # Python GateRecords (lazy) so bind() can substitute the symbols.
             self._ensure_gates()
         if self._use_rust:
             # Push to Rust GateSequence — zero Python GateRecord allocation
@@ -409,9 +411,15 @@ class Circuit:
         lam: ParamValue,
         control: int,
         target: int,
+        gamma: ParamValue = 0.0,
     ) -> Circuit:
-        """Controlled-U3 gate."""
-        return self._add_gate("CU", [control, target], [theta, phi, lam])
+        """Controlled-U3 gate with optional Qiskit-style gamma phase.
+
+        Matrix (control first): ``diag(I, e^{iγ}·U3(θ,φ,λ))``. ``gamma=0``
+        reproduces the plain controlled-U3 held by older Superfermion
+        versions, so existing positional calls are unchanged.
+        """
+        return self._add_gate("CU", [control, target], [theta, phi, lam, gamma])
 
     def cu3(
         self,
@@ -420,9 +428,10 @@ class Circuit:
         lam: ParamValue,
         control: int,
         target: int,
+        gamma: ParamValue = 0.0,
     ) -> Circuit:
-        """Alias for CU."""
-        return self.cu(theta, phi, lam, control, target)
+        """Alias for CU (accepts the same optional ``gamma``)."""
+        return self.cu(theta, phi, lam, control, target, gamma)
 
     # ───────────────────────────────────────────────────────
     # Two-qubit gates

@@ -61,6 +61,22 @@ correction = decoder.decode(syndrome)
 print(f"Correction: {correction}")
 ```
 
+### Repetition code
+
+`RepetitionCode` supports any length `n >= 2` and optional repeated
+syndrome-extraction rounds. Layout: `n` data qubits `[0..n-1]` plus `n-1`
+ancillas, with check `k` measuring `d_k (+) d_{k+1}`.
+
+```python
+from superfermion.qec import RepetitionCode, MWPMDecoder
+
+rep = RepetitionCode(n=5)
+print(rep.syndrome_map())            # [[0, 1], [1, 2], [2, 3], [3, 4]]
+circuit = rep.build(rounds=3)        # 3 rounds; fresh classical bits per round
+
+dec = MWPMDecoder.for_repetition(5)  # ML-optimal chain decoding
+```
+
 ## Decoders
 
 | Decoder | Algorithm | Best For |

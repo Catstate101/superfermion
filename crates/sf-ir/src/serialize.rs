@@ -164,7 +164,7 @@ impl SerializedCircuit {
             "R1" => Some(OpType::R1(param(0))),
             "P" => Some(OpType::P(param(0))),
             "U" => Some(OpType::U(param(0), param(1), param(2))),
-            "Cu" => Some(OpType::Cu(param(0), param(1), param(2))),
+            "Cu" => Some(OpType::Cu(param(0), param(1), param(2), param(3))),
             "CNOT" => Some(OpType::CNOT),
             "CZ" => Some(OpType::CZ),
             "CY" => Some(OpType::CY),
@@ -218,6 +218,7 @@ mod tests {
                 crate::ops::Parameter::Const(0.6),
                 crate::ops::Parameter::Const(0.9),
                 crate::ops::Parameter::Const(1.3),
+                crate::ops::Parameter::Const(0.4),
             ),
             &[0, 1],
         );

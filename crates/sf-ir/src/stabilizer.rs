@@ -1,7 +1,7 @@
 //! Clifford stabilizer tableau (Aaronson–Gottesman 2004) + standalone Pauli twirl.
 //!
 //! `StabilizerTableau` — O(n) gate updates, O(n³) sampling via AG algorithm 1.
-//! Word-packed representation (ceil(n/64) u64s per row) supports n ≤ 1024.
+//! Word-packed representation (ceil(n/64) u64s per row) supports n ≤ 4096.
 //! `pauli_twirl_gate_list` — standalone gate-level Pauli twirl, no DAG dependency.
 
 use rand::rngs::StdRng;
@@ -10,8 +10,10 @@ use rand::SeedableRng;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+use crate::{OpType, QuantumDAG};
+
 // ═══════════════════════════════════════════════════════════
-// Stabilizer Tableau (word-packed for n ≤ 1024)
+// Stabilizer Tableau (word-packed for n ≤ 4096)
 // ═══════════════════════════════════════════════════════════
 
 pub struct StabilizerTableau {
@@ -44,7 +46,7 @@ enum PlanEntry {
 
 impl StabilizerTableau {
     pub fn new(n: usize) -> Self {
-        assert!(n <= 1024, "Tableau supports n ≤ 1024");
+        assert!(n <= 4096, "Tableau supports n ≤ 4096");
         let words = n.div_ceil(64);
         let mut x = vec![vec![0u64; words]; 2 * n];
         let mut z = vec![vec![0u64; words]; 2 * n];
@@ -70,13 +72,14 @@ impl StabilizerTableau {
 
     pub fn h(&mut self, q: usize) {
         let w = q / 64;
-        let mask = 1u64 << (q % 64);
+        let bit = q % 64;
+        let mask = 1u64 << bit;
         for i in 0..2 * self.n {
-            let xq = (self.x[i][w] >> (q % 64)) & 1;
-            let zq = (self.z[i][w] >> (q % 64)) & 1;
+            let xq = (self.x[i][w] >> bit) & 1;
+            let zq = (self.z[i][w] >> bit) & 1;
             self.r[i] ^= xq & zq;
-            self.x[i][w] = (self.x[i][w] & !mask) | (zq << (q % 64));
-            self.z[i][w] = (self.z[i][w] & !mask) | (xq << (q % 64));
+            self.x[i][w] = (self.x[i][w] & !mask) | (zq << bit);
+            self.z[i][w] = (self.z[i][w] & !mask) | (xq << bit);
         }
     }
 
@@ -210,6 +213,40 @@ impl StabilizerTableau {
         let mut tab = Self::new(n);
         for (name, qubits) in gates {
             tab.apply_gate(name, qubits)?;
+        }
+        Ok(tab)
+    }
+
+    /// Build and evolve a tableau directly from the DAG (typed fast path).
+    ///
+    /// Identical semantics to `from_gate_list` (BARRIER/MEASURE/RESET
+    /// skipped, ID no-op, non-Clifford ops rejected) but dispatches on the
+    /// typed `OpType` enum — no per-gate String allocation, uppercasing,
+    /// or qubit-vec cloning.
+    pub fn from_dag(dag: &QuantumDAG) -> Result<Self, String> {
+        let mut tab = Self::new(dag.n_qubits);
+        for id in dag.topological_order() {
+            let op = &dag.graph()[id];
+            let q = &op.qubits;
+            match &op.op_type {
+                OpType::H => tab.h(q[0]),
+                OpType::S => tab.s(q[0]),
+                OpType::Sdg => tab.sdg(q[0]),
+                OpType::SX => {
+                    tab.h(q[0]);
+                    tab.s(q[0]);
+                    tab.h(q[0]);
+                }
+                OpType::X => tab.x_gate(q[0]),
+                OpType::Y => tab.y_gate(q[0]),
+                OpType::Z => tab.z_gate(q[0]),
+                OpType::CNOT => tab.cnot(q[0], q[1]),
+                OpType::CZ => tab.cz(q[0], q[1]),
+                OpType::CY => tab.cy(q[0], q[1]),
+                OpType::SWAP => tab.swap(q[0], q[1]),
+                OpType::Id | OpType::Barrier | OpType::Measure | OpType::Reset => {}
+                other => return Err(format!("Unsupported gate: {:?}", other)),
+            }
         }
         Ok(tab)
     }

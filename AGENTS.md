@@ -31,9 +31,14 @@ cp target/release/lib_sf_core.so superfermion/_sf_core.so
 ```
 
 ### 2. Endianness
-Superfermion uses **q0=MSB** (big-endian). Qiskit and the Rust core use
-**q0=LSB** (little-endian). All bridge functions must reverse qubit indices:
-`n - 1 - q`. See `superfermion/bridge/__init__.py`.
+Superfermion's statevector, Qiskit, and the Rust core all use **q0=LSB**
+(little-endian): qubit `q` is bit `q` of the amplitude index. SF Pauli
+strings and gate qubit lists are **q0-first** (leftmost char / first index
+= qubit 0), matching PennyLane/Qiskit wire order. Bridge qubit labels
+therefore pass through unchanged (`q -> q`); do **not** apply `n - 1 - q`.
+The one exception is `Circuit.unitary()`, which stores **big-endian**
+matrices, so `from_qiskit`/`to_qiskit` bit-reverse unitary matrices (see
+`_bit_reverse_matrix`). See `superfermion/bridge/__init__.py`.
 
 ### 3. Testing Before Changes
 ```bash

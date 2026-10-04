@@ -8,6 +8,17 @@ vs parameter-shift.
 Public API:
     adjoint_grad_vector(circuit, observable, param_names, param_values)
     adjoint_grad(circuit, observable, params_dict)
+
+Observable convention (verified to ~1e-16 vs parameter-shift):
+    Pauli strings are MSB-first: the leftmost character acts on qubit 0,
+    matching PennyLane (``qml.Z(0)``) and Qiskit wire ordering.  E.g. on a
+    4-qubit circuit ``"ZIII"`` measures Z on qubit 0.  ``params_dict`` must
+    bind *every* circuit parameter (trainable + embedding values alike).
+
+Example:
+    >>> from superfermion.qml.gradient.adjoint import adjoint_grad
+    >>> g = adjoint_grad(circuit, "ZIII", {"t0": 0.5, "x0": 0.2, ...})
+    >>> g["t0"]  # d<Z0>/d(t0)
 """
 from __future__ import annotations
 
@@ -79,6 +90,16 @@ def adjoint_grad_vector(
 
     Drop-in replacement for ``parameter_shift_grad_vector``.
 
+    Args:
+        circuit: Parametric ``sf.Circuit`` (built with ``sf.param``).
+        observable: str ("ZIII", MSB-first: leftmost char = qubit 0),
+            dict, SparsePauliOp, or Hamiltonian-like.
+        param_names: trainable parameter names to differentiate.
+        param_values: values aligned with ``param_names``. NOTE: the
+            underlying DAG call requires *all* circuit parameters bound —
+            use ``adjoint_grad`` with a full dict when the circuit also
+            has embedding/feature parameters.
+
     Returns an array of shape ``(len(param_names),)`` with d<O>/d(theta_k).
     """
     params_dict = {nm: float(v) for nm, v in zip(param_names, param_values)}
@@ -95,7 +116,12 @@ def adjoint_grad(
     observable,
     params: Dict[str, float],
 ) -> Dict[str, float]:
-    """Dict-form adjoint gradient (analogue of ``parameter_shift_grad``)."""
+    """Dict-form adjoint gradient (analogue of ``parameter_shift_grad``).
+
+    ``params`` must bind every circuit parameter (trainable + embedding);
+    the returned dict holds gradients for all of them (embedding entries
+    carry the feature-Jacobian and are usually ignored).
+    """
     names = list(params.keys())
     vals = np.array([params[nm] for nm in names])
     g = adjoint_grad_vector(circuit, observable, names, vals)
