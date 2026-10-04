@@ -411,9 +411,15 @@ class Circuit:
         lam: ParamValue,
         control: int,
         target: int,
+        gamma: ParamValue = 0.0,
     ) -> Circuit:
-        """Controlled-U3 gate."""
-        return self._add_gate("CU", [control, target], [theta, phi, lam])
+        """Controlled-U3 gate with optional Qiskit-style gamma phase.
+
+        Matrix (control first): ``diag(I, e^{iγ}·U3(θ,φ,λ))``. ``gamma=0``
+        reproduces the plain controlled-U3 held by older Superfermion
+        versions, so existing positional calls are unchanged.
+        """
+        return self._add_gate("CU", [control, target], [theta, phi, lam, gamma])
 
     def cu3(
         self,
@@ -422,9 +428,10 @@ class Circuit:
         lam: ParamValue,
         control: int,
         target: int,
+        gamma: ParamValue = 0.0,
     ) -> Circuit:
-        """Alias for CU."""
-        return self.cu(theta, phi, lam, control, target)
+        """Alias for CU (accepts the same optional ``gamma``)."""
+        return self.cu(theta, phi, lam, control, target, gamma)
 
     # ───────────────────────────────────────────────────────
     # Two-qubit gates

@@ -8,13 +8,14 @@ simulate, differentiate and serialize exactly, without decomposition.
 
 ## Controlled-U3: cu / cu3
 
-`circuit.cu(theta, phi, lam, control, target)` (alias `cu3`) applies a
-controlled U3 rotation
+`circuit.cu(theta, phi, lam, control, target, gamma=0.0)` (alias `cu3`)
+applies a controlled U3 rotation with Qiskit's optional gamma phase:
 
-**CU = diag(I, U3(θ, φ, λ))**
+**CU = diag(I, e^{iγ}·U3(θ, φ, λ))**
 
-— the same control-first, `diag(I, U3)` convention as PennyLane's
-`qml.CU`:
+— the same control-first layout as Qiskit's `CUGate`. `gamma` defaults to
+`0`, which reproduces the original controlled-U3 (and PennyLane's `qml.CU`),
+so existing calls are unchanged:
 
 ```python
 import superfermion as sf
@@ -37,6 +38,22 @@ print(sf.expval(sv, sf.PauliString("ZI", coeffs=1.0)))  # -1.0
 
 The gates accept symbolic parameters like any other rotation, work
 with gradients, and are preserved by `compile()` optimization passes.
+
+### Qiskit gamma phase
+
+`cu` accepts Qiskit's fourth `gamma` parameter — a phase `e^{iγ}` on the
+control-1 subspace. `from_qiskit`/`to_qiskit` map it **natively** (the gate
+is no longer routed through a lossy matrix fallback):
+
+```python
+from qiskit import QuantumCircuit
+from superfermion.bridge import from_qiskit
+
+qc = QuantumCircuit(2).cu(0.7, 0.3, 0.2, 0.9, 0, 1)   # theta, phi, lam, gamma
+sf_qc = from_qiskit(qc)              # imports as a native CU gate
+# equivalent, all-native Superfermion form:
+sf_qc = sf.Circuit(2).cu(0.7, 0.3, 0.2, 0, 1, 0.9)   # gamma is last here
+```
 
 ## Controlled-phase: cp
 

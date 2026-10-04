@@ -1346,7 +1346,8 @@ impl PyQuantumDAG {
                 let theta = params.first().cloned().unwrap_or(Parameter::Const(0.0));
                 let phi = params.get(1).cloned().unwrap_or(Parameter::Const(0.0));
                 let lam = params.get(2).cloned().unwrap_or(Parameter::Const(0.0));
-                Ok(OpType::Cu(theta, phi, lam))
+                let gamma = params.get(3).cloned().unwrap_or(Parameter::Const(0.0));
+                Ok(OpType::Cu(theta, phi, lam, gamma))
             }
             "rzz" => {
                 let theta = params.first().cloned().unwrap_or(Parameter::Const(0.0));

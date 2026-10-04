@@ -638,7 +638,6 @@ mod tests {
 
     fn brute_optimal_weight(map: &[Vec<usize>], n: usize, syn: &[u8]) -> Option<usize> {
         // Minimum error weight satisfying H*e == s, by exhaustive search.
-        let m = map.len();
         let mut best: Option<usize> = None;
         for mask in 0..(1usize << n) {
             let mut ok = true;

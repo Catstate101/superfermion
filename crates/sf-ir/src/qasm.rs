@@ -267,6 +267,7 @@ fn map_gate(name: &str, params: &[f64]) -> Option<OpType> {
     let p0 = || params.first().copied().unwrap_or(0.0);
     let p1 = || params.get(1).copied().unwrap_or(0.0);
     let p2 = || params.get(2).copied().unwrap_or(0.0);
+    let p3 = || params.get(3).copied().unwrap_or(0.0);
 
     match name {
         "h" => Some(OpType::H),
@@ -294,6 +295,7 @@ fn map_gate(name: &str, params: &[f64]) -> Option<OpType> {
             Parameter::Const(p0()),
             Parameter::Const(p1()),
             Parameter::Const(p2()),
+            Parameter::Const(p3()),
         )),
         "cx" | "cnot" => Some(OpType::CNOT),
         "cz" => Some(OpType::CZ),

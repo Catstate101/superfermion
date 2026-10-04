@@ -172,3 +172,72 @@ class TestQiskitEndianness:
         sf_sv = np.asarray(c.to_ir().simulate())
         qk_sv = np.asarray(Statevector.from_instruction(bridge.to_qiskit(c)))
         np.testing.assert_allclose(qk_sv, sf_sv, atol=1e-12)
+
+
+class TestControlledUGamma:
+    """SF's CU gate carries the Qiskit gamma phase natively (matrix
+    ``diag(I, e^{i\\gamma}·U3(\\theta,\\phi,\\lambda))``); gamma defaults to 0 so
+    the original 5-argument calls are unchanged."""
+
+    TH, PH, LM, G = 0.7, 0.3, 0.2, 0.9
+
+    def test_gamma_matches_qiskit(self):
+        import numpy as np
+
+        pytest.importorskip("qiskit")
+        from qiskit import QuantumCircuit
+        from qiskit.quantum_info import Operator
+
+        qc = QuantumCircuit(2)
+        qc.cu(self.TH, self.PH, self.LM, self.G, 0, 1)
+        sf_u = np.asarray(
+            sf.Circuit(2).cu(self.TH, self.PH, self.LM, 0, 1, self.G).to_ir().to_unitary()
+        )
+        np.testing.assert_allclose(sf_u, np.asarray(Operator(qc).data), atol=1e-12)
+
+    def test_default_gamma_is_zero(self):
+        import numpy as np
+
+        u5 = np.asarray(sf.Circuit(2).cu(self.TH, self.PH, self.LM, 0, 1).to_ir().to_unitary())
+        u6 = np.asarray(
+            sf.Circuit(2).cu(self.TH, self.PH, self.LM, 0, 1, 0.0).to_ir().to_unitary()
+        )
+        np.testing.assert_allclose(u5, u6, atol=1e-12)
+
+    def test_from_qiskit_cu_stays_native_with_gamma(self):
+        import numpy as np
+
+        pytest.importorskip("qiskit")
+        bridge = pytest.importorskip("superfermion.bridge")
+        from qiskit import QuantumCircuit
+        from qiskit.quantum_info import Statevector
+
+        qc = QuantumCircuit(2)
+        qc.cu(self.TH, self.PH, self.LM, self.G, 0, 1)
+        sfc = bridge.from_qiskit(qc)
+        assert [g["name"] for g in sfc.to_gate_list()] == ["CU"]
+        np.testing.assert_allclose(
+            np.asarray(sf.simulate(sfc).numpy()),
+            np.asarray(Statevector.from_instruction(qc)),
+            atol=1e-12,
+        )
+        back = bridge.to_qiskit(sfc)
+        from qiskit.quantum_info import Operator
+
+        np.testing.assert_allclose(
+            np.asarray(Operator(back).data), np.asarray(Operator(qc).data), atol=1e-12
+        )
+
+    def test_parametric_gamma_binds(self):
+        import numpy as np
+
+        c = sf.Circuit(2).cu(
+            sf.param("t"), sf.param("p"), sf.param("l"), 0, 1, sf.param("g")
+        )
+        bound = c.bind({"t": self.TH, "p": self.PH, "l": self.LM, "g": self.G})
+        ref = sf.Circuit(2).cu(self.TH, self.PH, self.LM, 0, 1, self.G)
+        np.testing.assert_allclose(
+            np.asarray(bound.to_ir().to_unitary()),
+            np.asarray(ref.to_ir().to_unitary()),
+            atol=1e-12,
+        )

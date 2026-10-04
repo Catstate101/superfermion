@@ -325,10 +325,12 @@ fn parse_gate_name(name: &str, params: &[f64]) -> OpType {
             let a = params.first().copied().unwrap_or(0.0);
             let b = params.get(1).copied().unwrap_or(0.0);
             let c = params.get(2).copied().unwrap_or(0.0);
+            let d = params.get(3).copied().unwrap_or(0.0);
             OpType::Cu(
                 Parameter::Const(a),
                 Parameter::Const(b),
                 Parameter::Const(c),
+                Parameter::Const(d),
             )
         }
         "measure" => OpType::Measure,

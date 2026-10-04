@@ -57,10 +57,9 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
         'sx': 'sx', 'id': 'id',
         'rx': 'rx', 'ry': 'ry', 'rz': 'rz',
         'p': 'p', 'u': 'u', 'u3': 'u3',
-        # NOTE: 'cu'/'cu3' intentionally absent: Qiskit carries a gamma
-        # phase SF's cu/cu3 lack, so they go through the exact matrix
-        # fallback below instead of a lossy native mapping.
-        'cp': 'cp',
+        # SF's cu/cu3 carry the Qiskit gamma phase natively (added after the
+        # original 3-param definition; gamma defaults to 0).
+        'cu': 'cu', 'cu3': 'cu3', 'cp': 'cp',
         'cx': 'cx', 'cnot': 'cx',
         'cz': 'cz', 'cy': 'cy',
         'swap': 'swap', 'iswap': 'iswap',
@@ -85,6 +84,14 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
             return
 
         sf_name = GATE_MAP.get(gate_name)
+        if sf_name in ("cu", "cu3"):
+            # Qiskit order is (theta, phi, lam, gamma) then control/target;
+            # SF keeps gamma last (defaulted), so reorder explicitly.
+            vals = list(params)
+            theta, phi, lam = (vals + [0.0, 0.0, 0.0])[:3]
+            gamma = vals[3] if len(vals) > 3 else 0.0
+            getattr(circuit, sf_name)(theta, phi, lam, qubits[0], qubits[1], gamma)
+            return
         if sf_name is not None:
             method = getattr(circuit, sf_name)
             if params:
@@ -184,8 +191,10 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
             cbit = gate.classical_bits[0] if gate.classical_bits else gate.qubits[0]
             method(mapped_qubits[0], cbit)
         elif gate.name in ("CU", "CU3"):
-            theta, phi, lam = gate.params
-            method(theta, phi, lam, 0, *mapped_qubits)
+            # SF stores [theta, phi, lam, gamma]; Qiskit cu takes the same
+            # four followed by control/target. Pad gamma for legacy records.
+            p = (list(gate.params) + [0.0, 0.0, 0.0, 0.0])[:4]
+            method(p[0], p[1], p[2], p[3], *mapped_qubits)
         elif gate.name == "U3":
             method(*gate.params, *mapped_qubits)
         elif gate.params:

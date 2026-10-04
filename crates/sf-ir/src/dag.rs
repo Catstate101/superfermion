@@ -3987,7 +3987,10 @@ fn op_type_to_name_params(op: &OpType) -> (String, Vec<f64>) {
         OpType::R1(p) => ("r1".into(), vec![p.evaluate()]),
         OpType::P(p) => ("p".into(), vec![p.evaluate()]),
         OpType::U(a, b, c) => ("u".into(), vec![a.evaluate(), b.evaluate(), c.evaluate()]),
-        OpType::Cu(a, b, c) => ("cu".into(), vec![a.evaluate(), b.evaluate(), c.evaluate()]),
+        OpType::Cu(a, b, c, d) => (
+            "cu".into(),
+            vec![a.evaluate(), b.evaluate(), c.evaluate(), d.evaluate()],
+        ),
         OpType::CNOT => ("cx".into(), vec![]),
         OpType::CZ => ("cz".into(), vec![]),
         OpType::CY => ("cy".into(), vec![]),

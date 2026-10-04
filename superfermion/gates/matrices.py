@@ -123,11 +123,13 @@ def gate_unitary_matrix(
 
     # Parameterised 2-qubit gates
     if name in ("CU", "CU3"):
-        theta, phi, lam = params if len(params) >= 3 else (0, 0, 0)
+        theta, phi, lam = params[:3] if len(params) >= 3 else (0, 0, 0)
+        gamma = params[3] if len(params) >= 4 else 0.0
         c, s = _cos(theta/2), _sin(theta/2)
+        eg = np.exp(1j * gamma)
         u3 = np.array([
-            [c, -np.exp(1j*lam)*s],
-            [np.exp(1j*phi)*s, np.exp(1j*(phi+lam))*c]
+            [eg * c, -eg * np.exp(1j*lam) * s],
+            [eg * np.exp(1j*phi) * s, eg * np.exp(1j*(phi+lam)) * c]
         ], dtype=np.complex128)
         res = np.eye(4, dtype=np.complex128)
         res[2:, 2:] = u3
