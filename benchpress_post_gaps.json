@@ -2,10 +2,10 @@
   {
     "category": "Manipulation",
     "test": "bench_basis_change",
-    "sf_time_s": 1.700532499999099,
-    "qk_time_s": 4.803939100002026,
+    "sf_time_s": 1.4586435000019264,
+    "qk_time_s": 2.1755278000018734,
     "winner": "SF",
-    "ratio": "2.8x",
+    "ratio": "1.5x",
     "sf_extra": {
       "gate_count_2q": 500,
       "target_basis": [
@@ -28,106 +28,106 @@
   {
     "category": "Transpilation",
     "test": "bench_qft_transpile",
-    "sf_time_s": 2.779037700001936,
-    "qk_time_s": 4.233879600000364,
+    "sf_time_s": 3.2894027000002097,
+    "qk_time_s": 4.439965900000971,
     "winner": "SF",
-    "ratio": "1.5x",
+    "ratio": "1.3x",
     "sf_extra": {
       "gate_count": 39456,
       "gate_count_2q": 26776
     },
     "qk_extra": {
-      "gate_count": 46974,
-      "gate_count_2q": 8233
+      "gate_count": 46416,
+      "gate_count_2q": 8179
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_qv_transpile",
-    "sf_time_s": 0.8963890999984869,
-    "qk_time_s": 3.5274042999990343,
+    "sf_time_s": 0.7756117999997514,
+    "qk_time_s": 3.4002454000001308,
     "winner": "SF",
-    "ratio": "3.9x",
+    "ratio": "4.4x",
     "sf_extra": {
-      "gate_count": 11521,
-      "gate_count_2q": 6196
+      "gate_count": 11484,
+      "gate_count_2q": 6189
     },
     "qk_extra": {
-      "gate_count": 27692,
-      "gate_count_2q": 4775
+      "gate_count": 28471,
+      "gate_count_2q": 4910
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_su2_transpile",
-    "sf_time_s": 0.06793379999726312,
-    "qk_time_s": 12.331649599997036,
+    "sf_time_s": 0.07949850000295555,
+    "qk_time_s": 14.795525300000008,
     "winner": "SF",
-    "ratio": "181.5x",
+    "ratio": "186.1x",
     "sf_extra": {
       "gate_count": 1752,
       "gate_count_2q": 752
     },
     "qk_extra": {
-      "gate_count": 4354,
-      "gate_count_2q": 627
+      "gate_count": 4446,
+      "gate_count_2q": 649
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_bv_transpile",
-    "sf_time_s": 0.009855799999058945,
-    "qk_time_s": 1.686565399999381,
+    "sf_time_s": 0.009860199999820907,
+    "qk_time_s": 1.958430099999532,
     "winner": "SF",
-    "ratio": "171.1x",
+    "ratio": "198.6x",
     "sf_extra": {
-      "gate_count": 647,
-      "gate_count_2q": 232
+      "gate_count": 635,
+      "gate_count_2q": 230
     },
     "qk_extra": {
-      "gate_count": 808,
-      "gate_count_2q": 126
+      "gate_count": 773,
+      "gate_count_2q": 115
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_heisenberg_transpile",
-    "sf_time_s": 0.014076999999815598,
-    "qk_time_s": 12.18804739999905,
+    "sf_time_s": 0.017091900001105387,
+    "qk_time_s": 12.071144800000184,
     "winner": "SF",
-    "ratio": "865.8x",
+    "ratio": "706.2x",
     "sf_extra": {
       "gate_count": 1376,
       "gate_count_2q": 421
     },
     "qk_extra": {
-      "gate_count": 2617,
-      "gate_count_2q": 450
+      "gate_count": 2598,
+      "gate_count_2q": 447
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_qaoa_transpile",
-    "sf_time_s": 0.028009400000883033,
-    "qk_time_s": 1.6789222000006703,
+    "sf_time_s": 0.03553230000034091,
+    "qk_time_s": 1.5888808999989124,
     "winner": "SF",
-    "ratio": "59.9x",
+    "ratio": "44.7x",
     "sf_extra": {
       "gate_count": 2359,
       "gate_count_2q": 949
     },
     "qk_extra": {
-      "gate_count": 4167,
+      "gate_count": 4173,
       "gate_count_2q": 709
     }
   },
   {
     "category": "Transpilation",
     "test": "bench_simplification_transpile",
-    "sf_time_s": 0.009296099997300189,
-    "qk_time_s": 1.4413626000023214,
+    "sf_time_s": 0.010084699999424629,
+    "qk_time_s": 1.7062533999996958,
     "winner": "SF",
-    "ratio": "155.1x",
+    "ratio": "169.2x",
     "sf_extra": {
       "gate_count": 500,
       "gate_count_2q": 0
@@ -140,17 +140,17 @@
   {
     "category": "Transpilation",
     "test": "bench_clifford_transpile",
-    "sf_time_s": 6.250246900002821,
-    "qk_time_s": 23.982700000000477,
+    "sf_time_s": 6.077953899999557,
+    "qk_time_s": 22.0037983000002,
     "winner": "SF",
-    "ratio": "3.8x",
+    "ratio": "3.6x",
     "sf_extra": {
-      "gate_count": 114773,
-      "gate_count_2q": 66433
+      "gate_count": 114627,
+      "gate_count_2q": 66427
     },
     "qk_extra": {
-      "gate_count": 318463,
-      "gate_count_2q": 58183
+      "gate_count": 316160,
+      "gate_count_2q": 57738
     }
   }
 ]

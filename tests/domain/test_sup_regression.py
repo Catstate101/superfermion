@@ -24,7 +24,8 @@ Each class mirrors one per-fix verification script (see the repo-root
 (s) multi-1q noise channels compose sequentially, trace 1         (SUP-31)
 (t) two-qubit noise channels applied on DM, trace preserved       (SUP-32)
 (u) noise_model warns on sv/stabilizer/mps, silent on DM          (SUP-33)
-(v) stabilizer n>1024 raises ValueError (no Rust PanicException)  (SUP-34)
+(v) stabilizer n>4096 raises ValueError (no Rust PanicException);
+    n=1500 allowed past the old 1024 cap                  (SUP-34)
 (w) density_matrix rho docstring states q0-first convention       (SUP-35)
 
 Conventions assumed (documented in guides/execution.mdx):
@@ -1385,11 +1386,20 @@ class TestSup34StabilizerQubitCap:
         assert set(res.counts) <= {"00000000", "11111111"}
 
     def test_n_gt_1024_raises_valueerror(self):
-        """(v) n=1025 used to surface as a Rust PanicException; it must now
-        raise a catchable ValueError naming the 1024 limit."""
-        cbig = Circuit(1025).h(0).cnot(0, 1)
-        with pytest.raises(ValueError, match="1024"):
+        """(v) n beyond the tableau cap used to surface as a Rust
+        PanicException; it must now raise a catchable ValueError naming
+        the 4096 limit (cap lifted 1024 -> 4096, tableau verified to 2000q)."""
+        cbig = Circuit(4097).h(0).cnot(0, 1)
+        with pytest.raises(ValueError, match="4096"):
             sf.run(cbig, method="stabilizer", shots=0)
+
+    def test_n_1500_stabilizer_allowed(self):
+        """(v2) n=1500 GHZ works past the old 1024 cap (TVD vs exact: GHZ-only keys)."""
+        c = Circuit(1500).h(0)
+        for i in range(1499):
+            c.cnot(i, i + 1)
+        res = sf.run(c, method="stabilizer", shots=200, seed=3)
+        assert set(res.counts) <= {"0" * 1500, "1" * 1500}
 
 
 class TestSup35DensityMatrixDocstring:

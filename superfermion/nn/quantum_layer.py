@@ -26,21 +26,21 @@ _PAULI_MAP = {'I': 0, 'X': 1, 'Y': 2, 'Z': 3}
 def _obs_to_rust(observable) -> list:
     """Convert a SF observable to the Rust [(paulis, re, im)] format.
 
-    Python Pauli strings use MSB-first ordering (e.g. "ZI" = Z on last qubit),
-    while Rust expects LSB-indexed (paulis[0] = qubit 0), so we reverse.
+    SF Pauli strings put qubit 0 first (e.g. "ZI" = Z on qubit 0), matching
+    the Rust engine (paulis[0] = qubit 0) — no reversal.
     """
     from superfermion.observables.core import PauliString, SparsePauliOp, Hamiltonian
     terms = []
     if isinstance(observable, PauliString):
-        paulis = [_PAULI_MAP[c] for c in reversed(observable.pauli_str)]
+        paulis = [_PAULI_MAP[c] for c in observable.pauli_str]
         terms.append((paulis, float(observable.coeffs.real), float(observable.coeffs.imag)))
     elif isinstance(observable, SparsePauliOp):
         for ps, coeff in observable._terms:
-            paulis = [_PAULI_MAP[c] for c in reversed(ps)]
+            paulis = [_PAULI_MAP[c] for c in ps]
             terms.append((paulis, float(complex(coeff).real), float(complex(coeff).imag)))
     elif isinstance(observable, Hamiltonian):
         for t in observable.terms:
-            paulis = [_PAULI_MAP[c] for c in reversed(t.pauli_str)]
+            paulis = [_PAULI_MAP[c] for c in t.pauli_str]
             terms.append((paulis, float(t.coeffs.real), float(t.coeffs.imag)))
     elif isinstance(observable, list):
         return observable
@@ -86,25 +86,48 @@ class QuantumLayer(nn.Module):
         observable: Observable for expectation value measurement.
         device: Simulation device.
         method: Simulation method.
+        feature_names: optional circuit parameter names fed from the ``x``
+            input (data embedding); the rest become trainable weights.
     """
     circuit: sf.Circuit
     observable: Any
     device: str = "cpu"
     method: str = "statevector"
+    feature_names: Any = None
 
     @nn.compact
     def __call__(self, x: Optional[jnp.ndarray] = None) -> jnp.ndarray:
         param_names = list(self.circuit.parameters) if self.circuit.parameters else []
-        n_params = len(param_names)
+        feat = list(self.feature_names) if self.feature_names else []
+        unknown = [f for f in feat if f not in param_names]
+        if unknown:
+            raise ValueError(f"feature_names not in circuit.parameters: {unknown}")
+        trainable = [p for p in param_names if p not in feat]
+        n_weights = len(trainable) if feat else len(param_names)
 
-        if n_params > 0:
+        if n_weights > 0:
             weights = self.param(
                 "weights",
                 jax.nn.initializers.uniform(scale=2 * jnp.pi),
-                (n_params,),
+                (n_weights,),
             )
         else:
             weights = jnp.array([])
 
+        if not feat:
+            fn = _make_quantum_fn(self.circuit, self.observable, self.device, self.method)
+            return fn(weights)
+        if x is None:
+            raise ValueError("feature_names is set but __call__ got x=None")
+        xf = jnp.asarray(x, dtype=jnp.float64).ravel()
+        if xf.shape[0] != len(feat):
+            raise ValueError(f"expected {len(feat)} features, got {xf.shape[0]}")
+        # Functional index updates: grads flow to both x and weights.
+        full = jnp.zeros(len(param_names), dtype=jnp.float64)
+        for pos, name in enumerate(param_names):
+            if name in feat:
+                full = full.at[pos].set(xf[feat.index(name)])
+            else:
+                full = full.at[pos].set(weights[trainable.index(name)])
         fn = _make_quantum_fn(self.circuit, self.observable, self.device, self.method)
-        return fn(weights)
+        return fn(full)

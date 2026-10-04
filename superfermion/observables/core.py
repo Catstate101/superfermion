@@ -86,6 +86,139 @@ def expval(statevector: np.ndarray, observable) -> float:
     return float(np.real(observable._fast_expval(sv)))
 
 
+def mps_expval(circuit, observable, bond_dim: int = 64, params=None) -> float:
+    """Compute ⟨ψ|O|ψ⟩ directly on the MPS tensor network.
+
+    Evolves the circuit once (bond_dim cap) and evaluates every Pauli term
+    in a single batched Rust pass — the state is never densified into 2^n
+    amplitudes, so this stays cheap where ``run(method="mps").state.numpy()``
+    would OOM (e.g. GHZ-30 in milliseconds).
+
+    Args:
+        circuit: ``sf.Circuit`` (parameters must be bound, or pass ``params``).
+        observable: str ("ZIII", MSB-first: leftmost char = qubit 0, matching
+            PennyLane/Qiskit wire order), dict, SparsePauliOp, Hamiltonian-like,
+            or Rust term list [(paulis, coef_re, coef_im)].
+        bond_dim: max MPS bond dimension (default 64).
+        params: optional dict of symbolic-parameter bindings.
+
+    Returns:
+        Real expectation value (float).
+    """
+    from superfermion.qml.gradient.adjoint import _observable_to_rust_terms
+
+    if params is not None:
+        circuit = circuit.bind(params)
+    n = circuit.n_qubits
+    if isinstance(observable, (list, tuple)):
+        terms = list(observable)
+    else:
+        terms = _observable_to_rust_terms(observable, n)
+    paulis = []
+    coefs = []
+    for t in terms:
+        plist = [int(x) for x in t[0]]
+        if len(plist) != n:
+            raise ValueError(
+                f"Pauli term length {len(plist)} != n_qubits {n}. "
+                "Use one character per qubit, e.g. 'ZIII'."
+            )
+        paulis.append(plist)
+        coefs.append(complex(t[1], t[2]))
+    vals = circuit.to_ir().simulate_mps_pauli_expval_batch(bond_dim, paulis)
+    total = sum((c * complex(v[0], v[1]) for c, v in zip(coefs, vals)), start=0j)
+    return float(total.real)
+
+
+def _numba_site_step():
+    """Compile (once, cached by caller) the parallel sweep kernel.
+
+    Returns None if numba is unavailable.
+    """
+    try:
+        import numba as _nb
+    except ImportError:
+        return None
+
+    @_nb.njit(parallel=True, fastmath=True)
+    def _step(M, T, OUT, p, dl, dr):
+        # Row layout: new bit s at position idx -> row s*p + i (NOT i*2+s,
+        # which would append at bit 0 and bit-reverse the output; GHZ-symmetric
+        # states cannot catch that bug, asymmetric ones can).
+        for i in _nb.prange(p):
+            for s in range(2):
+                for r in range(dr):
+                    acc = 0j
+                    toff = s * dl
+                    for l in range(dl):
+                        acc += M[i, l] * T[toff + l, r]
+                    OUT[s * p + i, r] = acc
+
+    return _step
+
+
+_NUMBA_SITE_STEP = None
+_NUMBA_PROBED = False
+
+
+def _get_numba_site_step():
+    """Module-cached kernel getter (compiles on first use only)."""
+    global _NUMBA_SITE_STEP, _NUMBA_PROBED
+    if not _NUMBA_PROBED:
+        _NUMBA_SITE_STEP = _numba_site_step()
+        _NUMBA_PROBED = True
+    return _NUMBA_SITE_STEP
+
+
+def mps_todense(circuit, bond_dim: int = 64, params=None) -> "np.ndarray":
+    """Densify an MPS evolution to a full 2^n statevector via a numba-parallel sweep.
+
+    Evolves with ``bond_dim`` cap, then contracts left-to-right with one
+    numba-parallel kernel per site (no per-amplitude allocation, SIMD inner
+    loops). Same little-endian convention as everywhere (qubit q at bit q).
+
+    Typically ~2x faster than the Rust single-threaded densify path on
+    large states (GHZ-24: ~0.5s vs ~1.5s); trails threaded-BLAS tensor
+    libraries (~0.3s) on tall-skinny shapes.
+
+    Requires ``numba`` (a quimb dependency — present wherever MPS work
+    happens); falls back to ``sf.run(method="mps").state.numpy()`` without it.
+
+    Args:
+        circuit: ``sf.Circuit`` (parameters must be bound, or pass ``params``).
+        bond_dim: max MPS bond dimension (default 64).
+        params: optional dict of symbolic-parameter bindings.
+
+    Returns:
+        Complex statevector as numpy array.
+    """
+    import numpy as _np
+
+    if params is not None:
+        circuit = circuit.bind(params)
+    _step = _get_numba_site_step()
+    if _step is None:
+        return _np.asarray(
+            __import__("superfermion", fromlist=["run"]).run(
+                circuit, method="mps", shots=0, bond_dim=bond_dim
+            ).state.numpy()
+        )
+    tensors = [
+        _np.ascontiguousarray(t)
+        for t in circuit.to_ir().evolve_mps(bond_dim).tensors()
+    ]
+
+    M = _np.ones((1, 1), dtype=_np.complex128)
+    for t in tensors:
+        dl = t.shape[0] // 2
+        dr = t.shape[1]
+        p = M.shape[0]
+        OUT = _np.empty((2 * p, dr), dtype=_np.complex128)
+        _step(M, t, OUT, p, dl, dr)
+        M = OUT
+    return M[:, 0].copy()
+
+
 def _apply_observable(sv: np.ndarray, observable) -> np.ndarray:
     """Return O|ψ⟩ as a numpy array for PauliString / SparsePauliOp / Hamiltonian."""
     if isinstance(observable, PauliString):

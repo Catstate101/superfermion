@@ -63,7 +63,8 @@ def run(
         params: Parameter values for symbolic circuits.  If provided,
             ``circuit.bind(params)`` is called automatically.
         **kwargs: Passed through to the device executor (e.g. ``bond_dim``
-            for MPS, ``seed`` for sampling).
+            for MPS, ``seed`` for sampling, ``densify=False`` to skip the
+            shots=0 MPS densification and receive only the state handle).
 
     Returns:
         ``RunResult`` with counts, statevector, probabilities, and metadata.

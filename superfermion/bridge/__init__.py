@@ -14,6 +14,22 @@ from typing import Any
 import superfermion as sf
 
 
+def _bit_reverse_matrix(matrix, n_qubits: int):
+    """Bit-reverse a k-qubit unitary from Qiskit (little-endian) order.
+
+    Needed ONLY for ``circuit.unitary()``, which takes big-endian matrices,
+    while SF's numpy state order and named gates are little-endian
+    (Qiskit-identical, verified by truth table). Qubit labels pass through
+    unchanged; only the matrix is reordered.
+    """
+    import numpy as np
+
+    m = np.array(matrix, dtype=complex)
+    dim = 1 << n_qubits
+    rev = [int(f"{i:0{n_qubits}b}"[::-1], 2) for i in range(dim)]
+    return m[np.ix_(rev, rev)]
+
+
 def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
     """Convert a Qiskit QuantumCircuit to a Superfermion Circuit.
     
@@ -41,7 +57,10 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
         'sx': 'sx', 'id': 'id',
         'rx': 'rx', 'ry': 'ry', 'rz': 'rz',
         'p': 'p', 'u': 'u', 'u3': 'u3',
-        'cu': 'cu', 'cu3': 'cu3', 'cp': 'cp',
+        # NOTE: 'cu'/'cu3' intentionally absent: Qiskit carries a gamma
+        # phase SF's cu/cu3 lack, so they go through the exact matrix
+        # fallback below instead of a lossy native mapping.
+        'cp': 'cp',
         'cx': 'cx', 'cnot': 'cx',
         'cz': 'cz', 'cy': 'cy',
         'swap': 'swap', 'iswap': 'iswap',
@@ -52,32 +71,61 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
         'reset': 'reset',
     }
     
-    for instruction in qiskit_circuit.data:
-        gate = instruction.operation
-        gate_name = gate.name.lower()
-        qubits = [n_qubits - 1 - qiskit_circuit.find_bit(q).index for q in instruction.qubits]
-        params = list(gate.params) if gate.params else []
-        
+    def convert_instruction(operation, qubits, depth=0):
+        """Convert one Qiskit instruction (recursive for composites)."""
+        if depth > 8:
+            raise ValueError(f"Definition recursion too deep for '{operation.name}'")
+        gate_name = operation.name.lower()
+        params = list(operation.params) if operation.params else []
+
         if gate_name == "unitary":
             import numpy as np
-            matrix = np.array(gate.to_matrix())
-            circuit.unitary(matrix, qubits)
-            continue
-        
+            matrix = np.array(operation.to_matrix())
+            circuit.unitary(_bit_reverse_matrix(matrix, len(qubits)), qubits)
+            return
+
         sf_name = GATE_MAP.get(gate_name)
-        if sf_name is None:
-            raise ValueError(
-                f"Unsupported Qiskit gate: '{gate.name}'. "
-                f"Supported: {list(GATE_MAP.keys()) + ['unitary']}"
-            )
-        
-        method = getattr(circuit, sf_name)
-        
-        if params:
-            method(*params, *qubits)
-        else:
-            method(*qubits)
-    
+        if sf_name is not None:
+            method = getattr(circuit, sf_name)
+            if params:
+                method(*params, *qubits)
+            else:
+                method(*qubits)
+            return
+
+        # Fallback 1: fixed matrix (ch, crx, rzz, c3sx, ...).
+        try:
+            import numpy as np
+            matrix = np.array(operation.to_matrix())
+            circuit.unitary(_bit_reverse_matrix(matrix, len(qubits)), qubits)
+            return
+        except Exception:
+            pass
+
+        # Fallback 2: definition expansion (IQFT, CDKM, custom composites).
+        # Maps the definition's local qubits onto the physical ones.
+        definition = getattr(operation, "definition", None)
+        if definition is not None:
+            local_map = {}
+            for dq in definition.qubits:
+                local_map[dq] = qubits[definition.find_bit(dq).index]
+            for sub in definition.data:
+                sub_q = [local_map[q] for q in sub.qubits]
+                # bind no params here: parameterized composites carry
+                # concrete values through their own definition closure
+                convert_instruction(sub.operation, sub_q, depth + 1)
+            return
+
+        raise ValueError(
+            f"Unsupported Qiskit gate: '{operation.name}'. "
+            f"Supported: {list(GATE_MAP.keys()) + ['unitary']}"
+        )
+
+    for instruction in qiskit_circuit.data:
+        gate = instruction.operation
+        qubits = [qiskit_circuit.find_bit(q).index for q in instruction.qubits]
+        convert_instruction(gate, qubits)
+
     return circuit
 
 
@@ -92,7 +140,10 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
         raise ImportError("Qiskit is required: pip install qiskit")
     
     qc = QuantumCircuit(circuit.n_qubits, circuit.n_cbits)
-    
+
+    # Materialize Rust-stored gates so ``_gates`` is populated.
+    circuit._ensure_gates()
+
     GATE_MAP = {
         'H': 'h', 'X': 'x', 'Y': 'y', 'Z': 'z',
         'S': 's', 'SDG': 'sdg', 'T': 't', 'TDG': 'tdg',
@@ -114,8 +165,10 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
     for gate in circuit._gates:
         if gate.name.upper() == "UNITARY" and gate.matrix is not None:
             from qiskit.circuit.library import UnitaryGate
-            mapped_qubits = [circuit.n_qubits - 1 - q for q in gate.qubits]
-            qc.append(UnitaryGate(gate.matrix), mapped_qubits)
+            # ``circuit.unitary()`` stores big-endian matrices; Qiskit /
+            # SF state order is little-endian, so bit-reverse on export.
+            matrix = _bit_reverse_matrix(gate.matrix, len(gate.qubits))
+            qc.append(UnitaryGate(matrix), list(gate.qubits))
             continue
 
         qiskit_name = GATE_MAP.get(gate.name.upper())
@@ -123,15 +176,13 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
             raise ValueError(f"Cannot map gate '{gate.name}' to Qiskit")
         
         method = getattr(qc, qiskit_name)
-        # Reverse endianness: SF MSB (0) -> Qiskit LSB (n-1)
-        mapped_qubits = [circuit.n_qubits - 1 - q for q in gate.qubits]
+        # Qubit labels pass through unchanged: SF and Qiskit share the
+        # little-endian (q0=LSB) state order.
+        mapped_qubits = list(gate.qubits)
         
         if gate.name == "MEASURE":
             cbit = gate.classical_bits[0] if gate.classical_bits else gate.qubits[0]
-            # Classical bits usually follow the same order or are left as is? 
-            # In Qiskit, cbit 0 is also rightmost. So we reverse them too.
-            mapped_cbit = circuit.n_cbits - 1 - cbit
-            method(mapped_qubits[0], mapped_cbit)
+            method(mapped_qubits[0], cbit)
         elif gate.name in ("CU", "CU3"):
             theta, phi, lam = gate.params
             method(theta, phi, lam, 0, *mapped_qubits)
@@ -742,6 +793,82 @@ def to_pennylane(circuit: sf.Circuit) -> Any:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# Stim Bridge
+# ═════════════════════════════════════════════════════════════════════════
+
+def to_stim(circuit: sf.Circuit):
+    """Convert a Superfermion Clifford circuit to a Stim circuit.
+
+    Gives SF users access to Stim's fast tableau sampler, detector
+    machinery, and sinter/pymatching ecosystem for circuits built in SF.
+
+    Only Clifford gates are supported (H, X, Y, Z, S, SDG, SX, CX/CNOT,
+    CZ, CY, SWAP, ID, RESET, MEASURE, BARRIER→TICK); anything else raises
+    ``ValueError`` — use ``method="statevector"`` for universal circuits.
+
+    Args:
+        circuit: sf.Circuit built from Clifford gates (and measure/reset).
+
+    Returns:
+        ``(stim_circuit, record_cbits)`` where ``record_cbits[k]`` is the
+        SF classical-bit index of the k-th measurement in Stim's record
+        order (``None`` for measurements without an explicit cbit).
+        Convert a Stim sample row to an SF-style counts key via::
+
+            key = "".join(
+                str(row[k]) if (c := record_cbits[k]) is not None else "0"
+                for k in range(len(row))
+            )
+
+        Note: SF counts keys list classical bits cbit-0-first
+        (leftmost char = cbit 0).
+
+    Requires: pip install stim
+
+    Example:
+        >>> code = RepetitionCode(n=3).build()
+        >>> stim_circuit, order = to_stim(code)
+        >>> samples = stim_circuit.compile_sampler().sample(1000)
+    """
+    try:
+        import stim
+    except ImportError:
+        raise ImportError("Stim is required: pip install stim")
+
+    GATE_MAP = {
+        'H': 'H', 'X': 'X', 'Y': 'Y', 'Z': 'Z',
+        'S': 'S', 'SDG': 'S_DAG', 'SX': 'SX',
+        'CX': 'CX', 'CNOT': 'CX',
+        'CZ': 'CZ', 'CY': 'CY',
+        'SWAP': 'SWAP', 'ID': 'I',
+        'RESET': 'R',
+    }
+
+    lines = []
+    record_cbits = []
+    for gate in circuit.to_gate_list():
+        name = str(gate["name"]).upper()
+        qubits = [int(q) for q in gate["qubits"]]
+        if name == "BARRIER":
+            lines.append("TICK")
+            continue
+        if name == "MEASURE":
+            cbits = gate.get("classical_bits", []) or []
+            cbit = int(cbits[0]) if cbits else None
+            lines.append("M %d" % qubits[0])
+            record_cbits.append(cbit)
+            continue
+        stim_name = GATE_MAP.get(name)
+        if stim_name is None:
+            raise ValueError(
+                f"Cannot map gate '{gate['name']}' to Stim "
+                "(to_stim supports Clifford circuits only)"
+            )
+        lines.append("%s %s" % (stim_name, " ".join(map(str, qubits))))
+    return stim.Circuit("\n".join(lines)), record_cbits
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # Exports
 # ═════════════════════════════════════════════════════════════════════════
 
@@ -756,4 +883,5 @@ __all__ = [
     "to_braket",
     "to_qasm",
     "from_qasm",
+    "to_stim",
 ]

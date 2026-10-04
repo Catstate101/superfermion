@@ -69,3 +69,24 @@ class TestTFQuantumLayer:
         layer.build(None)
         output = layer()
         assert tf.math.is_finite(output)
+
+
+class TestTorchFeatures:
+    def test_torch_layer_feature_names_values(self):
+        torch = pytest.importorskip("torch")
+        from superfermion.nn.torch_layer import TorchQuantumLayer
+
+        x0 = sf.param("x0")
+        w0 = sf.param("w0")
+        circuit = sf.Circuit(1).rx(x0, 0).ry(w0, 0)
+        layer = TorchQuantumLayer(
+            circuit, SparsePauliOp.from_dict({"Z": 1.0}), feature_names=["x0"]
+        )
+        layer.weights.data = torch.tensor([0.4], dtype=torch.float64)
+        out = layer(torch.tensor([0.5], dtype=torch.float64))
+        # ground truth by direct simulation
+        sv = sf.simulate(
+            circuit, params={"x0": 0.5, "w0": 0.4}
+        ).numpy()
+        want = float(np.abs(sv[0]) ** 2 - np.abs(sv[1]) ** 2)
+        assert abs(float(out) - want) < 1e-9

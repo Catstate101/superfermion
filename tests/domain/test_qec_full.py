@@ -45,9 +45,29 @@ class TestLinearCodes:
     def test_repetition_code_phase_flip(self):
         code = RepetitionCode(n=5, code_type="phase")
         circuit = code.build()
-        assert circuit.n_qubits == 7
+        assert circuit.n_qubits == 2 * code.n - 1  # n data + (n-1) ancilla
+        assert code.syndrome_map() == [[k, k + 1] for k in range(code.n - 1)]
         gate_names = {g["name"] for g in circuit.to_gate_list()}
         assert "H" in gate_names
+
+    def test_repetition_code_rounds(self):
+        code = RepetitionCode(n=3)
+        c1 = code.build()
+        c2 = code.build(rounds=2)
+        # default is a single round; two rounds double the ancilla measures
+        assert c2.n_cbits == 2 * (code.n - 1) + code.n
+        assert c1.n_cbits == (code.n - 1) + code.n
+        # identical two-qubit prefix (encoding + first-round checks)
+        def twoq(c):
+            return [
+                (str(g["name"]).upper(), tuple(g["qubits"]))
+                for g in c.to_gate_list()
+                if str(g["name"]).upper() in ("CNOT", "CX")
+            ]
+
+        assert twoq(c2)[: len(twoq(c1))] == twoq(c1)
+        with pytest.raises(ValueError):
+            code.build(rounds=0)
 
     def test_shor_code_build(self):
         code = ShorCode()

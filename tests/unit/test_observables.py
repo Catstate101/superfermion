@@ -10,6 +10,8 @@ from superfermion.observables.core import (
     PauliString,
     SparsePauliOp,
     expval,
+    mps_expval,
+    mps_todense,
 )
 
 
@@ -73,3 +75,70 @@ class TestExpval:
         sv = np.array([1.0, 0.0], dtype=np.complex128)
         ham = Hamiltonian([PauliString("Z"), PauliString("X", coeff=0.0)])
         assert expval(sv, ham) == pytest.approx(1.0)
+
+
+class TestMpsExpval:
+    def test_ghz_zz_exact(self):
+        import superfermion as sf
+
+        c = sf.Circuit(4)
+        c.h(0)
+        for i in range(3):
+            c.cx(i, i + 1)
+        assert mps_expval(c, "ZZII") == pytest.approx(1.0)
+        assert mps_expval(c, {"ZZII": 1.0}) == pytest.approx(1.0)
+        assert mps_expval(c, SparsePauliOp.from_string("ZZII")) == pytest.approx(1.0)
+        assert mps_expval(c, "XIII") == pytest.approx(0.0, abs=1e-9)
+
+    def test_matches_dense_ground_truth(self):
+        import superfermion as sf
+
+        rng = np.random.default_rng(7)
+        n = 8
+        c = sf.Circuit(n)
+        for i in range(n):
+            c.ry(float(rng.uniform(0, 2 * np.pi)), i)
+        for i in range(0, n - 1, 2):
+            c.cx(i, i + 1)
+        sv = sf.simulate(c).numpy()
+        probs = np.abs(sv) ** 2
+        bits = np.arange(len(probs))
+        want = float(np.sum(probs * (1 - 2 * ((bits & 1) ^ ((bits >> 1) & 1)))))
+        assert mps_expval(c, "ZZ" + "I" * (n - 2), bond_dim=32) == pytest.approx(want, abs=1e-6)
+
+    def test_param_binding(self):
+        import superfermion as sf
+
+        th = sf.param("th")
+        c = sf.Circuit(2)
+        c.rx(th, 0)
+        c.cx(0, 1)
+        assert mps_expval(c, "ZI", params={"th": 0.5}) == pytest.approx(
+            math.cos(0.5)
+        )
+
+    def test_bad_length_raises(self):
+        import superfermion as sf
+
+        c = sf.Circuit(2)
+        c.h(0)
+        with pytest.raises(ValueError, match="n_qubits"):
+            mps_expval(c, "ZZZ")
+
+
+class TestMpsTodense:
+    def test_asymmetric_state_layout(self):
+        # HEA (asymmetric) catches bit-ordering bugs that GHZ-symmetric
+        # states cannot (both i*2+s and i+s*2^p coincide on all-0/all-1).
+        import superfermion as sf
+
+        rng = np.random.default_rng(11)
+        n = 6
+        c = sf.Circuit(n)
+        for i in range(n):
+            c.ry(float(rng.uniform(0, 2 * np.pi)), i)
+        for i in range(n - 1):
+            c.cx(i, i + 1)
+        sv = mps_todense(c, bond_dim=16)
+        ref = sf.simulate(c).numpy()
+        assert np.max(np.abs(sv - ref)) < 1e-9

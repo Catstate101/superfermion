@@ -15,7 +15,7 @@ Quick Start::
 Core surface (``sf.*``):
     Circuit, run, compile, param, RunResult, DeviceExecutor, experiment,
     PauliString, SparsePauliOp, Hamiltonian, expval, ClassicalShadow,
-    classical_shadow, shadow_expval
+    classical_shadow, shadow_expval, mps_expval (MPS-native, no densifying)
 
 Application modules (importable but not promoted to ``sf.*``):
     superfermion.algorithms   — VQE, QAOA
@@ -30,7 +30,7 @@ Application modules (importable but not promoted to ``sf.*``):
     superfermion.viz          — circuit visualization
 """
 
-__version__ = "0.1.12"
+__version__ = "0.1.13"
 
 # ── Core imports (only numpy required) ────────────────────────────────
 from superfermion.circuit import Circuit
@@ -104,6 +104,8 @@ from superfermion.observables.core import (
     Hamiltonian,
     expval,
     variance,
+    mps_expval,
+    mps_todense,
 )
 from superfermion.noise import NoiseModel
 
@@ -126,6 +128,7 @@ __all__ = [
     "TrackerProtocol", "experiment", "LocalTracker",
     # Observables
     "PauliString", "SparsePauliOp", "Hamiltonian", "expval", "variance",
+    "mps_expval", "mps_todense",
     # Classical shadows (SUP-22)
     "ClassicalShadow", "classical_shadow", "shadow_expval",
     # Version
