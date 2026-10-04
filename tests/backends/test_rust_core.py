@@ -18,7 +18,14 @@ try:
 
     CORE_AVAILABLE = True
 except ImportError:
-    CORE_AVAILABLE = False
+    try:
+        # Installed-wheel layout: the extension ships as superfermion._sf_core
+        # (no top-level module), so fall back to the package submodule.
+        from superfermion import _sf_core  # noqa: F401
+
+        CORE_AVAILABLE = True
+    except ImportError:
+        CORE_AVAILABLE = False
 
 pytestmark = [
     pytest.mark.backend,

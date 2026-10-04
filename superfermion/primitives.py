@@ -173,6 +173,13 @@ class SFEstimator:
             ev = float(np.real(observable._fast_expval(sv)))
             return ev, 0.0
 
+        # Exact analytic path for state-handle methods that do not expose a
+        # dense statevector (density_matrix, stabilizer; MPS with
+        # densify=False): evaluate <O> / Tr(O rho) on the Rust state handle.
+        # Without this, a shots=0 run has empty counts and silently returned 0.0.
+        if shots == 0 and result.state is not None:
+            return float(np.real(result.expectation(observable))), 0.0
+
         # Shot-based: estimate from counts
         from superfermion.qml.gradient.parameter_shift import _expval_from_counts
         ev = _expval_from_counts(result.counts, observable, circuit.n_qubits)
