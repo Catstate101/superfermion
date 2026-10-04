@@ -11,7 +11,7 @@ simulate, differentiate and serialize exactly, without decomposition.
 `circuit.cu(theta, phi, lam, control, target, gamma=0.0)` (alias `cu3`)
 applies a controlled U3 rotation with Qiskit's optional gamma phase:
 
-**CU = diag(I, e^{iγ}·U3(θ, φ, λ))**
+**`CU = diag(I, e^{iγ}·U3(θ, φ, λ))`**
 
 — the same control-first layout as Qiskit's `CUGate`. `gamma` defaults to
 `0`, which reproduces the original controlled-U3 (and PennyLane's `qml.CU`),
