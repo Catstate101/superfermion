@@ -1,0 +1,21 @@
+[package]
+name = "sf-cat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SuperFermion 'cat' backend — opt-in compile-once, multi-mode execution core (statevector/DM/adjoint/stabilizer/Clifford)"
+
+[dependencies]
+sf-ir = { path = "../sf-ir" }
+num-complex = { workspace = true }
+nalgebra = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+default = []
+gpu = ["sf-ir/gpu"]

@@ -991,11 +991,25 @@ dependencies = [
  "pyo3",
  "rand",
  "rayon",
+ "sf-cat",
  "sf-compiler",
  "sf-ir",
  "sf-pulse",
  "sf-qec",
  "sf-router",
+]
+
+[[package]]
+name = "sf-cat"
+version = "0.1.14"
+dependencies = [
+ "nalgebra",
+ "num-complex",
+ "rand",
+ "rayon",
+ "serde_json",
+ "sf-ir",
+ "smallvec",
 ]
 
 [[package]]
