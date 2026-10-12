@@ -19,7 +19,8 @@ Each class mirrors one per-fix verification script (see the repo-root
 (n) DAG JSON roundtrip preserves CP/CU gates (SUP-21)
 (o) classical shadow + shadow expval entry points & accuracy (SUP-22)
 (p) variance + mutual_info measurement types, Rust-backed (SUP-23)
-(q) mid-circuit measure + c_if feed-forward + reset (SUP-24)
+(q) mid-circuit measure + c_if feed-forward + reset (SUP-24;
+    MPS-method trajectory variant included)
 (r) routed-MPS degenerate-merge guard: dW ~ 0 on the seed=0 repro (SUP-30)
 (s) multi-1q noise channels compose sequentially, trace 1         (SUP-31)
 (t) two-qubit noise channels applied on DM, trace preserved       (SUP-32)
@@ -1205,17 +1206,22 @@ class TestMidCircuit:
         bound = circuit.bind({})
         assert any(g.condition == (0, 1) for g in bound._gates)
 
-    def test_requires_finite_shots_statevector_cpu(self):
-        """Dynamic circuits need shots > 0, statevector, CPU (clean errors)."""
+    def test_requires_finite_shots_sv_or_mps_cpu(self):
+        """Dynamic circuits need shots > 0 and statevector|mps on CPU;
+        stabilizer / density_matrix stay rejected with clean errors."""
         circuit = Circuit(1).h(0).measure(0, 0).h(0)
         with pytest.raises(RuntimeError):
             sf.run(circuit, shots=0)
         with pytest.raises(RuntimeError):
-            sf.run(circuit, shots=10, method="mps")
-        with pytest.raises(RuntimeError):
             sf.run(circuit, shots=10, method="stabilizer")
         with pytest.raises(RuntimeError):
             sf.run(circuit, shots=10, method="density_matrix")
+        # method='mps' mid-circuit trajectories are now supported (bond-capped)
+        res = sf.run(circuit, shots=10, method="mps")
+        assert res.metadata["method"] == "mps"
+        # mps still needs finite shots (shot-indexed trajectory mixture)
+        with pytest.raises(RuntimeError):
+            sf.run(circuit, shots=0, method="mps")
 
     def test_c_if_validation(self):
         """c_if guards: cbit range, value 0/1, no double condition, no
@@ -1239,6 +1245,76 @@ class TestMidCircuit:
         assert sum(res.counts.values()) == 20000
         assert res.metadata.get("dynamic") is not True
         assert res.state is not None
+
+
+class TestMidCircuitMPS:
+    """(q-variant) mid-circuit measure / feed-forward / reset on method='mps'.
+
+    The dynamic trajectory replay now also runs inside the MPS engine
+    (dag.simulate_dynamic_mps): every Measure/Reset right-canonicalizes and
+    collapses the MPS in place; corrections route through the lazy-SWAP
+    permutation map. Deterministic teleport-style circuits must land every
+    target bit at 1 on every shot -- a wrong collapse or a stale permutation
+    flips bits immediately.
+    """
+
+    @staticmethod
+    def _p1(counts, shots):
+        return (counts.get("10", 0) + counts.get("11", 0)) / shots
+
+    @staticmethod
+    def _teleport(m):
+        n = 3 * m
+        c = Circuit(n, 3 * m)
+        for k in range(m):
+            a, b, t_ = 3 * k, 3 * k + 1, 3 * k + 2
+            c = c.x(a).h(b).cx(b, t_).cx(a, b).h(a)
+            c = c.measure(a, 3 * k).measure(b, 3 * k + 1)
+            c = c.c_if(3 * k, 1).z(t_).c_if(3 * k + 1, 1).x(t_)
+            c = c.measure(t_, 3 * k + 2)
+        return c
+
+    def test_c_if_feedforward_correlation(self):
+        circuit = Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+        res = sf.run(circuit, shots=20000, seed=7, method="mps")
+        assert set(res.counts) <= {"00", "11"}
+        assert abs(self._p1(res.counts, 20000) - 0.5) < 0.01
+        assert res.metadata["dynamic"] is True
+        assert res.metadata["method"] == "mps"
+        assert res.state is None
+
+    def test_reset_mid_circuit(self):
+        res = sf.run(Circuit(1).x(0).reset(0), shots=4000, seed=7, method="mps")
+        assert res.counts.get("1", 0) == 0
+        res2 = sf.run(Circuit(1).h(0).measure(0, 0).reset(0).x(0),
+                      shots=4000, seed=7, method="mps")
+        assert res2.counts.get("1", 0) == 4000
+
+    def test_measure_then_reuse_collapses(self):
+        res = sf.run(Circuit(1).h(0).measure(0, 0).h(0),
+                     shots=20000, seed=7, method="mps")
+        assert abs(res.counts.get("1", 0) / 20000 - 0.5) < 0.01
+
+    def test_teleport_chain_all_targets_one(self):
+        """m=4 teleport: deterministic |1> lands on every target in every
+        shot (bit i of int(key, 2) is qubit i for this build)."""
+        res = sf.run(self._teleport(4), shots=1000, seed=7, method="mps")
+        targets = [3 * k + 2 for k in range(4)]
+        for key in res.counts:
+            v = int(key, 2)
+            assert all(((v >> i) & 1) == 1 for i in targets)
+        assert sum(res.counts.values()) == 1000
+
+    def test_seed_determinism(self):
+        circuit = Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+        a = sf.run(circuit, shots=5000, seed=123, method="mps")
+        b = sf.run(circuit, shots=5000, seed=123, method="mps")
+        assert a.counts == b.counts
+
+    def test_bond_dim_kwarg_recorded(self):
+        res = sf.run(Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1),
+                     shots=1000, seed=7, method="mps", bond_dim=32)
+        assert res.metadata["bond_dim"] == 32
 
 
 # ── (r)…(w) SUP-30…SUP-35 fix batch (0.1.11 local build 5a0db75e) ────────────
