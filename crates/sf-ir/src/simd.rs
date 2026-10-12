@@ -211,6 +211,84 @@ mod x86 {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Contiguous complex inner product Σ conj(a[i])·b[i] (adjoint generator
+// dot). The scalar form is the elementwise reference; the AVX2 kernel
+// reuses the production `cmul4` multiply and conjugates `a` with a sign
+// xor, so each summand is bit-identical to `a[i].conj() * b[i]` and only
+// the horizontal-sum grouping differs (~1 ulp — the same regrouping the
+// rayon chunked path in `gen_dot` already accepts). Runs shorter than the
+// floor (small generator qubit index) stay on the scalar path: at small
+// stride the per-run hsum dispatch outweighs the vector body.
+// ──────────────────────────────────────────────────────────────────────
+
+const DOT_SIMD_MIN_DEFAULT: usize = 512;
+
+/// Amplitude floor below which `dot_conj` uses the scalar path; `SF_DOT_MIN`
+/// overrides for A/B attribution runs (latched once per process).
+#[inline]
+pub(crate) fn dot_min() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("SF_DOT_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DOT_SIMD_MIN_DEFAULT)
+    })
+}
+
+/// Σ_{i} conj(a[i]) · b[i] over two equal-length contiguous slices.
+#[inline]
+pub fn dot_conj(a: &[Complex64], b: &[Complex64]) -> Complex64 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        let n = a.len();
+        if simd_enabled() && n >= dot_min() {
+            // SAFETY: `a` and `b` are equal-length, so `n` complex reads stay
+            // in bounds for both; the kernel reads only [0, n) of each.
+            unsafe {
+                return dot_conj_avx2(a.as_ptr(), b.as_ptr(), n);
+            }
+        }
+    }
+    let mut ip = Complex64::new(0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        ip += x.conj() * *y;
+    }
+    ip
+}
+
+/// AVX2 body of `dot_conj`: 2 complex per register, `cmul4(conj(a), b)`,
+/// accumulate, one horizontal sum, scalar tail for an odd count.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_conj_avx2(pa: *const Complex64, pb: *const Complex64, n: usize) -> Complex64 {
+    use std::arch::x86_64::*;
+    use x86::{cmul4, load2};
+    // Negate the imaginary lanes of `[re, im, re, im]` (xor of the sign bit).
+    let conj_sign = _mm256_setr_pd(0.0, -0.0, 0.0, -0.0);
+    let mut acc = _mm256_setzero_pd();
+    let mut k = 0usize;
+    while k + 2 <= n {
+        let a = load2(pa.add(k));
+        let b = load2(pb.add(k));
+        let ac = _mm256_xor_pd(a, conj_sign);
+        acc = _mm256_add_pd(acc, cmul4(ac, b));
+        k += 2;
+    }
+    let lo = _mm256_extractf128_pd(acc, 0);
+    let hi = _mm256_extractf128_pd(acc, 1);
+    let mut out = [0.0f64; 2];
+    _mm_storeu_pd(out.as_mut_ptr(), _mm_add_pd(lo, hi));
+    let mut ip = Complex64::new(out[0], out[1]);
+    while k < n {
+        ip += (*pa.add(k)).conj() * (*pb.add(k));
+        k += 1;
+    }
+    ip
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // 2×2 pair transform: out_lo = m00*lo + m01*hi ; out_hi = m10*lo + m11*hi
 // Applied to disjoint pairs (i, i+stride) for every block of 2*stride.
 // The slice must start at a block boundary (caller guarantees alignment).
@@ -747,6 +825,18 @@ pub fn dm_1q_fused(s: &mut [Complex64], q: usize, u: [[Complex64; 2]; 2]) {
 /// (ket bits q0/q1 × bra bits n+q0/n+q1). Row/col convention identical
 /// to `dag.rs::inplace_2q_general`: row = 2·bit(q0) + bit(q1).
 pub fn dm_2q_fused(s: &mut [Complex64], q0: usize, q1: usize, g: &[[Complex64; 4]; 4]) {
+    // AVX2 fast path: the separable ket(4x4)/bra(4x4) block transform, same
+    // gather->register-math->scatter shape as `dm_super_2q_avx2`. The scalar
+    // loops below stay as the non-x86 / `SF_NO_SIMD=1` reference and are
+    // bit-identical to the AVX2 form (each output accumulates the same
+    // products in the same ascending order).
+    #[cfg(target_arch = "x86_64")]
+    {
+        if simd_enabled() {
+            unsafe { dm_2q_fused_avx2(s, q0, q1, g) };
+            return;
+        }
+    }
     let len = s.len();
     debug_assert!(len.is_power_of_two() && len >= 16);
     let n = len.trailing_zeros() as usize / 2;
@@ -827,6 +917,117 @@ pub fn dm_2q_fused(s: &mut [Complex64], q0: usize, q1: usize, g: &[[Complex64; 4
                         + c[b][2] * t[k][2]
                         + c[b][3] * t[k][3];
                 }
+            }
+        }
+    }
+}
+
+/// AVX2 dispatch for the noiseless fused 2-qubit unitary: split the closed
+/// 16-blocks across Rayon; each chunk runs the serial `#[target_feature]`
+/// kernel (same split as `dm_super_2q_avx2`). Only called when
+/// `simd_enabled()`.
+#[cfg(target_arch = "x86_64")]
+unsafe fn dm_2q_fused_avx2(s: &mut [Complex64], q0: usize, q1: usize, g: &[[Complex64; 4]; 4]) {
+    let len = s.len();
+    debug_assert!(len.is_power_of_two() && len >= 16);
+    let n = len.trailing_zeros() as usize / 2;
+    let lo = q0.min(q1);
+    let hi = q0.max(q1);
+    let positions = [lo, hi, n + lo, n + hi];
+    let mq0 = 1usize << q0;
+    let mq1 = 1usize << q1;
+    let mb0 = 1usize << (n + q0);
+    let mb1 = 1usize << (n + q1);
+    let ket_off = [0usize, mq1, mq0, mq0 | mq1];
+    let bra_off = [0usize, mb1, mb0, mb0 | mb1];
+    let n_groups = len >> 4;
+    // Conj(g) indexed [j][b] so the bra contraction's per-lane operand
+    // (varying b at fixed j) loads a contiguous (b0,b1) pair.
+    let mut ct = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for b in 0..4 {
+        for j in 0..4 {
+            ct[j][b] = g[b][j].conj();
+        }
+    }
+    let sp = DmPtr(s.as_mut_ptr());
+    if len >= 1 << 14 && rayon::current_num_threads() > 1 {
+        let nchunks = rayon::current_num_threads() * 8;
+        let per = n_groups.div_ceil(nchunks);
+        (0..nchunks).into_par_iter().for_each(|c| {
+            let gi0 = c * per;
+            let gi1 = ((c + 1) * per).min(n_groups);
+            if gi0 < gi1 {
+                unsafe {
+                    dm_2q_fused_avx2_chunk(&sp, g, &ct, &positions, &ket_off, &bra_off, gi0, gi1)
+                };
+            }
+        });
+    } else {
+        dm_2q_fused_avx2_chunk(&sp, g, &ct, &positions, &ket_off, &bra_off, 0, n_groups);
+    }
+}
+
+/// Serial AVX2 kernel: per closed 16-block gather the 16 amplitudes so each
+/// ket row is a contiguous b-run, then run the separable ket transform
+/// (t[k][:] = sum_j g[k][j]·v[j][:]) and bra transform
+/// (out[k][b] = sum_j conj(g)[b][j]·t[k][j]) as row-pair accumulators
+/// (`cmul4` = two complex FMAs), storing back. Each accumulator contracts
+/// over j in ascending order, so every output is bit-identical to the scalar
+/// row dot.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dm_2q_fused_avx2_chunk(
+    sp: &DmPtr,
+    g: &[[Complex64; 4]; 4],
+    ct: &[[Complex64; 4]; 4],
+    positions: &[usize; 4],
+    ket_off: &[usize; 4],
+    bra_off: &[usize; 4],
+    gi0: usize,
+    gi1: usize,
+) {
+    use std::arch::x86_64::*;
+    use x86::{cmul4, load2, splat_c, store2};
+    // Flat pointer into the contiguous [ [Complex64;4];4 ] conj(g) transpose.
+    let ctp = ct.as_ptr() as *const Complex64;
+    for gi in gi0..gi1 {
+        let base = deposit_zeros(gi, positions);
+        let mut v = [Complex64::new(0.0, 0.0); 16];
+        for k in 0..4 {
+            for b in 0..4 {
+                v[4 * k + b] = dm_get(sp, base | ket_off[k] | bra_off[b]);
+            }
+        }
+        // Ket stage: t[k][0..4] = sum_j g[k][j]·v[4j+0..4], two b-pair
+        // accumulators (b0,b1) / (b2,b3) per row, j ascending.
+        let mut t = [Complex64::new(0.0, 0.0); 16];
+        for k in 0..4 {
+            let mut alo = _mm256_setzero_pd();
+            let mut ahi = _mm256_setzero_pd();
+            for j in 0..4 {
+                let gj = splat_c(g[k][j]);
+                alo = _mm256_add_pd(alo, cmul4(gj, load2(v.as_ptr().add(4 * j))));
+                ahi = _mm256_add_pd(ahi, cmul4(gj, load2(v.as_ptr().add(4 * j + 2))));
+            }
+            store2(t.as_mut_ptr().add(4 * k), alo);
+            store2(t.as_mut_ptr().add(4 * k + 2), ahi);
+        }
+        // Bra stage: out[k][0..4] = sum_j ct[j][:]·t[4k+j], t[4k+j] broadcast
+        // across the two b-lanes, j ascending. Result lands back in v.
+        for k in 0..4 {
+            let mut alo = _mm256_setzero_pd();
+            let mut ahi = _mm256_setzero_pd();
+            for j in 0..4 {
+                let tj = splat_c(t[4 * k + j]);
+                alo = _mm256_add_pd(alo, cmul4(tj, load2(ctp.add(4 * j))));
+                ahi = _mm256_add_pd(ahi, cmul4(tj, load2(ctp.add(4 * j + 2))));
+            }
+            store2(v.as_mut_ptr().add(4 * k), alo);
+            store2(v.as_mut_ptr().add(4 * k + 2), ahi);
+        }
+        for k in 0..4 {
+            for b in 0..4 {
+                dm_set(sp, base | ket_off[k] | bra_off[b], v[4 * k + b]);
             }
         }
     }
@@ -1236,6 +1437,58 @@ mod tests {
                 C::new(re, im)
             })
             .collect()
+    }
+
+    /// Physical gate for the restructured (two streaming pair passes) 1q dm
+    /// kernel: for a pure state `|psi>`, the fused `rho -> (U tensor I) rho
+    /// (U^dagger tensor I)` must reproduce `|psi'> <psi'|` where `|psi'>` is the
+    /// statevector after applying `U` to qubit `q`. Independent of the kernel's
+    /// own arithmetic, so it validates the ket(U)/bra(conj U) strides, not just
+    /// self-consistency. Layout: `data[ket | (bra << n)] = rho[ket, bra]`.
+    #[test]
+    fn dm_1q_fused_matches_outer_of_evolved_state() {
+        for n in [1usize, 2, 3, 4] {
+            let dim = 1usize << n;
+            let psi = lcg(dim, 3 + n as u64);
+            // Evolve psi with U on qubit q via an explicit statevector pair pass.
+            for q in 0..n {
+                let u = [
+                    [C::new(0.6, 0.1), C::new(-0.3, 0.5)],
+                    [C::new(0.4, -0.2), C::new(0.5, 0.3)],
+                ];
+                let mut psi_p = psi.clone();
+                let s = 1usize << q;
+                for base in (0..dim).step_by(s * 2) {
+                    for k in 0..s {
+                        let lo = base + k;
+                        let hi = lo + s;
+                        let (a, b) = (psi_p[lo], psi_p[hi]);
+                        psi_p[lo] = u[0][0] * a + u[0][1] * b;
+                        psi_p[hi] = u[1][0] * a + u[1][1] * b;
+                    }
+                }
+                // rho = |psi><psi| in the (ket | bra<<n) layout, then evolve.
+                let mut rho = vec![C::new(0.0, 0.0); dim * dim];
+                for ket in 0..dim {
+                    for bra in 0..dim {
+                        rho[ket | (bra << n)] = psi[ket] * psi[bra].conj();
+                    }
+                }
+                dm_1q_fused(&mut rho, q, u);
+                let mut worst = 0.0f64;
+                for ket in 0..dim {
+                    for bra in 0..dim {
+                        let want = psi_p[ket] * psi_p[bra].conj();
+                        let got = rho[ket | (bra << n)];
+                        worst = worst.max((got - want).norm());
+                    }
+                }
+                assert!(
+                    worst < 1e-12,
+                    "dm_1q_fused rho-vs-outer n={n} q={q}: {worst}"
+                );
+            }
+        }
     }
 
     #[test]

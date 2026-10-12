@@ -825,10 +825,6 @@ impl QuantumDAG {
     /// Gate matrices are pre-computed once before the simulation loop to
     /// avoid per-gate DMatrix allocation and trig calls.
     pub fn simulate(&self) -> Vec<num_complex::Complex64> {
-        let dim = 1 << self.n_qubits;
-        let mut state = vec![num_complex::Complex64::new(0.0, 0.0); dim];
-        state[0] = num_complex::Complex64::new(1.0, 0.0);
-
         let (fused, insts) = self.build_sim_plan();
 
         // Optional plan census for tuning (SF_PLAN_DUMP=1, stderr).
@@ -901,66 +897,7 @@ impl QuantumDAG {
             }
         }
 
-        // One parallelism decision per call: the planned kernels take it as
-        // a parameter instead of re-querying the Rayon pool per instruction.
-        let use_par = dim >= Self::PARALLEL_THRESHOLD && rayon::current_num_threads() > 1;
-
-        // Lazy scratch for out-of-place permutation sweeps (perm-merged CNOT
-        // runs). The buffer is pooled per thread across calls so repeated
-        // simulations at the same size never re-allocate or re-zero the
-        // 16·4^n-byte destination; only the first call at a given size pays
-        // the zero-init.
-        let mut scratch: Vec<num_complex::Complex64> = Vec::new();
-
-        for inst in &insts {
-            match inst {
-                SimInst::Gate { idx } => {
-                    Self::apply_gate_inplace(&mut state, fused[*idx].0, &fused[*idx].1, use_par)
-                }
-                SimInst::Diag1 { q, d0, d1 } => {
-                    apply_diag1_inplace(&mut state, *q, *d0, *d1, use_par)
-                }
-                SimInst::Diag2 { q1, q2, d } => {
-                    apply_diag2_inplace(&mut state, *q1, *q2, d, use_par)
-                }
-                SimInst::PhaseRun { plan } => {
-                    apply_phase_run(&mut state, self.n_qubits, plan, use_par)
-                }
-                SimInst::Fused {
-                    qs,
-                    u,
-                    pre_diag,
-                    post_diag,
-                } => apply_fused_qubits_inplace(&mut state, qs, u, pre_diag, post_diag, use_par),
-                SimInst::PermuteRun { plan } => {
-                    if scratch.len() != dim {
-                        let mut s = PERM_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
-                        if s.len() < dim {
-                            s = vec![num_complex::Complex64::new(0.0, 0.0); dim];
-                        } else if s.len() > dim {
-                            // A larger buffer left by a previous simulation is
-                            // reused with its length clamped back to `dim`:
-                            // the swap below must keep the state exactly
-                            // 2^n elements long.
-                            s.truncate(dim);
-                        }
-                        scratch = s;
-                    }
-                    apply_perm_run(&state, &mut scratch, plan, use_par);
-                    std::mem::swap(&mut state, &mut scratch);
-                }
-            }
-        }
-
-        // Return the (largest) scratch buffer to the thread pool.
-        PERM_SCRATCH.with(|c| {
-            let mut slot = c.borrow_mut();
-            if slot.len() < scratch.len() {
-                *slot = std::mem::take(&mut scratch);
-            }
-        });
-
-        state
+        execute_statevector_plan(self.n_qubits, &fused, &insts)
     }
 
     /// Mid-circuit (dynamic-circuit) simulation: per-shot trajectory replay.
@@ -986,19 +923,40 @@ impl QuantumDAG {
         let n = self.n_qubits;
         let dim = 1usize << n;
         let use_par = dim >= Self::PARALLEL_THRESHOLD && rayon::current_num_threads() > 1;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let mut creg = vec![0u64; self.n_cbits];
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-        for _ in 0..shots {
+        // Hoist shot-invariant work out of the trajectory loop: the
+        // topological order is computed once and each op's gate matrix is
+        // built once (measure/reset ops carry no matrix).
+        let plan: Vec<(NodeId, Option<nalgebra::DMatrix<num_complex::Complex64>>)> = self
+            .topological_order()
+            .into_iter()
+            .filter_map(|node_id| {
+                let op = &self.graph[node_id];
+                if op.op_type.is_boundary() || op.op_type == OpType::Barrier {
+                    return None;
+                }
+                let mat = match &op.op_type {
+                    OpType::Measure | OpType::MeasureAll | OpType::Reset => None,
+                    _ => Some(op.op_type.to_matrix()),
+                };
+                Some((node_id, mat))
+            })
+            .collect();
+
+        // One full trajectory: a fresh per-shot RNG (independent streams so
+        // shots can run in parallel), a freshly reset state / cumulative
+        // buffer and classical register, then a final sample over all
+        // qubits (same orientation and cumulative-search scheme as the
+        // non-dynamic samplers).
+        let run_shot = |shot_idx: u64| -> String {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(shot_idx));
+            let mut creg = vec![0u64; self.n_cbits];
             let mut state = vec![num_complex::Complex64::new(0.0, 0.0); dim];
             state[0] = num_complex::Complex64::new(1.0, 0.0);
-            for b in creg.iter_mut() {
-                *b = 0;
-            }
+            let mut cumulative = vec![0.0f64; dim + 1];
 
-            for &node_id in &self.topological_order() {
-                let op = &self.graph[node_id];
+            for (node_id, gate_mat) in &plan {
+                let op = &self.graph[*node_id];
                 if op.op_type.is_boundary() || op.op_type == OpType::Barrier {
                     continue;
                 }
@@ -1038,15 +996,14 @@ impl QuantumDAG {
                                 continue;
                             }
                         }
-                        let gate_u = op.op_type.to_matrix();
-                        Self::apply_gate_inplace(&mut state, op, &gate_u, use_par);
+                        let gate_u = gate_mat.as_ref().expect("gate matrix precomputed");
+                        Self::apply_gate_inplace(&mut state, op, gate_u, use_par);
                     }
                 }
             }
 
             // Sample the final state over all qubits (same orientation and
             // cumulative-search scheme as the non-dynamic samplers).
-            let mut cumulative = vec![0.0f64; dim + 1];
             for i in 0..dim {
                 let a = state[i];
                 cumulative[i + 1] = cumulative[i] + a.re * a.re + a.im * a.im;
@@ -1059,11 +1016,173 @@ impl QuantumDAG {
                 Ok(i) => i.min(dim - 1),
                 Err(i) => (i - 1).min(dim - 1),
             };
-            let bitstring: String = (0..n)
+            (0..n)
                 .rev()
                 .map(|q| if (idx >> q) & 1 == 1 { '1' } else { '0' })
-                .collect();
-            *counts.entry(bitstring).or_insert(0) += 1;
+                .collect()
+        };
+
+        // Trajectories are independent (each has its own RNG), so replay
+        // them in parallel when threads are available; the sequential loop
+        // is kept for shots == 1 / single-threaded runs.  Aggregation order
+        // does not affect the counts.
+        let keys: Vec<String> = if shots > 1 && rayon::current_num_threads() > 1 {
+            use rayon::prelude::*;
+            (0..shots as u64).into_par_iter().map(run_shot).collect()
+        } else {
+            (0..shots as u64).map(run_shot).collect()
+        };
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for key in keys {
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Mid-circuit (dynamic-circuit) simulation on the MPS backend:
+    /// per-shot trajectory replay mirroring [`Self::simulate_dynamic`], with
+    /// every measurement / reset collapsing the MPS itself.
+    ///
+    /// Each shot restarts from an unpermuted |0...0> product state and walks
+    /// the DAG in topological order. Measure ops sample + collapse the qubit
+    /// via [`MPSState::measure_site`] (right-canonicalize, local outcome
+    /// weights from the contracted left environment, collapse) and store the
+    /// outcome in the classical register; Reset ops measure-and-discard then
+    /// re-prepare |0>; ops carrying a classical condition are skipped when
+    /// their register test fails. 1q/2q gates go through the lazy routing
+    /// map (`perm`) so post-collapse gates stay on the right tensors. The
+    /// final state of every shot is right-canonicalized, sampled over all
+    /// qubits, and un-permuted to virtual-qubit order (q0-last) exactly
+    /// like [`Self::sample_mps`].
+    ///
+    /// This matches PennyLane's one-shot semantics for finite shots with
+    /// mid-circuit measurement (qml.measure + qml.cond).
+    pub fn simulate_dynamic_mps(
+        &self,
+        bond_dim: usize,
+        shots: usize,
+        seed: u64,
+    ) -> std::collections::HashMap<String, usize> {
+        use rand::SeedableRng;
+
+        let n = self.n_qubits;
+
+        // Hoist the shot-invariant plan (topological order + per-op gate
+        // matrices) out of the trajectory loop; measure/reset ops carry no
+        // matrix and are dispatched by their op type as before.
+        let plan: Vec<(NodeId, Option<nalgebra::DMatrix<num_complex::Complex64>>)> = self
+            .topological_order()
+            .into_iter()
+            .filter_map(|node_id| {
+                let op = &self.graph[node_id];
+                if op.op_type.is_boundary() || op.op_type == OpType::Barrier {
+                    return None;
+                }
+                let mat = match &op.op_type {
+                    OpType::Measure | OpType::MeasureAll | OpType::Reset => None,
+                    _ => Some(op.op_type.to_matrix()),
+                };
+                Some((node_id, mat))
+            })
+            .collect();
+
+        // One full trajectory: a fresh per-shot RNG (independent streams so
+        // shots can run in parallel), a fresh MPS / classical register, then
+        // right-canonicalize, sample over all qubits, and un-permute to
+        // virtual-qubit order (q0-last) exactly like `sample_mps`.
+        let run_shot = |shot_idx: u64| -> String {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(shot_idx));
+            let mut creg = vec![0u64; self.n_cbits];
+            let mut state = crate::mps::MPSState::new(n, bond_dim);
+
+            for (node_id, gate_mat) in &plan {
+                let op = &self.graph[*node_id];
+                if op.op_type.is_boundary() || op.op_type == OpType::Barrier {
+                    continue;
+                }
+                // Same condition semantics as the statevector path: every op
+                // kind below honors op.condition, except MeasureAll (never
+                // conditioned), which mirrors `simulate_dynamic` exactly.
+                match &op.op_type {
+                    OpType::Measure => {
+                        if let Some((cbit, value)) = op.condition {
+                            if creg[cbit] != value {
+                                continue;
+                            }
+                        }
+                        let q = op.qubits[0];
+                        let cbit = op.classical_bits.first().copied().unwrap_or(q);
+                        let site = state.perm[q];
+                        let bit = state.measure_site(site, &mut rng);
+                        creg[cbit] = bit as u64;
+                    }
+                    OpType::MeasureAll => {
+                        for q in 0..n {
+                            let site = state.perm[q];
+                            let bit = state.measure_site(site, &mut rng);
+                            creg[q] = bit as u64;
+                        }
+                    }
+                    OpType::Reset => {
+                        if let Some((cbit, value)) = op.condition {
+                            if creg[cbit] != value {
+                                continue;
+                            }
+                        }
+                        let q = op.qubits[0];
+                        let site = state.perm[q];
+                        state.reset_site(site, &mut rng);
+                    }
+                    _ => {
+                        if let Some((cbit, value)) = op.condition {
+                            if creg[cbit] != value {
+                                continue;
+                            }
+                        }
+                        let gate_u = gate_mat.as_ref().expect("gate matrix precomputed");
+                        match op.qubits.len() {
+                            1 => {
+                                let phys = state.perm[op.qubits[0]];
+                                state.apply_1q_gate(phys, gate_u);
+                            }
+                            2 => {
+                                state.apply_gate_lazy_routed(op.qubits[0], op.qubits[1], gate_u);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Final per-shot sample over all qubits: right-canonicalize so
+            // the left-to-right conditional walk is exact (mirrors
+            // `sample_mps`), then un-permute from physical-site order to
+            // virtual-qubit order (q0-last in both conventions).
+            state.canonicalize_right();
+            let raw_key = state.sample_one_with_rng(&mut rng);
+            let chars: Vec<u8> = raw_key.bytes().collect();
+            let mut virt = vec![b'0'; n];
+            for (j, &ch) in chars.iter().enumerate() {
+                let phys = n - 1 - j;
+                virt[state.perm_inv[phys]] = ch;
+            }
+            virt.reverse();
+            String::from_utf8(virt).unwrap()
+        };
+
+        // Trajectories are independent (each has its own RNG), so replay
+        // them in parallel when threads are available; the sequential loop
+        // is kept for shots == 1 / single-threaded runs.  Aggregation order
+        // does not affect the counts.
+        let keys: Vec<String> = if shots > 1 && rayon::current_num_threads() > 1 {
+            use rayon::prelude::*;
+            (0..shots as u64).into_par_iter().map(run_shot).collect()
+        } else {
+            (0..shots as u64).map(run_shot).collect()
+        };
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for key in keys {
+            *counts.entry(key).or_insert(0) += 1;
         }
         counts
     }
@@ -4848,5 +4967,200 @@ mod tests {
             };
         }
         k_check!(2, 3, 4, 5, 6, 7, 8, 9, 10);
+    }
+}
+
+fn execute_statevector_plan(
+    n_qubits: usize,
+    fused: &[(&QuantumOp, nalgebra::DMatrix<num_complex::Complex64>)],
+    insts: &[SimInst],
+) -> Vec<num_complex::Complex64> {
+    let dim = 1usize << n_qubits;
+    let mut state = vec![num_complex::Complex64::new(0.0, 0.0); dim];
+    state[0] = num_complex::Complex64::new(1.0, 0.0);
+    // One parallelism decision per call: the planned kernels take it as
+    // a parameter instead of re-querying the Rayon pool per instruction.
+    let use_par = dim >= QuantumDAG::PARALLEL_THRESHOLD && rayon::current_num_threads() > 1;
+
+    // Lazy scratch for out-of-place permutation sweeps (perm-merged CNOT
+    // runs). The buffer is pooled per thread across calls so repeated
+    // simulations at the same size never re-allocate or re-zero the
+    // 16·4^n-byte destination; only the first call at a given size pays
+    // the zero-init.
+    let mut scratch: Vec<num_complex::Complex64> = Vec::new();
+
+    for inst in insts {
+        match inst {
+            SimInst::Gate { idx } => {
+                QuantumDAG::apply_gate_inplace(&mut state, fused[*idx].0, &fused[*idx].1, use_par)
+            }
+            SimInst::Diag1 { q, d0, d1 } => apply_diag1_inplace(&mut state, *q, *d0, *d1, use_par),
+            SimInst::Diag2 { q1, q2, d } => apply_diag2_inplace(&mut state, *q1, *q2, d, use_par),
+            SimInst::PhaseRun { plan } => apply_phase_run(&mut state, n_qubits, plan, use_par),
+            SimInst::Fused {
+                qs,
+                u,
+                pre_diag,
+                post_diag,
+            } => apply_fused_qubits_inplace(&mut state, qs, u, pre_diag, post_diag, use_par),
+            SimInst::PermuteRun { plan } => {
+                if scratch.len() != dim {
+                    let mut s = PERM_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+                    if s.len() < dim {
+                        s = vec![num_complex::Complex64::new(0.0, 0.0); dim];
+                    } else if s.len() > dim {
+                        // A larger buffer left by a previous simulation is
+                        // reused with its length clamped back to `dim`:
+                        // the swap below must keep the state exactly
+                        // 2^n elements long.
+                        s.truncate(dim);
+                    }
+                    scratch = s;
+                }
+                apply_perm_run(&state, &mut scratch, plan, use_par);
+                std::mem::swap(&mut state, &mut scratch);
+            }
+        }
+    }
+
+    // Return the (largest) scratch buffer to the thread pool.
+    PERM_SCRATCH.with(|c| {
+        let mut slot = c.borrow_mut();
+        if slot.len() < scratch.len() {
+            *slot = std::mem::take(&mut scratch);
+        }
+    });
+
+    state
+}
+
+/// Immutable CPU/f64 circuit snapshot for repeated parameterized execution.
+/// Topological ordering and constant gate matrices are cached. Numerical
+/// matrices and fusion plans are rebuilt after binding, so angle-dependent
+/// optimizations never reuse stale values. No DAG or Python Circuit is cloned.
+pub struct PreparedStatevector {
+    pub n_qubits: usize,
+    pub parameter_names: Vec<String>,
+    operations: Vec<QuantumOp>,
+    fixed_matrices: Vec<Option<nalgebra::DMatrix<num_complex::Complex64>>>,
+}
+
+impl PreparedStatevector {
+    pub fn new(dag: &QuantumDAG) -> Result<Self, String> {
+        if dag.n_qubits >= usize::BITS as usize {
+            return Err("statevector dimension overflows usize".into());
+        }
+        let mut operations = Vec::new();
+        let mut fixed_matrices = Vec::new();
+        for node in dag.topological_order() {
+            let op = &dag.graph[node];
+            if op.op_type.is_boundary() || op.op_type == OpType::Barrier {
+                continue;
+            }
+            if op.condition.is_some()
+                || op.op_type.is_measurement()
+                || matches!(op.op_type, OpType::Reset | OpType::Custom(_, _))
+            {
+                return Err("prepare() supports unitary circuits without measurements, resets, or classical conditions".into());
+            }
+            let is_fixed = op
+                .op_type
+                .parameters()
+                .iter()
+                .all(|p| p.variable_names().is_empty());
+            fixed_matrices.push(if is_fixed {
+                Some(op.op_type.to_matrix())
+            } else {
+                None
+            });
+            operations.push(op.clone());
+        }
+        Ok(Self {
+            n_qubits: dag.n_qubits,
+            parameter_names: dag.parameter_names(),
+            operations,
+            fixed_matrices,
+        })
+    }
+
+    pub fn simulate(
+        &self,
+        values: &HashMap<String, f64>,
+    ) -> Result<Vec<num_complex::Complex64>, String> {
+        for name in &self.parameter_names {
+            match values.get(name) {
+                Some(value) if value.is_finite() => {}
+                Some(_) => return Err(format!("parameter '{name}' must be finite")),
+                None => return Err(format!("missing parameter '{name}'")),
+            }
+        }
+        if let Some(name) = values
+            .keys()
+            .find(|name| !self.parameter_names.contains(name))
+        {
+            return Err(format!("unknown parameter '{name}'"));
+        }
+        let bound: Vec<QuantumOp> = self
+            .operations
+            .iter()
+            .map(|template| {
+                let mut op = template.clone();
+                op.op_type = template.op_type.bind_params(values);
+                op
+            })
+            .collect();
+        let raw: Vec<_> = bound
+            .iter()
+            .zip(&self.fixed_matrices)
+            .map(|(op, fixed)| (op, fixed.clone().unwrap_or_else(|| op.op_type.to_matrix())))
+            .collect();
+        let fused = fuse_1q_sequence(&raw, self.n_qubits);
+        let insts = build_sim_instructions(&fused, self.n_qubits);
+        Ok(execute_statevector_plan(self.n_qubits, &fused, &insts))
+    }
+}
+
+#[cfg(test)]
+mod performance_prepared_tests {
+    use super::*;
+
+    #[test]
+    fn performance_prepared_rebinds_shared_parameters() {
+        let mut dag = QuantumDAG::new(3, 0);
+        dag.add_op(
+            OpType::Ry(Parameter::Variable {
+                name: "x".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+        dag.add_op(OpType::CNOT, &[0, 2]);
+        dag.add_op(
+            OpType::Rz(Parameter::Variable {
+                name: "x".into(),
+                id: 0,
+            }),
+            &[2],
+        );
+        let prepared = PreparedStatevector::new(&dag).unwrap();
+        for x in [0.1, -0.7, 2.4, 0.1] {
+            let values = HashMap::from([("x".into(), x)]);
+            let actual = prepared.simulate(&values).unwrap();
+            let expected = dag.bind(&values).simulate();
+            for (a, b) in actual.iter().zip(expected.iter()) {
+                assert!((*a - *b).norm() < 1e-12);
+            }
+        }
+        assert!(prepared.simulate(&HashMap::new()).is_err());
+        assert!(prepared
+            .simulate(&HashMap::from([("x".into(), f64::NAN)]))
+            .is_err());
+    }
+
+    #[test]
+    fn performance_prepared_rejects_measurement() {
+        let mut dag = QuantumDAG::new(1, 1);
+        dag.add_op(OpType::Measure, &[0]);
+        assert!(PreparedStatevector::new(&dag).is_err());
     }
 }
