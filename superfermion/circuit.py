@@ -118,6 +118,12 @@ class Circuit:
         # Classical condition (cbit, value) waiting for the next gate
         # (set by ``c_if``, consumed by the next ``_add_gate`` call).
         self._pending_condition: Optional[tuple[int, int]] = None
+        # Compiled-engine artifact caches (e.g. the Rust stabilizer state
+        # built by ``to_ir()`` → ``simulate_to_state``).  ``_engine_cache_ver``
+        # increments on every gate mutation; entries record the revision they
+        # were produced for, so stale entries are ignored after a change.
+        self._engine_cache_ver = 0
+        self._engine_caches: dict[tuple, tuple[int, Any]] = {}
 
     @property
     def n_qubits(self) -> int:
@@ -224,6 +230,22 @@ class Circuit:
             self._gates_rust = None  # release Rust memory
             self._use_rust = False
 
+    def _invalidate_engine_caches(self) -> None:
+        """Drop compiled-engine artifacts (called by every gate mutation)."""
+        self._engine_cache_ver += 1
+        self._engine_caches.clear()
+
+    def _engine_cache_get(self, key: tuple) -> Any:
+        """Return the cached engine artifact for ``key``, or None if stale."""
+        entry = self._engine_caches.get(key)
+        if entry is None or entry[0] != self._engine_cache_ver:
+            return None
+        return entry[1]
+
+    def _engine_cache_put(self, key: tuple, value: Any) -> None:
+        """Cache an engine artifact for the circuit's current revision."""
+        self._engine_caches[key] = (self._engine_cache_ver, value)
+
     def _add_gate(
         self,
         name: str,
@@ -252,6 +274,7 @@ class Circuit:
                 params=resolved_params,
                 condition=condition,
             ))
+        self._invalidate_engine_caches()
         return self
 
     def extend_raw(self, gates: list[GateRecord]) -> Circuit:
@@ -275,6 +298,7 @@ class Circuit:
                     "pending; add the gated gate before bulk-extending"
                 )
         self._gates.extend(gates)
+        self._invalidate_engine_caches()
         return self
 
     def extend_raw_from_records(
@@ -314,6 +338,7 @@ class Circuit:
                 params=params,   # type: ignore[arg-type]  # tuple[float] works as list[float]
             )
         self._gates.extend(gate_list)
+        self._invalidate_engine_caches()
         return self
 
     # ───────────────────────────────────────────────────────
@@ -573,6 +598,7 @@ class Circuit:
         self._ensure_gates()
         gate = GateRecord(name="MEASURE", qubits=[qubit], classical_bits=[cbit])
         self._gates.append(gate)
+        self._invalidate_engine_caches()
         return self
 
     def measure_all(self) -> Circuit:
@@ -636,6 +662,7 @@ class Circuit:
                 qubits=qubits,
                 matrix=matrix,
             ))
+        self._invalidate_engine_caches()
         return self
 
     # ───────────────────────────────────────────────────────

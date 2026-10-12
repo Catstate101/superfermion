@@ -393,9 +393,11 @@ class RustDevice:
         when their register test passes; Reset ops collapse the qubit back
         to |0>. Final bitstrings are sampled over all qubits.
 
-        Requires ``shots > 0`` and ``method='statevector'`` on CPU — the
-        collapsed mixture cannot be represented as a pure state, matching
-        PennyLane's one-shot semantics for finite shots.
+        Requires ``shots > 0`` and ``method='statevector'`` (or ``'mps'``,
+        where the per-shot replay collapses the MPS itself and ``bond_dim``
+        sets the max bond) on CPU — the collapsed mixture cannot be
+        represented as a pure state, matching PennyLane's one-shot
+        semantics for finite shots.
         """
         if self._hardware != "cpu":
             raise RuntimeError(
@@ -404,12 +406,13 @@ class RustDevice:
                 "trajectory engine is CPU-only.\n"
                 "  Fix: sf.run(circuit, device='cpu', shots=...)"
             )
-        if self._method != "statevector":
+        if self._method not in ("statevector", "mps"):
             raise RuntimeError(
                 "Mid-circuit measurement circuits (measure + feed-forward / "
-                "reset) currently require method='statevector'.\n"
+                "reset) require method='statevector' or method='mps'.\n"
                 f"  Got method={self._method!r}. "
-                "Fix: sf.run(circuit, method='statevector', shots=...)"
+                "Fix: sf.run(circuit, method='statevector', shots=...) or "
+                "sf.run(circuit, method='mps', shots=..., bond_dim=...)"
             )
         if shots <= 0:
             raise RuntimeError(
@@ -421,7 +424,12 @@ class RustDevice:
             )
         seed = kwargs.get("seed", 42)
         dag = self._prepare_dag(circuit)
-        counts = dag.simulate_dynamic(shots, seed)
+        bond_dim = None
+        if self._method == "mps":
+            bond_dim = int(kwargs.get("bond_dim", 64))
+            counts = dag.simulate_dynamic_mps(shots, seed, bond_dim)
+        else:
+            counts = dag.simulate_dynamic(shots, seed)
         probabilities = {k: v / shots for k, v in counts.items()}
         return RunResult(
             counts=counts,
@@ -433,9 +441,10 @@ class RustDevice:
             metadata={
                 "backend": "rust-cpu",
                 "n_qubits": circuit.n_qubits,
-                "method": "statevector",
+                "method": self._method,
                 "sample_path": "rust-dynamic-trajectories",
                 "dynamic": True,
+                **({"bond_dim": bond_dim} if bond_dim is not None else {}),
             },
         )
 
@@ -467,8 +476,12 @@ class RustDevice:
         dag = self._prepare_dag(circuit)
         state = dag.simulate_to_state("statevector", self._hardware)
 
-        # Also get the legacy numpy statevector for backward compat
-        final_state = np.asarray(state.numpy(), dtype=np.complex128)
+        # Preserve the legacy default, but permit a state-only result without
+        # cloning its full complex buffer into NumPy.
+        final_state = (
+            np.asarray(state.numpy(), dtype=np.complex128)
+            if return_statevector else None
+        )
 
         if shots > 0:
             counts = state.sample(shots, seed)
@@ -476,7 +489,10 @@ class RustDevice:
             counts = {}
 
         def _exact_probabilities() -> Dict[str, float]:
-            probs = np.abs(final_state) ** 2
+            probs = (
+                np.abs(final_state) ** 2
+                if final_state is not None else np.asarray(state.probabilities())
+            )
             return {
                 format(i, f"0{n_qubits}b"): float(p)
                 for i, p in enumerate(probs)
@@ -485,7 +501,7 @@ class RustDevice:
 
         probabilities: Dict[str, float] = (
             _exact_probabilities()
-            if n_qubits <= _EAGER_PROBS_MAX_QUBITS
+            if return_statevector and n_qubits <= _EAGER_PROBS_MAX_QUBITS
             else LazyDict(_exact_probabilities)
         )
 
@@ -702,7 +718,6 @@ class RustDevice:
 
     def _run_stabilizer(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
         """Stabilizer simulation for Clifford circuits."""
-        from superfermion.backends.stabilizer import _stab_keys
         seed = kwargs.get("seed", 42)
         # Tableau cap lives in crates/sf-ir/src/stabilizer.rs (word-packed
         # dynamic rows; raised 1024 -> 4096). Keep this guard in sync and
@@ -714,36 +729,52 @@ class RustDevice:
                 "  Use method='mps' or method='statevector' for larger "
                 "circuits."
             )
-        dag = circuit.to_ir()
 
-        try:
-            state = dag.simulate_to_state("stabilizer")
-        except (ValueError, RuntimeError) as e:
-            raise RuntimeError(
-                "Circuit contains non-Clifford gates — cannot use method='stabilizer'.\n"
-                "  Use method='statevector' or method='mps' instead."
-            ) from e
-        except BaseException as e:  # noqa: BLE001 - PanicException escapes Exception
-            if type(e).__name__ == "PanicException":
-                raise ValueError(
-                    f"method='stabilizer' failed in the Rust tableau: {e}.\n"
-                    "  The tableau supports at most 4096 qubits; use "
-                    "method='mps' or 'statevector' for larger circuits."
+        # Compiled-state cache: the tableau depends only on the gate list, so
+        # repeated sf.run() calls reuse it (the circuit invalidates caches
+        # automatically when it gains gates).  ``getattr`` guards keep this
+        # working for circuit objects from older pickles.
+        cache_key = ("sf_stabilizer_state", None)
+        cache_get = getattr(circuit, "_engine_cache_get", None)
+        state = cache_get(cache_key) if cache_get is not None else None
+        if state is None:
+            dag = circuit.to_ir()
+            try:
+                state = dag.simulate_to_state("stabilizer")
+            except (ValueError, RuntimeError) as e:
+                raise RuntimeError(
+                    "Circuit contains non-Clifford gates — cannot use method='stabilizer'.\n"
+                    "  Use method='statevector' or method='mps' instead."
                 ) from e
-            raise
+            except BaseException as e:  # noqa: BLE001 - PanicException escapes Exception
+                if type(e).__name__ == "PanicException":
+                    raise ValueError(
+                        f"method='stabilizer' failed in the Rust tableau: {e}.\n"
+                        "  The tableau supports at most 4096 qubits; use "
+                        "method='mps' or 'statevector' for larger circuits."
+                    ) from e
+                raise
+            cache_put = getattr(circuit, "_engine_cache_put", None)
+            if cache_put is not None:
+                cache_put(cache_key, state)
 
         if shots > 0:
             counts = state.sample(shots, seed)
-            # The Rust tableau sampler emits q0-first keys; re-key to the
-            # shared little-endian convention (qubit q = bit q of int(key, 2)),
-            # matching statevector / MPS / density-matrix reads (see _stab_keys).
-            counts = _stab_keys(counts)
+            # The Rust tableau sampler emits the shared little-endian keys
+            # directly (qubit q = bit q of int(key, 2)), matching
+            # statevector / MPS / density-matrix reads; no re-keying needed.
+            # Probabilities are a derived view of counts — defer the dict
+            # (as the statevector / MPS paths do) until first read.
+            probabilities: Any = LazyDict(
+                lambda: {k: v / shots for k, v in counts.items()}
+            )
         else:
             counts = {}
+            probabilities = {}
 
         return RunResult(
             counts=counts,
-            probabilities={k: v / shots for k, v in counts.items()} if shots > 0 else {},
+            probabilities=probabilities,
             state=state,
             statevector=None,
             shots=shots,

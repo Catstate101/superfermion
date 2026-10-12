@@ -114,10 +114,13 @@ from superfermion.noise import NoiseModel
 # exact statevector. See superfermion.mitigation.classical_shadow.
 from superfermion.mitigation import ClassicalShadow, classical_shadow, shadow_expval
 
+# cat backend: compile-once execution handle (statevector wired first).
+from superfermion.cat import cat
+
 
 __all__ = [
     # Core
-    "Circuit", "run", "simulate", "compile", "param",
+    "Circuit", "run", "simulate", "compile", "param", "cat",
     "RunResult", "State", "MethodError",
     # Device/Provider protocols
     "DeviceExecutor", "DeviceCapabilities",
