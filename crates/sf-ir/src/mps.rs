@@ -2034,7 +2034,7 @@ impl MPSState {
         let drop = (1 - bit) * d_l;
         for r in 0..d_r {
             for l in 0..d_l {
-                t[(keep + l, r)] = t[(keep + l, r)] * scale;
+                t[(keep + l, r)] *= scale;
                 t[(drop + l, r)] = Complex64::new(0.0, 0.0);
             }
         }
