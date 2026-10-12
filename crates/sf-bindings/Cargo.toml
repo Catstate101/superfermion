@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 sf-ir = { path = "../sf-ir" }
+sf-cat = { path = "../sf-cat" }
 sf-compiler = { path = "../sf-compiler" }
 sf-router = { path = "../sf-router" }
 sf-pulse = { path = "../sf-pulse" }
