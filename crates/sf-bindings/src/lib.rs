@@ -19,6 +19,9 @@
 
 use std::sync::OnceLock;
 
+mod cat;
+mod prepared;
+
 use numpy::{PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -184,8 +187,7 @@ pub struct PyState {
 impl PyState {
     fn expectation(&self, py: Python<'_>, observable: Vec<(Vec<u8>, f64, f64)>) -> PyResult<f64> {
         let terms = Self::parse_observable(&observable);
-        self.inner
-            .expectation(&terms)
+        py.allow_threads(|| self.inner.expectation(&terms))
             .map_err(|e| method_error(py, e.to_string()))
     }
 
@@ -238,6 +240,25 @@ impl PyState {
         self.inner
             .purity()
             .map_err(|e| method_error(py, e.to_string()))
+    }
+
+    /// Actual vector norm squared; unlike purity, this checks normalization.
+    fn norm_squared(&self, py: Python<'_>) -> PyResult<f64> {
+        let state = prepared::statevector(self, py)?;
+        Ok(py.allow_threads(|| state.data.iter().map(|z| z.norm_sqr()).sum()))
+    }
+
+    /// Mean of Z on every qubit, computed without a NumPy export.
+    fn mean_z(&self, py: Python<'_>) -> PyResult<f64> {
+        prepared::mean_z(self, py)
+    }
+
+    fn diagonal_expectation(
+        &self,
+        py: Python<'_>,
+        observable: &prepared::PyDiagonalObservable,
+    ) -> PyResult<f64> {
+        prepared::diagonal(self, observable, py)
     }
 
     fn fidelity(&self, py: Python<'_>, other: &PyState) -> PyResult<f64> {
@@ -772,9 +793,15 @@ impl PyQuantumDAG {
             }
             "mps" => {
                 let mut mps = self.inner.evolve_mps(bond_dim);
-                // Canonicalize so boundary contraction (expval) and per-site
-                // sampling are numerically stable right after construction.
-                mps.canonicalize_right();
+                // The eager right-canonicalization sweep (O(n·D³) LQ) used to
+                // run here and dominated this call (~58% at n=1000, bond 64).
+                // It is unnecessary for expectation() (a gauge-invariant
+                // contraction) and sampling canonicalizes lazily on first use
+                // (MPSStateWrapper::sample, cached).  SF_MPS_FORCE_CANON=1
+                // restores the eager sweep for A/B comparison and debugging.
+                if std::env::var_os("SF_MPS_FORCE_CANON").is_some() {
+                    mps.canonicalize_right();
+                }
                 let report = MpsTruncationReport {
                     discarded_weight: mps.discarded_weight,
                     max_discarded_weight: mps.max_discarded_weight,
@@ -918,6 +945,21 @@ impl PyQuantumDAG {
         seed: u64,
     ) -> std::collections::HashMap<String, usize> {
         self.inner.simulate_dynamic(shots, seed)
+    }
+
+    /// Mid-circuit (dynamic-circuit) MPS simulation: per-shot trajectory
+    /// replay with measurement/reset collapse on the MPS itself and
+    /// classical feed-forward (conditioned ops). Returns a bitstring ->
+    /// count dict over all qubits (same orientation as
+    /// `simulate_dynamic`). Fills the same role for method='mps' that
+    /// `simulate_dynamic` does for method='statevector'.
+    fn simulate_dynamic_mps(
+        &self,
+        shots: usize,
+        seed: u64,
+        bond_dim: usize,
+    ) -> std::collections::HashMap<String, usize> {
+        self.inner.simulate_dynamic_mps(bond_dim, shots, seed)
     }
 
     /// Simulate and apply MSB/LSB endianness transpose in Rust before returning.
@@ -2471,12 +2513,14 @@ fn _sf_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGateSequence>()?;
     m.add_class::<PyMPSState>()?;
     m.add_class::<PyState>()?;
+    m.add_class::<prepared::PyPreparedCircuit>()?;
+    m.add_class::<prepared::PyDiagonalObservable>()?;
+    m.add_class::<cat::PyCatCircuit>()?;
 
     // Stabilizer (Clifford simulation + Pauli twirl)
     m.add_class::<PyStabilizerTableau>()?;
     m.add_function(wrap_pyfunction!(pauli_twirl, m)?)?;
     m.add_function(wrap_pyfunction!(pauli_twirl_circuit, m)?)?;
-
     // Compiler
     m.add_class::<PyCompiler>()?;
 

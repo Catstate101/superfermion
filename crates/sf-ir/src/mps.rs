@@ -33,6 +33,28 @@ fn faer_to_na(f: &FaerMat<Complex64>) -> DMatrix<Complex64> {
     m
 }
 
+/// True when the 4×4 gate preserves the left physical bit, i.e. g[o, i] = 0
+/// whenever the left output bit of o differs from the left input bit of i.
+/// This is exactly the condition under which the merged two-site tensor
+/// factors as M = blockdiag(t1_0, t1_1)·B with a 2·min(d_l1, d_m)-entry
+/// middle (see [`MPSState::blockdiag_exact_split`]).  Every diagonal gate
+/// satisfies it (rzz, crz, cz, cp, cu1, crzz, cphase, ...); cx, swap, ryy,
+/// rxx do not.
+fn gate_left_block_diagonal(g: &DMatrix<Complex64>) -> bool {
+    if g.shape() != (4, 4) {
+        return false;
+    }
+    let zero = Complex64::new(0.0, 0.0);
+    for o in 0..4usize {
+        for i in 0..4usize {
+            if (o >> 1) != (i >> 1) && g[(o, i)] != zero {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Re-pack a 4x4 two-qubit gate from (q1_high=A, q2_low=B) bit order to
 /// (q1_low=A, q2_high=B) by swapping bit 0 with bit 1 in both row and
 /// column indices.  Used when the MPS caller passes (q1, q2) with q1 > q2
@@ -76,14 +98,25 @@ const MPS_QR_ACCEPT_EPS: f64 = 1e-14;
 /// Bond-truncation policy for 2-qubit gate merges, read once from the
 /// `SF_MPS_TRUNCATION` env var:
 ///
-/// * unset / `"svd"` (default) — truncate EVERY merge on the optimal rank-k
-///   SVD subspace (keep the k largest singular values, k = min(bond_dim,
-///   #σ > 1e-12·‖M‖_F)).  Pruning sub-τ directions at every step keeps bonds
-///   at their τ-numerical rank, so the cap only ever cuts directions of
-///   weight ≤ ~1e-24·‖M‖²_F (brick12@26 cap 64: err 4.2e-6 → 3.6e-14,
+/// * unset / `"svd"` (default) — the exact per-merge SVD path everywhere.
+///   Left-bit-preserving gates whose structural rank bound
+///   2·min(d_l1, d_m, d_r2) fits the cap take the exact block-diagonal
+///   split ([`MPSState::blockdiag_exact_split`]; the brick12 layer-11
+///   128×128 merges, ε ≈ 0); every other merge takes the exact thin SVD
+///   ([`MPSState::svd_truncate_merged`]), keeping the k largest singular
+///   values with k = min(bond_dim, #σ > 1e-12·‖M‖_F) and pruning sub-τ
+///   directions at every step (brick12@26 cap 64: err 4.2e-6 → 3.6e-14,
 ///   Σε 6.7e-2 → 1.1e-16).
-/// * `"qr"` / `"legacy"` — always keep the historical position cut
-///   (unpivoted QR rows 0..k, i.e. span of the first k merged columns).
+/// * `"qr"` / `"legacy"` — the historical position cut (unpivoted QR rows
+///   0..k, i.e. span of the first k merged columns).
+///
+/// The earlier hybrid default routed r = min(nrows, ncols) ≤ bond_dim
+/// merges around the SVD into the plain QR split; that was reverted after
+/// measurement: the unpivoted Householder row-norm cut perturbs the
+/// near-degenerate Schmidt structure brickwork merges produce, cascading
+/// into a dirty bond ladder {34, 42, 52, 64} with 180 guard fires and
+/// ε ≈ 5.2e-4 at 2.18 s on brick12@n=200 — while the all-SVD path
+/// measured 1.04 s, Σε ≈ 6.7e-14 and a clean 2^k ladder.
 fn mps_truncation_svd_enabled() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -98,11 +131,23 @@ fn mps_truncation_svd_enabled() -> bool {
     })
 }
 
+/// Whether a merge of shape (nrows × ncols) at `bond_dim` must take the
+/// exact-SVD path.  True for every merge under the default policy — the
+/// SVD path already subsumes the exactly-representable cases (the exact
+/// block-diagonal split and the τ-pruned thin SVD) and measured faster
+/// than the unpivoted QR split at these shapes; false only under the
+/// historical position cut (SF_MPS_TRUNCATION=qr|legacy).  The shape
+/// arguments are kept for call-site readability and future policy hooks.
+fn mps_svd_path_needed(_nrows: usize, _ncols: usize, _bond_dim: usize) -> bool {
+    mps_truncation_svd_enabled()
+}
+
 /// Single-qubit Pauli enum used for expectation-value calls from Python.
 /// Stored as one byte per site so Python can pass a raw &[u8].
 ///   0 = I, 1 = X, 2 = Y, 3 = Z
 ///
 /// Matrix Product State (MPS) core for high-efficiency simulation.
+#[derive(Clone)]
 pub struct MPSState {
     pub n_qubits: usize,
     pub bond_dim: usize,
@@ -113,6 +158,18 @@ pub struct MPSState {
     pub perm: Vec<usize>,
     /// Inverse map: perm_inv[physical_site] = virtual_qubit
     pub perm_inv: Vec<usize>,
+    /// Smallest site index such that every site ≥ rc_start has an
+    /// isometric tail (Σ_s B^s B^s† = I over the (D_L, 2·D_R) reshape).
+    /// Maintained conservatively by the gate/measure primitives so that
+    /// [`Self::measure_site`] repairs only the dirty suffix window instead
+    /// of right-canonicalizing the whole chain.
+    pub rc_start: usize,
+    /// Cached left environment for left-to-right mid-circuit measurement
+    /// sequences: contraction of sites `0..env_upto` with every physical
+    /// index traced out (see [`Self::measure_site`]).
+    left_env: Vec<Complex64>,
+    /// Number of sites folded into [`Self::left_env`].
+    env_upto: usize,
     /// Accumulated discarded-weight fraction Σε over all 2q-gate truncation
     /// steps (0.0 = exact evolution).  Per step ε is either the QR
     /// position-cut estimate (‖R_discarded‖²_F / ‖R‖²_F) on the historical
@@ -127,7 +184,12 @@ pub struct MPSState {
 }
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
+
+// Canonicalization phase accumulators (debug-only, see canonicalize_right).
+static __CANON_QR_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static __CANON_BLD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static __CANON_MUL_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl MPSState {
     pub fn new(n_qubits: usize, bond_dim: usize) -> Self {
@@ -144,6 +206,9 @@ impl MPSState {
             tensors,
             perm: (0..n_qubits).collect(),
             perm_inv: (0..n_qubits).collect(),
+            rc_start: 1,
+            left_env: vec![Complex64::new(1.0, 0.0)],
+            env_upto: 0,
             discarded_weight: 0.0,
             max_discarded_weight: 0.0,
             truncation_events: 0,
@@ -151,6 +216,9 @@ impl MPSState {
     }
 
     pub fn apply_1q_gate(&mut self, target: usize, gate: &nalgebra::DMatrix<Complex64>) {
+        if target < self.env_upto {
+            self.invalidate_meas_env();
+        }
         Self::apply_1q_gate_static(&mut self.tensors[target], gate);
     }
 
@@ -162,6 +230,10 @@ impl MPSState {
     ///
     /// Cost: O(n * D^3) — one QR per site.
     pub fn canonicalize_left(&mut self) {
+        // The left sweep rewrites every tensor and guarantees no
+        // right-isometric suffix, so the dirty bound becomes the empty suffix.
+        self.rc_start = self.n_qubits;
+        self.invalidate_meas_env();
         for i in 0..self.n_qubits.saturating_sub(1) {
             let t = &self.tensors[i];
             let (rows, cols) = t.shape(); // rows = D_L * 2, cols = D_R
@@ -200,8 +272,47 @@ impl MPSState {
     /// which is required for correct left-to-right sampling in [`sample`].
     ///
     /// Cost: O(n * D^3) — one LQ per site.
+    ///
+    /// Deliberately not run eagerly after evolution: expectation values
+    /// contract gauge-invariantly, so the sampling paths canonicalize
+    /// lazily instead (see `MPSStateWrapper::sample`; `evolve_mps` never
+    /// canonicalized at all).
     pub fn canonicalize_right(&mut self) {
-        for i in (1..self.n_qubits).rev() {
+        let __dbg = std::env::var_os("SF_MPS_SVD_DEBUG").is_some();
+        let __t0 = std::time::Instant::now();
+        self.canonicalize_right_range(1, self.n_qubits);
+        self.rc_start = 1;
+        if __dbg {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!(
+                "[loop-dbg] canon n={} {}us qr={}us bld={}us mul={}us",
+                self.n_qubits,
+                __t0.elapsed().as_micros(),
+                __CANON_QR_US.swap(0, Relaxed),
+                __CANON_BLD_US.swap(0, Relaxed),
+                __CANON_MUL_US.swap(0, Relaxed)
+            );
+        }
+    }
+
+    /// Right-canonicalize the window `from..to` (clamped to `1..n`),
+    /// absorbing each LQ residue into the left neighbor.  Sites ≥ `to` must
+    /// already be right-isometric (see [`Self::rc_start`]); afterwards sites
+    /// `from..to` are isometric too.  Used by [`Self::measure_site`] to
+    /// repair only the suffix invalidated by earlier gates/measurements.
+    pub fn canonicalize_right_range(&mut self, from: usize, to: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let from = from.max(1);
+        let to = to.min(self.n_qubits);
+        if from >= to {
+            return;
+        }
+        // The sweep rewrites sites from-1..to; the cached measurement
+        // environment is only valid below the first touched site.
+        if from <= self.env_upto {
+            self.invalidate_meas_env();
+        }
+        for i in (from..to).rev() {
             let t = &self.tensors[i]; // shape (D_L * 2, D_R)
             let d_l = t.shape().0 / 2;
             let d_r = t.shape().1;
@@ -219,12 +330,14 @@ impl MPSState {
 
             // LQ decomposition via QR of the adjoint (conjugate transpose):
             //   M^H = Q_t R_t  ⟹  M = R_t^H Q_t^H  ≡  L Q_lq
+            let __t_ph = std::time::Instant::now();
             let mt = m.adjoint(); // (2*D_R, D_L)
             let qr = mt.qr();
             let q_t = qr.q(); // (2*D_R, min(2*D_R, D_L))
             let r_t = qr.r(); // (min(2*D_R, D_L), D_L)
 
             let k = std::cmp::min(self.bond_dim, std::cmp::min(2 * d_r, d_l));
+            __CANON_QR_US.fetch_add(__t_ph.elapsed().as_micros() as u64, Relaxed);
 
             // Q_lq = first-k-cols(Q_t)^T → shape (k, 2*D_R)
             // Reshape back to packed (2*k, D_R).
@@ -253,6 +366,7 @@ impl MPSState {
                     l_matrix[(ii, jj)] = r_t[(jj, ii)].conj();
                 }
             }
+            __CANON_BLD_US.fetch_add(__t_ph.elapsed().as_micros() as u64, Relaxed);
 
             // Absorb L into tensor[i-1]'s right bond.
             // tensor[i-1] has shape (D_{prev}*2, D_L), result: (D_{prev}*2, k)
@@ -269,6 +383,7 @@ impl MPSState {
             new_prev.rows_mut(0, d_l_prev).copy_from(&new_0);
             new_prev.rows_mut(d_l_prev, d_l_prev).copy_from(&new_1);
             self.tensors[i - 1] = new_prev;
+            __CANON_MUL_US.fetch_add(__t_ph.elapsed().as_micros() as u64, Relaxed);
         }
     }
 
@@ -379,6 +494,17 @@ impl MPSState {
             Self::apply_2q_gate_static(&mut left[q2], &mut right[0], q1, q2, gate, self.bond_dim)
         };
         self.record_discard(eps);
+        if q1.min(q2) < self.env_upto {
+            self.invalidate_meas_env();
+        }
+        // Both rewritten sites lose their right-isometry claim: the left site
+        // becomes left-isometric (norm weights moved) and the right site
+        // carries the new weights.  Sites above hi are untouched and stay
+        // right-isometric, so the dirty bound moves to hi + 1.
+        let hi = q1.max(q2);
+        if hi >= self.rc_start {
+            self.rc_start = hi + 1;
+        }
     }
 
     /// Accumulate truncation telemetry from one 2q-gate QR step.
@@ -436,6 +562,13 @@ impl MPSState {
         };
         let _ = (idx1, idx2); // idx1 < idx2 ensured
 
+        // Wall-clock origin for the per-merge phase profile printed by the
+        // SF_MPS_SVD_DEBUG blocks in both split paths.  A few Instant::now()
+        // calls cost ~100ns per merge, negligible against the O(D^3) work
+        // they account for.  SF_MPS_SVD_DEBUG=1 alone gives the cheap phase
+        // table; SF_MPS_SVD_DEBUG_FULL=1 adds the heavy reference rebuilds.
+        let __t_start = std::time::Instant::now();
+
         let d_l1 = t1.shape().0 / 2;
         let d_m = t1.shape().1;
         let d_r2 = t2.shape().1;
@@ -444,6 +577,36 @@ impl MPSState {
         let t1_b = t1.rows(d_l1, d_l1).into_owned();
         let t2_a = t2.rows(0, d_m).into_owned();
         let t2_b = t2.rows(d_m, d_m).into_owned();
+
+        // ── Exact block-diagonal split (hybrid fast path) ──
+        // A gate that preserves the left physical bit (all diagonal gates:
+        // rzz, crz, cz, cp, cu1, crzz, ...) makes the merged matrix factor
+        // exactly as M = blockdiag(t1_0, t1_1)·B over a middle of only
+        // 2·min(d_l1, d_m) entries — rank(M) ≤ 2·min(d_l1, d_m, d_r2) — so
+        // when that structural bound fits the bond cap the merge needs no
+        // truncation at all and the r > bond_dim thin SVD (the brick12
+        // layer-11 128×128 merges: faer ThinSvd ≈ 15.4 ms each) is replaced
+        // by two (d_l1×d_m) QRs plus one small matmul.  Anything this
+        // branch cannot certify falls through to the SVD path below.
+        {
+            let nrows = 2 * d_l1;
+            let ncols = 2 * d_r2;
+            let rank_bound = 2 * std::cmp::min(d_l1, d_m).min(d_r2);
+            if mps_svd_path_needed(nrows, ncols, bond_dim)
+                && nrows >= 16
+                && ncols >= 16
+                && rank_bound <= bond_dim
+                && gate_left_block_diagonal(&gate_eff)
+            {
+                if let Some((t1_bd, t2_bd, eps_bd)) = Self::blockdiag_exact_split(
+                    &t1_a, &t1_b, &t2_a, &t2_b, d_l1, d_m, d_r2, &gate_eff, bond_dim, __t_start,
+                ) {
+                    *t1 = t1_bd;
+                    *t2 = t2_bd;
+                    return eps_bd;
+                }
+            }
+        }
 
         let use_faer_matmul = d_l1 >= 16 && d_m >= 16 && d_r2 >= 16;
         let (t00, t01, t10, t11) = if use_faer_matmul {
@@ -560,20 +723,14 @@ impl MPSState {
             let m_faer: FaerMat<Complex64> =
                 FaerMat::from_fn(nrows, ncols, |i, j| m_matrix[(i, j)]);
 
-            // ── Optimal τ-pruned truncation (additive, default-on) ──
-            // Unpivoted Householder QR keeps span(M[:, 0:k]) — a position-
-            // based subspace — and its row-norm rank test keeps "garbage"
-            // dimensions whose singular values are far below τ = 1e-12·‖M‖_F
-            // (row norms are not bounded by σ).  Those dims inflate the bond
-            // until the cap cuts real weight (measured on brick12@26/cap 64:
-            // Σε = 6.7e-2, observable error 4.2e-6).  The default policy
-            // truncates EVERY merge on the optimal τ-pruned SVD subspace
-            // (k = min(bond_dim, #σ > τ)), which keeps bonds at their
-            // τ-numerical rank at every step; SF_MPS_TRUNCATION=qr|legacy
-            // restores the historical position cut.
-            if mps_truncation_svd_enabled() {
+            // ── Truncation policy (default: exact SVD everywhere) ──
+            // Every merge takes the exact SVD path by default — see the
+            // policy doc on mps_truncation_svd_enabled.  The plain QR
+            // split below is only reachable through the historical
+            // position cut selected by SF_MPS_TRUNCATION=qr|legacy.
+            if mps_svd_path_needed(nrows, ncols, bond_dim) {
                 let (t1_svd, t2_svd, eps_svd) =
-                    Self::svd_truncate_merged(&m_faer, d_l1, d_r2, bond_dim);
+                    Self::svd_truncate_merged(&m_faer, d_l1, d_r2, bond_dim, __t_start);
                 *t1 = t1_svd;
                 *t2 = t2_svd;
                 return eps_svd;
@@ -664,13 +821,13 @@ impl MPSState {
             }
             (q_dst, r_dst, eps)
         } else {
-            // Same τ-prune policy for small tensors — the truncation policy
-            // must not depend on which backend factorizes the merged tensor.
-            if mps_truncation_svd_enabled() {
+            // Same truncation policy for small tensors — the policy must
+            // not depend on which backend factorizes the merged tensor.
+            if mps_svd_path_needed(nrows, ncols, bond_dim) {
                 let m_faer: FaerMat<Complex64> =
                     FaerMat::from_fn(nrows, ncols, |i, j| m_matrix[(i, j)]);
                 let (t1_svd, t2_svd, eps_svd) =
-                    Self::svd_truncate_merged(&m_faer, d_l1, d_r2, bond_dim);
+                    Self::svd_truncate_merged(&m_faer, d_l1, d_r2, bond_dim, __t_start);
                 *t1 = t1_svd;
                 *t2 = t2_svd;
                 return eps_svd;
@@ -740,7 +897,485 @@ impl MPSState {
         eps
     }
 
+    /// Exact split of the merged matrix for left-bit-preserving gates.
+    ///
+    /// With the merge identity of [`Self::apply_2q_gate_static`]
+    ///
+    ///   M[(o1,l),(o2,r)] = Σ_{i1,i2} g[2·o1+o2, 2·i1+i2]·t1_{i1}[l,·]·t2_{i2}[·,r]
+    ///
+    /// a gate with g[o,i] = 0 unless (o>>1) == (i>>1) collapses the sum to
+    /// i1 = o1 and gives the exact factorisation
+    ///
+    ///   M = blockdiag(t1_0, t1_1) · B,
+    ///   B[(o1,m),(o2,r)] = Σ_{i2} g[2·o1+o2, 2·o1+i2]·t2_{i2}[m,r],
+    ///
+    /// whose middle index carries only 2·d_m entries, so
+    /// rank(M) ≤ 2·min(d_l1, d_m, d_r2).  The caller only takes this path
+    /// when that bound fits the bond cap — the merge is then exactly
+    /// representable and no singular values need to be computed: thin-QR
+    /// each t1_p (Q_p·R_p), form C = blockdiag(R_0,R_1)·B, and drop the
+    /// trailing rows of C below 1e-12·‖C‖_F (floating-point phantoms), with
+    /// ε measured from the dropped row weights exactly like the SVD path.
+    /// The pair (blockdiag(Q_0,Q_1)[:, :k], C[:k, :]) reproduces M to
+    /// machine precision.
+    #[allow(clippy::too_many_arguments)]
+    fn blockdiag_exact_split(
+        t1_a: &DMatrix<Complex64>,
+        t1_b: &DMatrix<Complex64>,
+        t2_a: &DMatrix<Complex64>,
+        t2_b: &DMatrix<Complex64>,
+        d_l1: usize,
+        d_m: usize,
+        d_r2: usize,
+        gate: &DMatrix<Complex64>,
+        bond_dim: usize,
+        t_start: std::time::Instant,
+    ) -> Option<(DMatrix<Complex64>, DMatrix<Complex64>, f64)> {
+        let zero = Complex64::new(0.0, 0.0);
+        let r_q = std::cmp::min(d_l1, d_m);
+        if r_q == 0 || d_r2 == 0 {
+            return None;
+        }
+
+        let __b_t0 = std::time::Instant::now();
+
+        // Stage 1: thin QR of each left block: t1_p = Q_p · R_p.
+        let t1a_f = na_to_faer(t1_a);
+        let t1b_f = na_to_faer(t1_b);
+        let __b_ta = std::time::Instant::now();
+        let qr_a = FaerQr::new(t1a_f.as_ref());
+        let qr_b = FaerQr::new(t1b_f.as_ref());
+        let __b_tb = std::time::Instant::now();
+        let q_a = qr_a.compute_thin_q();
+        let q_b = qr_b.compute_thin_q();
+        let __b_tc = std::time::Instant::now();
+        let r_a = qr_a.compute_thin_r();
+        let r_b = qr_b.compute_thin_r();
+        let __b_t1 = std::time::Instant::now();
+
+        // Stage 2: B built directly from the t2 blocks with the gate's
+        // 2×2 left-preserving blocks — per output block o1 (d_m × 2·d_r2
+        // each) so stage 3 can skip the structural zeros of the padded
+        // blockdiag form.
+        let build_b = |o1: usize| -> FaerMat<Complex64> {
+            FaerMat::from_fn(d_m, 2 * d_r2, |mi, j| {
+                let o2 = j / d_r2;
+                let ri = j % d_r2;
+                let g0 = gate[(2 * o1 + o2, 2 * o1)];
+                let g1 = gate[(2 * o1 + o2, 2 * o1 + 1)];
+                let mut v = if g0 != zero {
+                    g0 * t2_a[(mi, ri)]
+                } else {
+                    zero
+                };
+                if g1 != zero {
+                    v += g1 * t2_b[(mi, ri)];
+                }
+                v
+            })
+        };
+        let b_top = build_b(0);
+        let b_bot = build_b(1);
+        let __b_t2 = std::time::Instant::now();
+
+        // Stage 3: C = blockdiag(R_0, R_1) · B (2·r_q × 2·d_r2), split as
+        // C_top = R_0·B_top and C_bot = R_1·B_bot — the padded blockdiag
+        // product would multiply a zero off-diagonal block for nothing, so
+        // the two half-size matmuls do half the arithmetic.
+        let par = if d_m >= 64 && rayon::current_num_threads() > 1 {
+            Parallelism::Rayon(0)
+        } else {
+            Parallelism::None
+        };
+        // compute_thin_r already returns exactly the top r_q × d_m triangle
+        // (rows below the diagonal zeroed) the two matmuls need.
+        let r_a_thin = r_a;
+        let r_b_thin = r_b;
+        let mut c_top = FaerMat::<Complex64>::zeros(r_q, 2 * d_r2);
+        let mut c_bot = FaerMat::<Complex64>::zeros(r_q, 2 * d_r2);
+        faer_matmul(
+            c_top.as_mut(),
+            r_a_thin.as_ref(),
+            b_top.as_ref(),
+            None,
+            Complex64::new(1.0, 0.0),
+            par,
+        );
+        faer_matmul(
+            c_bot.as_mut(),
+            r_b_thin.as_ref(),
+            b_bot.as_ref(),
+            None,
+            Complex64::new(1.0, 0.0),
+            par,
+        );
+        let __b_t3 = std::time::Instant::now();
+
+        // Stage 4: phantom-row rank reveal + measured ε (same discipline
+        // as the plain QR split: a row whose whole norm is below
+        // 1e-12·‖C‖_F carries no signal).
+        let mut row_sq = vec![0.0_f64; 2 * r_q];
+        let mut frob_sq_full = 0.0_f64;
+        for i in 0..r_q {
+            let mut acc = 0.0_f64;
+            for j in 0..2 * d_r2 {
+                acc += c_top.read(i, j).norm_sqr();
+            }
+            row_sq[i] = acc;
+            frob_sq_full += acc;
+        }
+        for i in 0..r_q {
+            let mut acc = 0.0_f64;
+            for j in 0..2 * d_r2 {
+                acc += c_bot.read(i, j).norm_sqr();
+            }
+            row_sq[r_q + i] = acc;
+            frob_sq_full += acc;
+        }
+        let __b_t4 = std::time::Instant::now();
+        let frob_sq_full = frob_sq_full.max(1e-300_f64);
+        let row_eps_sq = (1e-12_f64 * frob_sq_full.sqrt()).powi(2);
+        let mut k_final = 1usize;
+        for i in 0..2 * r_q {
+            if row_sq[i] > row_eps_sq {
+                k_final = i + 1;
+            }
+        }
+        let k_final = std::cmp::min(k_final, bond_dim);
+        let kept_sq: f64 = row_sq[..k_final].iter().sum();
+        let eps = ((frob_sq_full - kept_sq) / frob_sq_full).clamp(0.0, 1.0);
+
+        // Stage 5: assemble in the caller's packing — t1 rows (o1,l),
+        // t2 rows (o2,j) with column order matching C's rows.
+        let q_a_na = faer_to_na(&q_a);
+        let q_b_na = faer_to_na(&q_b);
+        let mut t1_new = DMatrix::<Complex64>::zeros(2 * d_l1, k_final);
+        let ka = std::cmp::min(k_final, r_q);
+        if ka > 0 {
+            t1_new
+                .view_mut((0, 0), (d_l1, ka))
+                .copy_from(&q_a_na.view((0, 0), (d_l1, ka)));
+        }
+        if k_final > r_q {
+            let kb = k_final - r_q;
+            t1_new
+                .view_mut((d_l1, r_q), (d_l1, kb))
+                .copy_from(&q_b_na.view((0, 0), (d_l1, kb)));
+        }
+        let mut t2_new = DMatrix::<Complex64>::zeros(2 * k_final, d_r2);
+        for j in 0..k_final {
+            let (c_h, jj) = if j < r_q {
+                (&c_top, j)
+            } else {
+                (&c_bot, j - r_q)
+            };
+            for o2 in 0..2usize {
+                for rr in 0..d_r2 {
+                    t2_new[(o2 * k_final + j, rr)] = c_h.read(jj, o2 * d_r2 + rr);
+                }
+            }
+        }
+        let __b_t5 = std::time::Instant::now();
+
+        // ── Debug-only self-check (env SF_MPS_SVD_DEBUG=1) ──
+        // Rebuilds the reference merge from the 4 gate-weighted block
+        // products and reports the reconstruction error against
+        // (blockdiag(Q_0,Q_1)[:, :k], C[:k, :]) plus the left-factor Gram
+        // defect, in the same [svd-dbg] format the SVD path prints.
+        // The heavy reference rebuild only runs with SF_MPS_SVD_DEBUG_FULL=1.
+        if std::env::var_os("SF_MPS_SVD_DEBUG").is_some() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static SEQ_BD: AtomicUsize = AtomicUsize::new(0);
+            let seq = 2_000_000 + SEQ_BD.fetch_add(1, Ordering::Relaxed);
+            let full_dbg = std::env::var_os("SF_MPS_SVD_DEBUG_FULL").is_some();
+            let __b_tg = t_start.elapsed();
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            let mut gram_err = 0.0_f64;
+            if full_dbg {
+                let p00 = t1_a * t2_a;
+                let p01 = t1_a * t2_b;
+                let p10 = t1_b * t2_a;
+                let p11 = t1_b * t2_b;
+                for o1 in 0..2usize {
+                    for o2 in 0..2usize {
+                        for l in 0..d_l1 {
+                            for r in 0..d_r2 {
+                                let mut mv = zero;
+                                for i1 in 0..2usize {
+                                    for i2 in 0..2usize {
+                                        let gi = gate[(2 * o1 + o2, 2 * i1 + i2)];
+                                        if gi != zero {
+                                            let p = match (i1, i2) {
+                                                (0, 0) => &p00,
+                                                (0, 1) => &p01,
+                                                (1, 0) => &p10,
+                                                _ => &p11,
+                                            };
+                                            mv += gi * p[(l, r)];
+                                        }
+                                    }
+                                }
+                                let mut rv = zero;
+                                for j in 0..k_final {
+                                    rv +=
+                                        t1_new[(o1 * d_l1 + l, j)] * t2_new[(o2 * k_final + j, r)];
+                                }
+                                num += (rv - mv).norm_sqr();
+                                den += mv.norm_sqr();
+                            }
+                        }
+                    }
+                }
+                for a in 0..k_final {
+                    for b in 0..k_final {
+                        let mut ip = zero;
+                        for i in 0..2 * d_l1 {
+                            ip += t1_new[(i, a)].conj() * t1_new[(i, b)];
+                        }
+                        let want = if a == b {
+                            Complex64::new(1.0, 0.0)
+                        } else {
+                            zero
+                        };
+                        gram_err += (ip - want).norm_sqr();
+                    }
+                }
+            }
+            let smax = row_sq.iter().cloned().fold(0.0_f64, f64::max).sqrt();
+            let scut = if k_final < row_sq.len() {
+                row_sq[k_final].sqrt()
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[svd-dbg] seq={seq} M={}x{} k={k_final} smax={smax:.3e} scut={scut:.3e} \
+                 eps={eps:.3e} recon={:.3e} ugram={:.3e} guard=false \
+                 t_pre={}us t_svd={}us t_bld={}us t_rep={}us t_qr={}us t_tot={}us \
+                 t_gate={}us t_cv={}us t_qrf={}us t_qq={}us t_qr2={}us",
+                2 * d_l1,
+                2 * d_r2,
+                (num / den.max(1e-300)).sqrt(),
+                gram_err.sqrt(),
+                (__b_t1 - __b_t0).as_micros(),
+                (__b_t2 - __b_t1).as_micros(),
+                (__b_t3 - __b_t2).as_micros(),
+                (__b_t5 - __b_t4).as_micros(),
+                (__b_t4 - __b_t3).as_micros(),
+                (__b_t5 - __b_t0).as_micros(),
+                __b_tg.as_micros(),
+                (__b_ta - __b_t0).as_micros(),
+                (__b_tb - __b_ta).as_micros(),
+                (__b_tc - __b_tb).as_micros(),
+                (__b_t1 - __b_tc).as_micros(),
+            );
+        }
+
+        Some((t1_new, t2_new, eps))
+    }
+
+    /// Randomized-sketch truncation (retired from the live policy: on
+    /// brick12 it measured slower AND less accurate than the exact paths —
+    /// every sketch merge paid the full thin-SVD-sized pre-pass plus its
+    /// own O(r²p) work, and admitting ε up to 1e-3·total traded accuracy
+    /// for no speed; kept as a documented experiment, no caller invokes
+    /// it anymore).
+    ///
+    /// For merges whose r = min(nrows, ncols) exceeds the bond cap
+    /// (r ≤ bond_dim merges take the exact QR split in the caller and
+    /// never reach this function).
+    ///
+    /// A rank-p sketch (p = min(r, bond_dim + 16), one power iteration) of
+    /// the right-singular space is built from R = M^H·(M·Ω); QR(R) supplies
+    /// the orthonormal basis V̂, and W = M·V̂ holds the measured action of
+    /// every sketch column.  Selection and factors are then built the same
+    /// self-consistent way as the exact path — kept columns chosen by the
+    /// *measured* ‖M·v_c‖ (cap + τ on measured values, never on reported
+    /// σ) — and the pair Qw·(Rw·V̂_k^H) reproduces M·(V̂ V̂^H) exactly for
+    /// the sketch basis, with Qw from QR(W) so t1 is exactly isometric.
+    /// ε is the measured (total − kept)/total, honest even if the sketch
+    /// subspace is suboptimal for a flat spectrum.
+    ///
+    /// Returns None (⇒ exact SVD fallback) when the selection is empty
+    /// (fully phantom merge) or the merge actually loses more than
+    /// 1e-3·total under the sketch — the regime where subspace optimality
+    /// matters and the exact SVD must adjudicate.
+    #[allow(dead_code)]
+    fn sketch_truncate_merged(
+        m: &FaerMat<Complex64>,
+        nrows: usize,
+        ncols: usize,
+        r: usize,
+        d_r2: usize,
+        bond_dim: usize,
+        total: f64,
+        tau: f64,
+        t_start: std::time::Instant,
+    ) -> Option<(
+        nalgebra::DMatrix<Complex64>,
+        nalgebra::DMatrix<Complex64>,
+        f64,
+    )> {
+        let p = std::cmp::min(r, bond_dim + 16);
+        if p < 2 {
+            return None;
+        }
+        let __t0 = std::time::Instant::now();
+        let par = if r >= 64 {
+            Parallelism::Rayon(0)
+        } else {
+            Parallelism::None
+        };
+        let one = Complex64::new(1.0, 0.0);
+        // Per-call deterministic pseudo-random sketch matrix (LCG — the
+        // sketch only needs generic entries; per-call seeding keeps merges
+        // independent while staying reproducible for debugging).
+        static SKETCH_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let sketch_seq = SKETCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut seed = (sketch_seq as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(0xD1B5_4A32_D192_ED03)
+            | 1;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64) - 0.5
+        };
+        let omega = FaerMat::<Complex64>::from_fn(ncols, p, |_, _| Complex64::new(next(), next()));
+        // Y = M·Ω, then one power iteration on M^H·M: R = M^H·Y.
+        let mut y1 = FaerMat::<Complex64>::zeros(nrows, p);
+        faer_matmul(y1.as_mut(), m.as_ref(), omega.as_ref(), None, one, par);
+        let mh = FaerMat::<Complex64>::from_fn(ncols, nrows, |i, j| m.read(j, i).conj());
+        let mut rsk = FaerMat::<Complex64>::zeros(ncols, p);
+        faer_matmul(rsk.as_mut(), mh.as_ref(), y1.as_ref(), None, one, par);
+        // V̂ = orthonormal basis of the sketched right space.
+        let qr_r = FaerQr::new(rsk.as_ref());
+        let q_v = qr_r.compute_q();
+        let vk = FaerMat::<Complex64>::from_fn(ncols, p, |i, j| q_v.read(i, j));
+        let __t1 = std::time::Instant::now();
+        // Measured action of every sketch column: W = M·V̂.
+        let mut w = FaerMat::<Complex64>::zeros(nrows, p);
+        faer_matmul(w.as_mut(), m.as_ref(), vk.as_ref(), None, one, par);
+        let mut meas: Vec<(usize, f64)> = (0..p)
+            .map(|c| {
+                let mut nrm_sq = 0.0_f64;
+                for i in 0..nrows {
+                    nrm_sq += w.read(i, c).norm_sqr();
+                }
+                (c, nrm_sq)
+            })
+            .collect();
+        meas.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut sel: Vec<usize> = Vec::with_capacity(std::cmp::min(bond_dim, p));
+        for &(c, nrm_sq) in &meas {
+            if sel.len() >= bond_dim {
+                break;
+            }
+            if nrm_sq.sqrt() <= tau {
+                break;
+            }
+            sel.push(c);
+        }
+        if sel.is_empty() {
+            return None;
+        }
+        let k = sel.len();
+        let mut kept = 0.0_f64;
+        for &c in &sel {
+            kept += meas
+                .iter()
+                .find(|&&(cc, _)| cc == c)
+                .map(|&(_, v)| v)
+                .unwrap_or(0.0);
+        }
+        // Sketch subspace misses material mass ⇒ let the exact SVD decide.
+        if (total - kept) > 1e-3_f64 * total {
+            return None;
+        }
+        let __t2 = std::time::Instant::now();
+        // Pair-sum = Σ_c w_c·v̂_c^H.  QR(W_sel) = Qw·Rw ⇒
+        // pair-sum = Qw·(Rw·V̂_k^H): t1 = Qw exactly isometric, t2 absorbs
+        // the triangular factor through the selected sketch columns.
+        let wk = FaerMat::<Complex64>::from_fn(nrows, k, |i, j| w.read(i, sel[j]));
+        let qr_w = FaerQr::new(wk.as_ref());
+        let q_w = qr_w.compute_q();
+        let r_w = qr_w.compute_r();
+        let mut t1 = nalgebra::DMatrix::<Complex64>::zeros(nrows, k);
+        for j in 0..k {
+            for i in 0..nrows {
+                t1[(i, j)] = q_w.read(i, j);
+            }
+        }
+        let mut t2 = nalgebra::DMatrix::<Complex64>::zeros(2 * k, d_r2);
+        for q_out in 0..2usize {
+            for rr in 0..d_r2 {
+                let vcol = q_out * d_r2 + rr;
+                for j in 0..k {
+                    let mut acc = Complex64::new(0.0, 0.0);
+                    for c in 0..k {
+                        acc += r_w.read(j, c) * vk.read(vcol, sel[c]).conj();
+                    }
+                    t2[(q_out * k + j, rr)] = acc;
+                }
+            }
+        }
+        let __t3 = std::time::Instant::now();
+        let eps = ((total - kept) / total).clamp(0.0, 1.0);
+        if std::env::var_os("SF_MPS_SVD_DEBUG").is_some() {
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for i in 0..nrows {
+                for c in 0..ncols {
+                    let q_out = c / d_r2.max(1);
+                    let rr = c % d_r2.max(1);
+                    let mut acc = Complex64::new(0.0, 0.0);
+                    for j in 0..k {
+                        acc += t1[(i, j)] * t2[(q_out * k + j, rr)];
+                    }
+                    num += (acc - m.read(i, c)).norm_sqr();
+                    den += m.read(i, c).norm_sqr();
+                }
+            }
+            let mut gram_err = 0.0_f64;
+            for a in 0..k {
+                for b in 0..k {
+                    let mut ip = Complex64::new(0.0, 0.0);
+                    for i in 0..nrows {
+                        ip += t1[(i, a)].conj() * t1[(i, b)];
+                    }
+                    let want = if a == b {
+                        Complex64::new(1.0, 0.0)
+                    } else {
+                        Complex64::new(0.0, 0.0)
+                    };
+                    gram_err += (ip - want).norm_sqr();
+                }
+            }
+            let smax = meas.first().map(|&(_, v)| v.sqrt()).unwrap_or(0.0);
+            eprintln!(
+                "[svd-dbg] seq={} M={nrows}x{ncols} k={k} smax={smax:.3e} scut={tau:.3e} \
+                 eps={eps:.3e} recon={:.3e} ugram={:.3e} guard=false \
+                 t_pre={}us t_svd={}us t_bld={}us t_rep=0us t_qr={}us t_tot={}us",
+                1_000_000 + sketch_seq,
+                (num / den.max(1e-300)).sqrt(),
+                gram_err.sqrt(),
+                (__t0 - t_start).as_micros(),
+                (__t1 - __t0).as_micros(),
+                (__t2 - __t1).as_micros(),
+                (__t3 - __t2).as_micros(),
+                t_start.elapsed().as_micros(),
+            );
+        }
+        Some((t1, t2, eps))
+    }
+
     /// Optimal rank-k truncation of the merged two-site tensor via thin SVD.
+    ///
+    /// Under the default policy this runs for every merge, after the exact
+    /// block-diagonal split has been tried for eligible left-bit-preserving
+    /// gates (see [`mps_svd_path_needed`]); only the historical position
+    /// cut (SF_MPS_TRUNCATION=qr|legacy) skips it.
     ///
     /// `m` is the (2·D_L, 2·D_R) merged tensor in the same packing used by
     /// [`Self::apply_2q_gate_static`].  On return `t1` is (2·D_L, k) holding
@@ -779,6 +1414,7 @@ impl MPSState {
         d_l1: usize,
         d_r2: usize,
         bond_dim: usize,
+        t_start: std::time::Instant,
     ) -> (
         nalgebra::DMatrix<Complex64>,
         nalgebra::DMatrix<Complex64>,
@@ -788,7 +1424,9 @@ impl MPSState {
         let ncols = 2 * d_r2;
         let r = std::cmp::min(nrows, ncols);
 
+        let __t_svd0 = std::time::Instant::now();
         let svd = ThinSvd::new(m.as_ref());
+        let __t_svd1 = std::time::Instant::now();
         let s = svd.s_diagonal();
 
         // ‖M‖_F² measured directly from the tensor entries (column-major
@@ -893,9 +1531,21 @@ impl MPSState {
         // than 1e-12·‖M‖²_F is missing, re-select the kept columns by the
         // measured ‖M·v_c‖ (the quantity the factors and ε already use),
         // capped by bond_dim and τ on the measured values, and rebuild.
+        //
+        // The same corruption also strikes bond-cap stops: brick12@1000,
+        // bond 64 (SF_MPS_SVD_DEBUG seq=5897) truncated at k = 64 with
+        // stopped_by_tau = false, so this guard never ran while faer had
+        // reported σ_72 = 0 for a column whose measured ‖M·v_72‖² = 0.3202
+        // (offline numpy ground truth: rank(M) = 64 exactly, true top-64
+        // ε ≈ 2e-32 — the state lost NOTHING; the entire reported
+        // ε = 5.004e-3 was mispaired selection).  The trigger therefore no
+        // longer requires the τ stop: any stop reason fires whenever
+        // k < r and the measured deficit is material.
         let (mut t1, mut t2, mut kept) = build(&sel);
+        let __t_b1 = std::time::Instant::now();
         let mut guarded = false;
-        if stopped_by_tau && k < r && (total - kept) > 1e-12_f64 * total {
+        let __t_g0 = std::time::Instant::now();
+        if k < r && (total - kept) > 1e-12_f64 * total {
             guarded = true;
             // W = M·V (all r right-singular columns) in one matmul.
             let par = if r >= 64 {
@@ -943,6 +1593,33 @@ impl MPSState {
                 kept = keptb;
             }
         }
+        let __t_g1 = std::time::Instant::now();
+        // Restore the left-isometric gauge after a measured re-selection:
+        // the repaired columns are M·v_c/‖M·v_c‖ for a V basis that is only
+        // orthonormal, not the exact right-singular basis (that is the very
+        // defect the re-selection works around), so the columns need not be
+        // mutually orthogonal — ugram ≈ 1.37 was measured on seq=5897 even
+        // after the re-selection.  QR-fold t1 = Q·R with R absorbed into t2
+        // is an exact change of bond basis (t1·B = Q·(R·B)), so the state
+        // and ε are untouched while Σ t1†t1 = I is restored.  On the clean
+        // path (σ-honest pairing) R ≈ diag(phases) and this is a no-op gauge.
+        if guarded {
+            let kk = t1.ncols();
+            let qr = t1.clone_owned().qr();
+            let q = qr.q();
+            let r = qr.r();
+            let r_top = r.rows(0, kk).into_owned();
+            let mut t2_new = DMatrix::<Complex64>::zeros(2 * kk, d_r2);
+            for q_out in 0..2usize {
+                let blk = t2.rows(q_out * kk, kk).into_owned();
+                let nb = &r_top * blk;
+                t2_new.rows_mut(q_out * kk, kk).copy_from(&nb);
+            }
+            t1 = q.columns(0, kk).into_owned();
+            t2 = t2_new;
+        }
+        let __t_qr1 = std::time::Instant::now();
+        let __t_tot = t_start.elapsed();
         let k = sel.len();
         let eps = ((total - kept) / total).clamp(0.0, 1.0);
 
@@ -952,38 +1629,42 @@ impl MPSState {
         // QR tail uses (t2 row = q_out·k + j), and that the retained
         // left-factor columns are orthonormal.  Reports σ_max, the σ at the
         // cut, k, ε and both errors on stderr.  The default path never
-        // consults this.
+        // consults this.  The heavy reference rebuilds only run with
+        // SF_MPS_SVD_DEBUG_FULL=1.
         if std::env::var_os("SF_MPS_SVD_DEBUG").is_some() {
             use std::sync::atomic::{AtomicUsize, Ordering};
             static SEQ: AtomicUsize = AtomicUsize::new(0);
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let full_dbg = std::env::var_os("SF_MPS_SVD_DEBUG_FULL").is_some();
             let mut num = 0.0_f64;
             let mut den = 0.0_f64;
-            for i in 0..nrows {
-                for c in 0..ncols {
-                    let q_out = c / d_r2.max(1);
-                    let rr = c % d_r2.max(1);
-                    let mut acc = Complex64::new(0.0, 0.0);
-                    for j in 0..k {
-                        acc += t1[(i, j)] * t2[(q_out * k + j, rr)];
-                    }
-                    num += (acc - m.read(i, c)).norm_sqr();
-                    den += m.read(i, c).norm_sqr();
-                }
-            }
             let mut gram_err = 0.0_f64;
-            for a in 0..k {
-                for b in 0..k {
-                    let mut ip = Complex64::new(0.0, 0.0);
-                    for i in 0..nrows {
-                        ip += t1[(i, a)].conj() * t1[(i, b)];
+            if full_dbg {
+                for i in 0..nrows {
+                    for c in 0..ncols {
+                        let q_out = c / d_r2.max(1);
+                        let rr = c % d_r2.max(1);
+                        let mut acc = Complex64::new(0.0, 0.0);
+                        for j in 0..k {
+                            acc += t1[(i, j)] * t2[(q_out * k + j, rr)];
+                        }
+                        num += (acc - m.read(i, c)).norm_sqr();
+                        den += m.read(i, c).norm_sqr();
                     }
-                    let want = if a == b {
-                        Complex64::new(1.0, 0.0)
-                    } else {
-                        Complex64::new(0.0, 0.0)
-                    };
-                    gram_err += (ip - want).norm_sqr();
+                }
+                for a in 0..k {
+                    for b in 0..k {
+                        let mut ip = Complex64::new(0.0, 0.0);
+                        for i in 0..nrows {
+                            ip += t1[(i, a)].conj() * t1[(i, b)];
+                        }
+                        let want = if a == b {
+                            Complex64::new(1.0, 0.0)
+                        } else {
+                            Complex64::new(0.0, 0.0)
+                        };
+                        gram_err += (ip - want).norm_sqr();
+                    }
                 }
             }
             let s_cut = if k < idx.len() {
@@ -993,90 +1674,99 @@ impl MPSState {
             };
             eprintln!(
                 "[svd-dbg] seq={seq} M={nrows}x{ncols} k={k} smax={:.3e} scut={:.3e} \
-                 eps={:.3e} recon={:.3e} ugram={:.3e} guard={guarded}",
+                 eps={:.3e} recon={:.3e} ugram={:.3e} guard={guarded} \
+                 t_pre={}us t_svd={}us t_bld={}us t_rep={}us t_qr={}us t_tot={}us",
                 s.read(idx[0]).norm(),
                 s_cut,
                 eps,
                 (num / den.max(1e-300)).sqrt(),
-                gram_err.sqrt()
+                gram_err.sqrt(),
+                (__t_svd0 - t_start).as_micros(),
+                (__t_svd1 - __t_svd0).as_micros(),
+                (__t_b1 - __t_svd1).as_micros(),
+                (__t_g1 - __t_g0).as_micros(),
+                (__t_qr1 - __t_g1).as_micros(),
+                __t_tot.as_micros(),
             );
 
-            // Extended accounting for the reported-σ vs measured-action
-            // mismatch: rep = Σ all reported σ², kept = measured retained
-            // mass, n_gt_tau = #columns with measured ‖M·v_c‖ > τ, and
-            // vgram = ‖V^H·V − I‖_F verifies faer's v columns are
-            // orthonormal.  Lossy merges (ε > 1e-6) are additionally dumped
-            // (M, V, σ, measured, sel) as _svd_dbg_*_{seq}.* for offline
-            // analysis.
-            let rep_total: f64 = (0..r).map(|j| s.read(j).norm_sqr()).sum();
-            let mut meas_sq: Vec<f64> = Vec::with_capacity(r);
-            let mut n_gt_tau = 0usize;
-            let mut max_meas = 0.0_f64;
-            for ci in 0..r {
-                let mut nrm_sq = 0.0_f64;
-                for i in 0..nrows {
-                    let mut acc = Complex64::new(0.0, 0.0);
-                    for c in 0..ncols {
-                        acc += m.read(i, c) * v.read(c, ci);
+            if full_dbg {
+                // Extended accounting for the reported-σ vs measured-action
+                // mismatch: rep = Σ all reported σ², kept = measured retained
+                // mass, n_gt_tau = #columns with measured ‖M·v_c‖ > τ, and
+                // vgram = ‖V^H·V − I‖_F verifies faer's v columns are
+                // orthonormal.  Lossy merges (ε > 1e-6) are additionally dumped
+                // (M, V, σ, measured, sel) as _svd_dbg_*_{seq}.* for offline
+                // analysis.
+                let rep_total: f64 = (0..r).map(|j| s.read(j).norm_sqr()).sum();
+                let mut meas_sq: Vec<f64> = Vec::with_capacity(r);
+                let mut n_gt_tau = 0usize;
+                let mut max_meas = 0.0_f64;
+                for ci in 0..r {
+                    let mut nrm_sq = 0.0_f64;
+                    for i in 0..nrows {
+                        let mut acc = Complex64::new(0.0, 0.0);
+                        for c in 0..ncols {
+                            acc += m.read(i, c) * v.read(c, ci);
+                        }
+                        nrm_sq += acc.norm_sqr();
                     }
-                    nrm_sq += acc.norm_sqr();
-                }
-                if nrm_sq.sqrt() > tau {
-                    n_gt_tau += 1;
-                }
-                if nrm_sq > max_meas {
-                    max_meas = nrm_sq;
-                }
-                meas_sq.push(nrm_sq);
-            }
-            let mut vgram = 0.0_f64;
-            for a in 0..r {
-                for b in 0..r {
-                    let mut ip = Complex64::new(0.0, 0.0);
-                    for c in 0..ncols {
-                        ip += v.read(c, a).conj() * v.read(c, b);
+                    if nrm_sq.sqrt() > tau {
+                        n_gt_tau += 1;
                     }
-                    let want = if a == b {
-                        Complex64::new(1.0, 0.0)
-                    } else {
-                        Complex64::new(0.0, 0.0)
-                    };
-                    vgram += (ip - want).norm_sqr();
+                    if nrm_sq > max_meas {
+                        max_meas = nrm_sq;
+                    }
+                    meas_sq.push(nrm_sq);
                 }
-            }
-            eprintln!(
-                "[svd-dbg2] seq={seq} total={total:.6e} rep={rep_total:.6e} \
+                let mut vgram = 0.0_f64;
+                for a in 0..r {
+                    for b in 0..r {
+                        let mut ip = Complex64::new(0.0, 0.0);
+                        for c in 0..ncols {
+                            ip += v.read(c, a).conj() * v.read(c, b);
+                        }
+                        let want = if a == b {
+                            Complex64::new(1.0, 0.0)
+                        } else {
+                            Complex64::new(0.0, 0.0)
+                        };
+                        vgram += (ip - want).norm_sqr();
+                    }
+                }
+                eprintln!(
+                    "[svd-dbg2] seq={seq} total={total:.6e} rep={rep_total:.6e} \
                  kept={kept:.6e} n_gt_tau={n_gt_tau}/{r} max_meas={max_meas:.6e} \
                  vgram={:.3e}",
-                vgram.sqrt()
-            );
-            if eps > 1e-6 {
-                let mut mbin: Vec<u8> = Vec::with_capacity(nrows * ncols * 16);
-                for c in 0..ncols {
-                    for i in 0..nrows {
-                        let z = m.read(i, c);
-                        mbin.extend_from_slice(&z.re.to_le_bytes());
-                        mbin.extend_from_slice(&z.im.to_le_bytes());
+                    vgram.sqrt()
+                );
+                if eps > 1e-6 {
+                    let mut mbin: Vec<u8> = Vec::with_capacity(nrows * ncols * 16);
+                    for c in 0..ncols {
+                        for i in 0..nrows {
+                            let z = m.read(i, c);
+                            mbin.extend_from_slice(&z.re.to_le_bytes());
+                            mbin.extend_from_slice(&z.im.to_le_bytes());
+                        }
                     }
-                }
-                let mut vbin: Vec<u8> = Vec::with_capacity(ncols * r * 16);
-                for c in 0..ncols {
-                    for j in 0..r {
-                        let z = v.read(c, j);
-                        vbin.extend_from_slice(&z.re.to_le_bytes());
-                        vbin.extend_from_slice(&z.im.to_le_bytes());
+                    let mut vbin: Vec<u8> = Vec::with_capacity(ncols * r * 16);
+                    for c in 0..ncols {
+                        for j in 0..r {
+                            let z = v.read(c, j);
+                            vbin.extend_from_slice(&z.re.to_le_bytes());
+                            vbin.extend_from_slice(&z.im.to_le_bytes());
+                        }
                     }
-                }
-                let sigma_rep: Vec<f64> = (0..r).map(|j| s.read(j).norm()).collect();
-                let meta = format!(
-                    "nrows={nrows} ncols={ncols} r={r} k={k} bond_dim={bond_dim} \
+                    let sigma_rep: Vec<f64> = (0..r).map(|j| s.read(j).norm()).collect();
+                    let meta = format!(
+                        "nrows={nrows} ncols={ncols} r={r} k={k} bond_dim={bond_dim} \
                      eps={eps:.6e} total={total:.6e} rep_total={rep_total:.6e} \
                      kept={kept:.6e} guard={guarded} stopped_by_tau={stopped_by_tau}\n\
                      sigma_reported={sigma_rep:?}\nmeasured_sq={meas_sq:?}\nsel={sel:?}\n"
-                );
-                let _ = std::fs::write(format!("_svd_dbg_meta_{seq}.txt"), meta);
-                let _ = std::fs::write(format!("_svd_dbg_M_{seq}.bin"), &mbin);
-                let _ = std::fs::write(format!("_svd_dbg_V_{seq}.bin"), &vbin);
+                    );
+                    let _ = std::fs::write(format!("_svd_dbg_meta_{seq}.txt"), meta);
+                    let _ = std::fs::write(format!("_svd_dbg_M_{seq}.bin"), &mbin);
+                    let _ = std::fs::write(format!("_svd_dbg_V_{seq}.bin"), &vbin);
+                }
             }
         }
 
@@ -1201,81 +1891,213 @@ impl MPSState {
             return counts;
         }
 
-        // Final measurement simulation (linear bit-by-bit)
-        let _master_rng = StdRng::seed_from_u64(_seed);
-        let n = self.n_qubits;
+        for shot_idx in 0..shots {
+            // Unique seed for this shot to ensure diversity
+            let mut rng = StdRng::seed_from_u64(_seed.wrapping_add(shot_idx as u64));
+            let key = self.sample_one_with_rng(&mut rng);
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
+    }
 
-        // Scratch buffers hoisted out of the shot loop (previously one
-        // DVector allocation per shot + one per qubit for the projection).
+    /// Single-shot sample with a caller-supplied RNG: linear bit-by-bit
+    /// conditional sampling, emitting the raw q0-last bitstring over
+    /// physical tensor order.  Shared by `sample` (one seeded RNG per shot,
+    /// bit-for-bit the historical draws) and by the dynamic-MCM trajectory
+    /// loop, which threads one continuous RNG through the whole replay.
+    pub fn sample_one_with_rng(&self, rng: &mut StdRng) -> String {
+        use rand::Rng;
+        let n = self.n_qubits;
+        if n == 0 {
+            return String::new();
+        }
+
         let mut left_vec = DVector::from_vec(vec![Complex64::new(1.0, 0.0)]);
         let mut next_vec = DVector::zeros(1);
         let mut key_chars = vec!['0'; n];
 
-        for shot_idx in 0..shots {
-            // Reset the running boundary vector to the scalar 1 (D_L1 = 1).
-            left_vec.resize_vertically_mut(1, Complex64::new(0.0, 0.0));
-            left_vec[0] = Complex64::new(1.0, 0.0);
+        for i in 0..n {
+            let t = &self.tensors[i];
+            let d_l = t.shape().0 / 2;
+            let d_r = t.shape().1;
 
-            // Unique seed for this shot to ensure diversity
-            let mut rng = StdRng::seed_from_u64(_seed.wrapping_add(shot_idx as u64));
-
-            for i in 0..n {
-                let t = &self.tensors[i];
-                let d_l = t.shape().0 / 2;
-                let d_r = t.shape().1;
-
-                // Compute the unnormalized P(0) and P(1) in one pass over the
-                // (r, l) pairs.  Each outcome keeps its exact historical
-                // sum order (r ascending, l ascending inside), so the drawn
-                // bits are bit-for-bit identical to the old two-loop form.
-                let mut prob0 = 0.0_f64;
-                let mut prob1 = 0.0_f64;
-                for r in 0..d_r {
-                    let mut sum0 = Complex64::new(0.0, 0.0);
-                    let mut sum1 = Complex64::new(0.0, 0.0);
-                    for l in 0..d_l {
-                        sum0 += left_vec[l] * t[(l, r)];
-                        sum1 += left_vec[l] * t[(l + d_l, r)];
-                    }
-                    prob0 += sum0.norm_sqr();
-                    prob1 += sum1.norm_sqr();
+            // Unnormalized P(0) and P(1) in one pass over the (r, l) pairs,
+            // same sum order as the historical two-loop form.
+            let mut prob0 = 0.0_f64;
+            let mut prob1 = 0.0_f64;
+            for r in 0..d_r {
+                let mut sum0 = Complex64::new(0.0, 0.0);
+                let mut sum1 = Complex64::new(0.0, 0.0);
+                for l in 0..d_l {
+                    sum0 += left_vec[l] * t[(l, r)];
+                    sum1 += left_vec[l] * t[(l + d_l, r)];
                 }
-
-                // Normalize: P(0) = p0 / (p0 + p1)
-                let total = prob0 + prob1;
-                let p0_normalized = if total > 1e-30 { prob0 / total } else { 0.5 };
-
-                let random_val: f64 = rng.gen();
-                let b = if random_val < p0_normalized { '0' } else { '1' };
-                key_chars[n - 1 - i] = b;
-
-                // Update left_vec (projection) into the reused scratch buffer
-                // (every element 0..d_r is overwritten, no zero-fill needed).
-                let p_idx = if b == '0' { 0 } else { 1 };
-                next_vec.resize_vertically_mut(d_r, Complex64::new(0.0, 0.0));
-                for r in 0..d_r {
-                    let mut sum = Complex64::new(0.0, 0.0);
-                    for l in 0..d_l {
-                        sum += left_vec[l] * t[(l + p_idx * d_l, r)];
-                    }
-                    next_vec[r] = sum;
-                }
-                // Normalize to avoid underflow
-                let norm = next_vec.norm();
-                if norm > 1e-12_f64 {
-                    let inv_norm = 1.0 / norm;
-                    for elem in next_vec.iter_mut() {
-                        *elem *= inv_norm;
-                    }
-                }
-                std::mem::swap(&mut left_vec, &mut next_vec);
+                prob0 += sum0.norm_sqr();
+                prob1 += sum1.norm_sqr();
             }
-            // Emit bitstrings q0-last (qubit 0 = rightmost char), matching the
-            // statevector backend's sample() convention.
-            let key: String = key_chars.iter().collect();
-            *counts.entry(key).or_insert(0) += 1;
+
+            let total = prob0 + prob1;
+            let p0_normalized = if total > 1e-30 { prob0 / total } else { 0.5 };
+
+            let random_val: f64 = rng.gen();
+            let b = if random_val < p0_normalized { '0' } else { '1' };
+            key_chars[n - 1 - i] = b;
+
+            // Left-vector projection onto the drawn outcome.
+            let p_idx = if b == '0' { 0 } else { 1 };
+            next_vec.resize_vertically_mut(d_r, Complex64::new(0.0, 0.0));
+            for r in 0..d_r {
+                let mut sum = Complex64::new(0.0, 0.0);
+                for l in 0..d_l {
+                    sum += left_vec[l] * t[(l + p_idx * d_l, r)];
+                }
+                next_vec[r] = sum;
+            }
+            // Normalize to avoid underflow
+            let norm = next_vec.norm();
+            if norm > 1e-12_f64 {
+                let inv_norm = 1.0 / norm;
+                for elem in next_vec.iter_mut() {
+                    *elem *= inv_norm;
+                }
+            }
+            std::mem::swap(&mut left_vec, &mut next_vec);
         }
-        counts
+        // Emit bitstrings q0-last (qubit 0 = rightmost char), matching the
+        // statevector backend's sample() convention.
+        key_chars.iter().collect()
+    }
+
+    /// Projectively measure tensor site `site` in the Z basis and collapse.
+    ///
+    /// The suffix above `site` is first right-canonicalized (only the dirty
+    /// window `site+1..rc_start` is swept), so the right tails entering
+    /// `site` are orthonormal and the outcome weights are exactly
+    /// p_p = ‖Σ_l v_l · T_s[p·D_L + l, :]‖², with v the fully contracted left
+    /// boundary (no conditioning on earlier sites).  The sampled outcome
+    /// zeroes the other physical block and rescales the survivor by
+    /// √((p0+p1)/p_p), conserving the state norm — the MPS analogue of the
+    /// statevector `collapse_measure`.  Returns the measured bit.
+    pub fn measure_site(&mut self, site: usize, rng: &mut StdRng) -> u8 {
+        use rand::Rng;
+        // Delta-canonicalization: only sites above `site` need to be
+        // right-isometric for the outcome weights below.  `rc_start` bounds
+        // the dirty suffix, so sweep just the window `(site+1, rc_start)`
+        // instead of the whole chain; after the collapse the measured site
+        // itself is non-isometric, so the new dirty bound is site + 1.
+        if self.rc_start > site + 1 {
+            let rc = self.rc_start;
+            self.canonicalize_right_range(site + 1, rc);
+        }
+        self.rc_start = site + 1;
+
+        // Left environment: contract sites 0..site-1, summed over every
+        // physical outcome (marginalized — earlier sites are not observed).
+        // The contraction is cached across measurements, so a left-to-right
+        // measurement sequence costs one site-contraction per site in total.
+        self.meas_env_extend_to(site);
+
+        // Outcome weights and the draw (same convention as collapse_measure:
+        // draw < p0_normalized ⇒ bit 0).
+        let v = self.left_env.as_slice();
+        let t = &mut self.tensors[site];
+        let d_l = t.shape().0 / 2;
+        let d_r = t.shape().1;
+        let mut p = [0.0_f64, 0.0_f64];
+        for (bit, pk) in p.iter_mut().enumerate() {
+            for r in 0..d_r {
+                let mut acc = Complex64::new(0.0, 0.0);
+                for l in 0..d_l {
+                    acc += v[l] * t[(bit * d_l + l, r)];
+                }
+                *pk += acc.norm_sqr();
+            }
+        }
+        let total = p[0] + p[1];
+        let p0_normalized = if total > 1e-30 { p[0] / total } else { 0.5 };
+        let random_val: f64 = rng.gen();
+        let bit = if random_val < p0_normalized {
+            0usize
+        } else {
+            1usize
+        };
+
+        // Collapse: zero the discarded block, rescale the survivor so the
+        // projected branch keeps the pre-measurement norm.
+        let pb = p[bit];
+        let scale = if pb > 1e-300 {
+            (total / pb).sqrt()
+        } else {
+            1.0
+        };
+        let keep = bit * d_l;
+        let drop = (1 - bit) * d_l;
+        for r in 0..d_r {
+            for l in 0..d_l {
+                t[(keep + l, r)] *= scale;
+                t[(drop + l, r)] = Complex64::new(0.0, 0.0);
+            }
+        }
+        self.env_upto = site;
+        bit as u8
+    }
+
+    /// Trace out one site's physical index while folding it into a left
+    /// environment vector: `env'[r] = Σ_l env[l]·(T[l,r] + T[l+D_L,r])`.
+    fn contract_site_into(env: &mut Vec<Complex64>, t: &DMatrix<Complex64>) {
+        let d_l = t.shape().0 / 2;
+        let d_r = t.shape().1;
+        let mut nv = vec![Complex64::new(0.0, 0.0); d_r];
+        for r in 0..d_r {
+            let mut acc = Complex64::new(0.0, 0.0);
+            for l in 0..d_l {
+                acc += env[l] * (t[(l, r)] + t[(l + d_l, r)]);
+            }
+            nv[r] = acc;
+        }
+        *env = nv;
+    }
+
+    /// Extend the cached measurement left environment so it covers sites
+    /// `0..site`.  A backwards request restarts from the boundary; otherwise
+    /// only the not-yet-folded sites are contracted.
+    fn meas_env_extend_to(&mut self, site: usize) {
+        if self.env_upto > site {
+            self.invalidate_meas_env();
+        }
+        for j in self.env_upto..site {
+            if self.left_env.len() != self.tensors[j].shape().0 / 2 {
+                // Defensive: rebuild the prefix from the left boundary.
+                self.left_env.clear();
+                self.left_env.push(Complex64::new(1.0, 0.0));
+                for jj in 0..j {
+                    Self::contract_site_into(&mut self.left_env, &self.tensors[jj]);
+                }
+                self.env_upto = j;
+            }
+            Self::contract_site_into(&mut self.left_env, &self.tensors[j]);
+            self.env_upto = j + 1;
+        }
+    }
+
+    /// Drop the cached measurement left environment: a rewrite at any site
+    /// below the frontier makes the cached contraction stale.
+    fn invalidate_meas_env(&mut self) {
+        self.env_upto = 0;
+        self.left_env.clear();
+        self.left_env.push(Complex64::new(1.0, 0.0));
+    }
+
+    /// Mid-circuit reset on tensor site `site`: measure-and-discard, then
+    /// prepare |0> (X-flip when the sampled bit was 1).  Mirrors the
+    /// statevector `reset_qubit` semantics.  Returns the discarded bit.
+    pub fn reset_site(&mut self, site: usize, rng: &mut StdRng) -> u8 {
+        let bit = self.measure_site(site, rng);
+        if bit == 1 {
+            let x = OpType::X.to_matrix();
+            self.apply_1q_gate(site, &x);
+        }
+        bit
     }
 }
 
@@ -1371,8 +2193,19 @@ impl MPSState {
 impl QuantumDAG {
     /// Evolve the circuit into an MPS state.
     pub fn evolve_mps(&self, bond_dim: usize) -> MPSState {
+        let __dbg = std::env::var_os("SF_MPS_SVD_DEBUG").is_some();
+        let __t0 = std::time::Instant::now();
         let mut state = MPSState::new(self.n_qubits, bond_dim);
+        let __t1 = std::time::Instant::now();
         self._evolve_into(&mut state);
+        if __dbg {
+            eprintln!(
+                "[loop-dbg] evolve_mps n={} new={}us sweep={}us",
+                self.n_qubits,
+                (__t1 - __t0).as_micros(),
+                __t1.elapsed().as_micros()
+            );
+        }
         state
     }
 
@@ -1448,10 +2281,15 @@ impl QuantumDAG {
         }
 
         use rayon::prelude::*;
+        let __dbg = std::env::var_os("SF_MPS_SVD_DEBUG").is_some();
+        let __tl0 = std::time::Instant::now();
         let layers = self.parallel_layers();
+        let __tl1 = std::time::Instant::now();
         let bond_dim = state.bond_dim;
+        let mut __lstat: Vec<(usize, u128)> = Vec::new();
 
         for layer in layers {
+            let __lt = std::time::Instant::now();
             // Group gates by whether they are routed (expensive, potentially
             // touching many qubits) or local/adjacent (fast, easy to parallelize).
             // For Heisenberg/QFT almost all gates are adjacent or near-adjacent.
@@ -1517,6 +2355,33 @@ impl QuantumDAG {
             for eps in layer_discards {
                 state.record_discard(eps);
             }
+            // The parallel path applies adjacent 2q gates through the raw
+            // static helper (bypassing `apply_2q_gate`), so mirror its
+            // rc_start bookkeeping: both rewritten sites lose their
+            // right-isometry claim.  Routed (non-adjacent) gates below go
+            // through `apply_2q_gate_routed`, which updates rc_start itself.
+            for &node_id in &layer {
+                let op = &self.graph()[node_id];
+                if op.op_type.is_boundary()
+                    || op.op_type == OpType::Barrier
+                    || op.op_type.is_measurement()
+                {
+                    continue;
+                }
+                if op.qubits.len() == 2 {
+                    let dist = (op.qubits[0] as isize - op.qubits[1] as isize).abs();
+                    if dist == 1 {
+                        let lo = op.qubits[0].min(op.qubits[1]);
+                        if lo < state.env_upto {
+                            state.invalidate_meas_env();
+                        }
+                        let hi = op.qubits[0].max(op.qubits[1]);
+                        if hi >= state.rc_start {
+                            state.rc_start = hi + 1;
+                        }
+                    }
+                }
+            }
 
             // Handle routed gates sequentially for now (rare in optimized Heisenberg/QFT)
             for &node_id in &layer {
@@ -1527,6 +2392,27 @@ impl QuantumDAG {
                     state.apply_2q_gate_routed(op.qubits[0], op.qubits[1], &gate_u);
                 }
             }
+            __lstat.push((layer.len(), __lt.elapsed().as_micros()));
+        }
+
+        if __dbg {
+            let __tot: u128 = __lstat.iter().map(|s| s.1).sum();
+            let mut __idx: Vec<usize> = (0..__lstat.len()).collect();
+            __idx.sort_by_key(|&i| std::cmp::Reverse(__lstat[i].1));
+            let __top = __idx
+                .iter()
+                .take(4)
+                .map(|&i| format!("L{}[g={} {}us]", i, __lstat[i].0, __lstat[i].1))
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!(
+                "[loop-dbg] _evolve_into layers={} plan={}us loop={}us par_sum={}us top: {}",
+                __lstat.len(),
+                (__tl1 - __tl0).as_micros(),
+                __tl0.elapsed().as_micros(),
+                __tot,
+                __top
+            );
         }
     }
 
@@ -1719,7 +2605,8 @@ mod tests {
         assert!(eps_pos > 0.99, "position cut should be catastrophic here");
 
         // Optimal cut: keep the four largest singular directions.
-        let (t1, t2, eps_svd) = MPSState::svd_truncate_merged(&m, d, d, 4);
+        let (t1, t2, eps_svd) =
+            MPSState::svd_truncate_merged(&m, d, d, 4, std::time::Instant::now());
         let kept_svd: f64 = sigmas[..4].iter().map(|s| s * s).sum();
         let eps_expected = 1.0 - kept_svd / total;
         assert!(

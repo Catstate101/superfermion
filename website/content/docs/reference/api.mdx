@@ -13,6 +13,7 @@ Complete API reference. All code examples verified against `superfermion==0.1.0`
 sf.Circuit(n)          Build circuits
 sf.run(circuit, ...)   Execute anywhere
 sf.simulate(circuit)   Execute and return sf.State directly
+sf.cat(circuit, mode)  Compile once into a reusable execution handle
 sf.compile(circuit)    Compile for hardware
 sf.State               Rust-native quantum state handle
 sf.experiment(name)    Scoped experiment tracking
@@ -211,6 +212,8 @@ result = sf.run(qc, method="mps", bond_dim=64, shots=1000)
 
 MPS `shots=0` densifies the tensor network into a full statevector. For more than 26 qubits this raises a `MemoryError` with guidance — pass `shots>0` to sample directly from the tensor network instead, or `densify=False` to receive only the `State` handle. MPS sampling and statevector output use the same little-endian qubit order as the statevector backend (`"001"` means qubit 0 is `|1⟩`).
 
+With `shots>0`, `method="mps"` also runs **dynamic (mid-circuit)** circuits (`measure`/`reset`/`c_if`) as per-shot trajectories that collapse the tensor network at every mid measure; `bond_dim` caps the bond (default 64) and is echoed in `result.metadata["bond_dim"]`.
+
 For MPS-native observables and densification, without going through `sf.run`:
 
 ```python
@@ -247,6 +250,26 @@ result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
 ```
 
 `counts`/`probabilities` keys follow the shared little-endian key convention (qubit `q` = bit `q` of `int(key, 2)`); `result.metadata["density_matrix"]` is big-endian (qubit 0 = most significant). See the execution guide for the full layout notes.
+
+### Cat — compile-once handle (`sf.cat()`)
+
+`sf.cat(circuit, mode)` lowers a circuit **once** into a reusable handle: gate fusion, qubit mapping and parameter metadata are cached, so repeated runs with fresh parameter values skip the DAG rebuild that `sf.run()` pays on every call.
+
+```python
+qc = sf.Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+
+handle = sf.cat(qc, mode="statevector")        # compile once
+state = handle.simulate({"t": 0.3})            # rebind, no DAG rebuild
+print(handle.parameter_names)                  # ['t']
+print([round(abs(a) ** 2, 3) for a in state.numpy()])
+# [0.978, 0.0, 0.0, 0.022]
+
+stab = sf.cat(sf.Circuit(2).h(0).cnot(0, 1), mode="stabilizer")
+print(stab.sample(1000, seed=7))               # little-endian counts
+# {'00': 502, '11': 498}
+```
+
+Modes: `statevector` → `.simulate(values)`; `adjoint` → `.run_gradient(pauli, theta)` returns one `d⟨P⟩/dθ` per parameter (Pauli string `"IXYZ…"`, character `i` acts on qubit `i`); `stabilizer` / `clifford` → `.sample(shots, seed=…)`. The handle also exposes `.n_qubits` and `.parameter_names`. `density_matrix` is not implemented and raises `ValueError` at construction rather than returning wrong numbers; a build that does not export `CatCircuit` makes `sf.cat()` raise a clear `ImportError`.
 
 ---
 

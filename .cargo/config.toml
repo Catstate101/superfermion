@@ -14,3 +14,9 @@ rustflags = ["-C", "target-cpu=x86-64-v2"]
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+# Local dev host (windows-gnu) gets the same portable baseline: enables
+# POPCNT + SSE4.2 auto-vectorization locally.  Shipped wheels are unaffected
+# (they build for the msvc/linux/darwin targets above).
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v2"]

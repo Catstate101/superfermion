@@ -167,49 +167,46 @@ impl StatevectorState {
         }
     }
 
-    fn compute_expval(&self, observable: &[PauliTerm]) -> f64 {
-        let dim = self.data.len();
+    fn compute_expval(&self, observable: &[PauliTerm]) -> Result<f64, MethodError> {
         let mut total = Complex64::new(0.0, 0.0);
-
         for term in observable {
-            let mut expval = Complex64::new(0.0, 0.0);
-            for i in 0..dim {
-                let mut phase = Complex64::new(1.0, 0.0);
-                let mut target_idx = i;
-
-                for (q, &pauli_op) in term.paulis.iter().enumerate() {
-                    // Qubit q lives at bit position q (little-endian statevector).
-                    let bit_pos = q;
-                    match pauli_op {
-                        1 => {
-                            target_idx ^= 1 << bit_pos;
-                        }
-                        2 => {
-                            target_idx ^= 1 << bit_pos;
-                            if (i >> bit_pos) & 1 == 0 {
-                                phase *= Complex64::new(0.0, -1.0);
-                            } else {
-                                phase *= Complex64::new(0.0, 1.0);
-                            }
-                        }
-                        3 if (i >> bit_pos) & 1 == 1 => {
-                            phase *= -1.0;
-                        }
-                        3 => {}
-                        _ => {}
-                    }
-                }
-                expval += self.data[i].conj() * phase * self.data[target_idx];
-            }
-            total += term.coef * expval;
+            total += term.coef * pauli_expval_bitmask(&self.data, &term.paulis)?;
         }
-        total.re
+        Ok(total.re)
+    }
+
+    /// Sum_q <Z_q>/n, using one popcount and no probability-array allocation.
+    pub fn mean_z(&self) -> Result<f64, MethodError> {
+        if self.num_qubits == 0 {
+            return Err(MethodError("mean_z requires at least one qubit".into()));
+        }
+        let n = self.num_qubits as f64;
+        Ok(self
+            .data
+            .iter()
+            .enumerate()
+            .map(|(i, z)| z.norm_sqr() * (n - 2.0 * i.count_ones() as f64) / n)
+            .sum())
+    }
+
+    pub fn diagonal_expectation(&self, weights: &[f64]) -> Result<f64, MethodError> {
+        if weights.len() != self.data.len() {
+            return Err(MethodError(
+                "diagonal length must equal the state dimension".into(),
+            ));
+        }
+        Ok(self
+            .data
+            .iter()
+            .zip(weights)
+            .map(|(z, w)| z.norm_sqr() * w)
+            .sum())
     }
 }
 
 impl QuantumStateImpl for StatevectorState {
     fn expectation(&self, observable: &[PauliTerm]) -> Result<f64, MethodError> {
-        Ok(self.compute_expval(observable))
+        self.compute_expval(observable)
     }
 
     fn sample(&self, shots: usize, seed: u64) -> Result<HashMap<String, usize>, MethodError> {
@@ -720,6 +717,11 @@ impl QuantumStateImpl for DensityMatrixStateWrapper {
 pub struct MPSStateWrapper {
     pub inner: MPSState,
     pub device: String,
+    /// Right-canonical copy built on the first `sample` call.  Evolution
+    /// skips the eager O(n·D³) canonicalization sweep (expectation is a
+    /// gauge-invariant contraction); sequential sampling needs canonical
+    /// form, so it is built (and kept) here on demand instead.
+    canon_cache: std::sync::Mutex<Option<MPSState>>,
 }
 
 impl MPSStateWrapper {
@@ -727,6 +729,7 @@ impl MPSStateWrapper {
         Self {
             inner: mps,
             device: device.to_string(),
+            canon_cache: std::sync::Mutex::new(None),
         }
     }
 }
@@ -743,7 +746,25 @@ impl QuantumStateImpl for MPSStateWrapper {
     }
 
     fn sample(&self, shots: usize, seed: u64) -> Result<HashMap<String, usize>, MethodError> {
-        Ok(self.inner.sample(shots, seed))
+        // Sampling walks the chain left-to-right assuming orthonormal right
+        // tails (see MPSState::sample_one_with_rng), so the state must be
+        // right-canonical.  States from simulate_to_state("mps") are no
+        // longer canonicalized eagerly; build the canonical copy on first
+        // draw and cache it, so only the first sample pays the sweep.
+        // Sites ≥ rc_start are already isometric, so the sweep only needs
+        // the dirty window 1..rc_start.
+        if self.inner.rc_start == 1 {
+            return Ok(self.inner.sample(shots, seed));
+        }
+        let mut guard = self.canon_cache.lock().unwrap();
+        let canon = guard.get_or_insert_with(|| {
+            let mut c = self.inner.clone();
+            let rc = c.rc_start;
+            c.canonicalize_right_range(1, rc);
+            c.rc_start = 1;
+            c
+        });
+        Ok(canon.sample(shots, seed))
     }
 
     fn grad(
@@ -1046,5 +1067,111 @@ mod tests {
         assert!(state.entropy().is_err());
         assert!(state.purity().is_err());
         assert!(state.qfim(&QuantumDAG::new(2, 0), &HashMap::new()).is_err());
+    }
+}
+
+/// Pauli expectation in the Rust core's q0=LSB convention. The masks are
+/// compiled once per term, eliminating the per-amplitude Pauli-string walk.
+pub fn pauli_expval_bitmask(data: &[Complex64], paulis: &[u8]) -> Result<Complex64, MethodError> {
+    if data.is_empty()
+        || !data.len().is_power_of_two()
+        || paulis.len() > data.len().trailing_zeros() as usize
+        || paulis.iter().any(|&p| p > 3)
+    {
+        return Err(MethodError(
+            "invalid state dimension or Pauli string".into(),
+        ));
+    }
+    let (mut flip, mut sign, mut ys) = (0usize, 0usize, 0u32);
+    for (q, &p) in paulis.iter().enumerate() {
+        if p == 1 || p == 2 {
+            flip |= 1usize << q;
+        }
+        if p == 2 || p == 3 {
+            sign |= 1usize << q;
+        }
+        if p == 2 {
+            ys += 1;
+        }
+    }
+    if flip == 0 {
+        let value: f64 = data
+            .iter()
+            .enumerate()
+            .map(|(i, z)| {
+                if (i & sign).count_ones() & 1 == 0 {
+                    z.norm_sqr()
+                } else {
+                    -z.norm_sqr()
+                }
+            })
+            .sum();
+        return Ok(Complex64::new(value, 0.0));
+    }
+    let phase = match ys % 4 {
+        0 => Complex64::new(1.0, 0.0),
+        1 => Complex64::new(0.0, -1.0),
+        2 => Complex64::new(-1.0, 0.0),
+        _ => Complex64::new(0.0, 1.0),
+    };
+    let mut value = Complex64::new(0.0, 0.0);
+    for (i, z) in data.iter().enumerate() {
+        let product = z.conj() * phase * data[i ^ flip];
+        value += if (i & sign).count_ones() & 1 == 0 {
+            product
+        } else {
+            -product
+        };
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod performance_readout_tests {
+    use super::*;
+
+    #[test]
+    fn performance_pauli_masks_match_direct_walk() {
+        let mut data: Vec<Complex64> = (0..16)
+            .map(|i| Complex64::new((i as f64 + 0.7).sin(), (i as f64 * 1.3).cos()))
+            .collect();
+        let norm = data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+        for z in &mut data {
+            *z /= norm;
+        }
+        for code in 0..256usize {
+            let paulis: Vec<u8> = (0..4).map(|q| ((code >> (2 * q)) & 3) as u8).collect();
+            let mut expected = Complex64::new(0.0, 0.0);
+            for i in 0..16 {
+                let mut j = i;
+                let mut phase = Complex64::new(1.0, 0.0);
+                for (q, p) in paulis.iter().enumerate() {
+                    match p {
+                        1 => j ^= 1 << q,
+                        2 => {
+                            j ^= 1 << q;
+                            phase *= if (i >> q) & 1 == 0 {
+                                Complex64::new(0.0, -1.0)
+                            } else {
+                                Complex64::new(0.0, 1.0)
+                            };
+                        }
+                        3 if (i >> q) & 1 == 1 => phase = -phase,
+                        _ => {}
+                    }
+                }
+                expected += data[i].conj() * phase * data[j];
+            }
+            let actual = pauli_expval_bitmask(&data, &paulis).unwrap();
+            assert!((actual - expected).norm() < 1e-12);
+        }
+        let state = StatevectorState::new(data, 4, "cpu");
+        let weights: Vec<f64> = (0..16usize)
+            .map(|i| (4.0 - 2.0 * i.count_ones() as f64) / 4.0)
+            .collect();
+        assert!(
+            (state.mean_z().unwrap() - state.diagonal_expectation(&weights).unwrap()).abs() < 1e-12
+        );
+        assert!(state.diagonal_expectation(&[0.0]).is_err());
     }
 }

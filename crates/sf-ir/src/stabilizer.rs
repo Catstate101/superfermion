@@ -9,6 +9,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::{OpType, QuantumDAG};
 
@@ -25,6 +26,12 @@ pub struct StabilizerTableau {
     /// Scratch buffers reused across measure_z calls to avoid per-call heap alloc.
     sx_buf: Vec<u64>, // words elements, zeroed before each measure_z
     sz_buf: Vec<u64>, // words elements, zeroed before each measure_z
+    /// Cached output of `build_sample_plan()`.
+    ///
+    /// The plan is a pure function of the tableau, so it survives across
+    /// `sample()` calls; every mutator drops it via `invalidate_plan()`
+    /// (replacing the cell with a fresh `OnceLock`).
+    plan_cache: OnceLock<Vec<PlanEntry>>,
 }
 
 /// One precomputed measurement of a `sample()` plan (see
@@ -42,6 +49,84 @@ enum PlanEntry {
     /// Outcome is the parity of previously drawn bits selected by `mask`
     /// (bit `v` of the drawn-bit vector = variable `v`), XOR `c`.
     Determined { mask: Vec<u64>, c: u8 },
+}
+
+/// Flat typed Clifford op for the fused row-major builder (`from_cops`).
+/// `SX`/`SXDG`/`CZ`/`CY` are expanded into these primitives at flatten time,
+/// keeping the per-row hot loop free of decomposition branches.
+#[derive(Clone, Copy)]
+enum COp {
+    H(u32),
+    S(u32),
+    Sdg(u32),
+    X(u32),
+    Y(u32),
+    Z(u32),
+    Cnot(u32, u32),
+    Swap(u32, u32),
+}
+
+/// Minimal FxHash (Firefox hasher) for the sampler's internal counting maps.
+///
+/// Keys are bitstring-shaped and can be kilobytes long at n = 4096; SipHash's
+/// per-byte mixing dominates the block loop there.  These maps are private
+/// counters (no adversarial input), so a cheap non-cryptographic hash is
+/// sufficient — the public API still returns `std::collections::HashMap`.
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+/// Row×op work below which the fused tableau build stays serial (rayon task
+/// spawn costs more than the streaming it saves).  Overridable via
+/// `SF_STAB_PAR_MIN` so the crossover can be measured on-host rather than
+/// assumed; the default preserves the historical `1 << 18` behaviour.
+static SF_STAB_PAR_MIN: OnceLock<usize> = OnceLock::new();
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+
+    #[inline]
+    fn write(&mut self, mut bytes: &[u8]) {
+        while bytes.len() >= 8 {
+            let mut v = [0u8; 8];
+            v.copy_from_slice(&bytes[..8]);
+            self.hash = (self.hash.rotate_left(5) ^ u64::from_le_bytes(v)).wrapping_mul(FX_SEED);
+            bytes = &bytes[8..];
+        }
+        if !bytes.is_empty() {
+            let mut v = [0u8; 8];
+            v[..bytes.len()].copy_from_slice(bytes);
+            self.hash = (self.hash.rotate_left(5) ^ u64::from_le_bytes(v)).wrapping_mul(FX_SEED);
+        }
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct FxBuildHasher;
+
+impl std::hash::BuildHasher for FxBuildHasher {
+    type Hasher = FxHasher;
+
+    #[inline]
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher::default()
+    }
 }
 
 impl StabilizerTableau {
@@ -65,12 +150,20 @@ impl StabilizerTableau {
             r,
             sx_buf: vec![0u64; words],
             sz_buf: vec![0u64; words],
+            plan_cache: OnceLock::new(),
         }
+    }
+
+    /// Drop the cached measurement plan — any tableau mutation makes it stale.
+    #[inline]
+    fn invalidate_plan(&mut self) {
+        self.plan_cache = OnceLock::new();
     }
 
     // ── Single-qubit gates ──
 
     pub fn h(&mut self, q: usize) {
+        self.invalidate_plan();
         let w = q / 64;
         let bit = q % 64;
         let mask = 1u64 << bit;
@@ -84,6 +177,7 @@ impl StabilizerTableau {
     }
 
     pub fn s(&mut self, q: usize) {
+        self.invalidate_plan();
         let w = q / 64;
         for i in 0..2 * self.n {
             let xq = (self.x[i][w] >> (q % 64)) & 1;
@@ -100,6 +194,7 @@ impl StabilizerTableau {
     }
 
     pub fn x_gate(&mut self, q: usize) {
+        self.invalidate_plan();
         let w = q / 64;
         for i in 0..2 * self.n {
             self.r[i] ^= (self.z[i][w] >> (q % 64)) & 1;
@@ -107,6 +202,7 @@ impl StabilizerTableau {
     }
 
     pub fn z_gate(&mut self, q: usize) {
+        self.invalidate_plan();
         let w = q / 64;
         for i in 0..2 * self.n {
             self.r[i] ^= (self.x[i][w] >> (q % 64)) & 1;
@@ -114,6 +210,7 @@ impl StabilizerTableau {
     }
 
     pub fn y_gate(&mut self, q: usize) {
+        self.invalidate_plan();
         let w = q / 64;
         for i in 0..2 * self.n {
             let xq = (self.x[i][w] >> (q % 64)) & 1;
@@ -127,6 +224,7 @@ impl StabilizerTableau {
     /// CNOT(c, t): control=c, target=t.
     /// Phase: r ^= x_c · z_t · (x_t ⊕ z_c ⊕ 1)
     pub fn cnot(&mut self, a: usize, b: usize) {
+        self.invalidate_plan();
         let wa = a / 64;
         let ba = a % 64;
         let wb = b / 64;
@@ -153,6 +251,7 @@ impl StabilizerTableau {
     }
 
     pub fn swap(&mut self, a: usize, b: usize) {
+        self.invalidate_plan();
         let wa = a / 64;
         let ba = a % 64;
         let wb = b / 64;
@@ -209,12 +308,46 @@ impl StabilizerTableau {
     }
 
     /// Build and evolve a tableau from (gate_name, qubits) list.
+    ///
+    /// Flattens to typed ops, then runs the fused row-major builder: each
+    /// tableau row consumes the whole op sequence in one pass (every AG gate
+    /// update is row-local) while its words stay cache-hot, with rows split
+    /// across rayon threads for large circuits.
     pub fn from_gate_list(n: usize, gates: &[(String, Vec<usize>)]) -> Result<Self, String> {
-        let mut tab = Self::new(n);
+        let mut cops: Vec<COp> = Vec::with_capacity(gates.len());
         for (name, qubits) in gates {
-            tab.apply_gate(name, qubits)?;
+            Self::flatten_gate(name, qubits, &mut cops)?;
         }
-        Ok(tab)
+        Ok(Self::from_cops(n, &cops))
+    }
+
+    /// Flatten one named gate into typed ops.  Mirrors `apply_gate` exactly
+    /// (same names, same decompositions, same errors).
+    fn flatten_gate(name: &str, qubits: &[usize], out: &mut Vec<COp>) -> Result<(), String> {
+        let q0 = qubits[0] as u32;
+        match name {
+            "H" => out.push(COp::H(q0)),
+            "S" => out.push(COp::S(q0)),
+            "SDG" => out.push(COp::Sdg(q0)),
+            "SX" => out.extend([COp::H(q0), COp::S(q0), COp::H(q0)]),
+            "SXDG" => out.extend([COp::H(q0), COp::Sdg(q0), COp::H(q0)]),
+            "X" => out.push(COp::X(q0)),
+            "Y" => out.push(COp::Y(q0)),
+            "Z" => out.push(COp::Z(q0)),
+            "CX" | "CNOT" => out.push(COp::Cnot(q0, qubits[1] as u32)),
+            "CZ" => {
+                let q1 = qubits[1] as u32;
+                out.extend([COp::H(q1), COp::Cnot(q0, q1), COp::H(q1)]);
+            }
+            "CY" => {
+                let q1 = qubits[1] as u32;
+                out.extend([COp::Sdg(q1), COp::Cnot(q0, q1), COp::S(q1)]);
+            }
+            "SWAP" => out.push(COp::Swap(q0, qubits[1] as u32)),
+            "ID" | "BARRIER" | "MEASURE" | "RESET" => {}
+            _ => return Err(format!("Unsupported gate: {}", name)),
+        }
+        Ok(())
     }
 
     /// Build and evolve a tableau directly from the DAG (typed fast path).
@@ -222,33 +355,158 @@ impl StabilizerTableau {
     /// Identical semantics to `from_gate_list` (BARRIER/MEASURE/RESET
     /// skipped, ID no-op, non-Clifford ops rejected) but dispatches on the
     /// typed `OpType` enum — no per-gate String allocation, uppercasing,
-    /// or qubit-vec cloning.
+    /// or qubit-vec cloning — and runs the fused row-major builder.
     pub fn from_dag(dag: &QuantumDAG) -> Result<Self, String> {
-        let mut tab = Self::new(dag.n_qubits);
+        let mut cops: Vec<COp> = Vec::with_capacity(dag.graph().node_count());
         for id in dag.topological_order() {
             let op = &dag.graph()[id];
             let q = &op.qubits;
+            let q0 = q[0] as u32;
             match &op.op_type {
-                OpType::H => tab.h(q[0]),
-                OpType::S => tab.s(q[0]),
-                OpType::Sdg => tab.sdg(q[0]),
-                OpType::SX => {
-                    tab.h(q[0]);
-                    tab.s(q[0]);
-                    tab.h(q[0]);
+                OpType::H => cops.push(COp::H(q0)),
+                OpType::S => cops.push(COp::S(q0)),
+                OpType::Sdg => cops.push(COp::Sdg(q0)),
+                OpType::SX => cops.extend([COp::H(q0), COp::S(q0), COp::H(q0)]),
+                OpType::X => cops.push(COp::X(q0)),
+                OpType::Y => cops.push(COp::Y(q0)),
+                OpType::Z => cops.push(COp::Z(q0)),
+                OpType::CNOT => cops.push(COp::Cnot(q0, q[1] as u32)),
+                OpType::CZ => {
+                    let q1 = q[1] as u32;
+                    cops.extend([COp::H(q1), COp::Cnot(q0, q1), COp::H(q1)]);
                 }
-                OpType::X => tab.x_gate(q[0]),
-                OpType::Y => tab.y_gate(q[0]),
-                OpType::Z => tab.z_gate(q[0]),
-                OpType::CNOT => tab.cnot(q[0], q[1]),
-                OpType::CZ => tab.cz(q[0], q[1]),
-                OpType::CY => tab.cy(q[0], q[1]),
-                OpType::SWAP => tab.swap(q[0], q[1]),
+                OpType::CY => {
+                    let q1 = q[1] as u32;
+                    cops.extend([COp::Sdg(q1), COp::Cnot(q0, q1), COp::S(q1)]);
+                }
+                OpType::SWAP => cops.push(COp::Swap(q0, q[1] as u32)),
                 OpType::Id | OpType::Barrier | OpType::Measure | OpType::Reset => {}
                 other => return Err(format!("Unsupported gate: {:?}", other)),
             }
         }
-        Ok(tab)
+        Ok(Self::from_cops(dag.n_qubits, &cops))
+    }
+
+    /// Build a tableau from a flat typed op list (fused row-major build).
+    fn from_cops(n: usize, cops: &[COp]) -> Self {
+        let mut tab = Self::new(n);
+        tab.apply_cops(cops);
+        tab
+    }
+
+    /// Apply a flat op list with the fused row-major loop.
+    ///
+    /// The historical order (gate-outer, row-inner) streamed the whole
+    /// 2n-row tableau from DRAM once per gate; inverting it keeps each row's
+    /// words cache-resident for the entire sequence (gate updates depend only
+    /// on the row's own bits), and rows are independent, so large builds are
+    /// split across rayon threads.
+    fn apply_cops(&mut self, cops: &[COp]) {
+        self.invalidate_plan();
+        if cops.is_empty() {
+            return;
+        }
+        let rows = 2 * self.n;
+        let work = rows.saturating_mul(cops.len());
+        let par_min = *SF_STAB_PAR_MIN.get_or_init(|| {
+            std::env::var("SF_STAB_PAR_MIN")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1 << 18)
+        });
+        if work < par_min || rayon::current_num_threads() <= 1 {
+            for i in 0..rows {
+                Self::apply_row(cops, &mut self.x[i], &mut self.z[i], &mut self.r[i]);
+            }
+        } else {
+            let threads = rayon::current_num_threads().max(1);
+            let blk = rows.div_ceil(threads.saturating_mul(8)).max(32);
+            self.x
+                .par_chunks_mut(blk)
+                .zip(self.z.par_chunks_mut(blk))
+                .zip(self.r.par_chunks_mut(blk))
+                .for_each(|((xs, zs), rs)| {
+                    for i in 0..xs.len() {
+                        Self::apply_row(cops, &mut xs[i], &mut zs[i], &mut rs[i]);
+                    }
+                });
+        }
+    }
+
+    #[inline(always)]
+    fn bit_pos(q: u32) -> (usize, u32, u64) {
+        let b = q & 63;
+        ((q >> 6) as usize, b, 1u64 << b)
+    }
+
+    /// Apply the whole op list, in order, to ONE tableau row.
+    /// Semantics are identical to the per-gate methods (`h`, `s`, ...).
+    fn apply_row(cops: &[COp], xr: &mut [u64], zr: &mut [u64], r: &mut u64) {
+        for &op in cops {
+            match op {
+                COp::H(q) => {
+                    let (w, b, m) = Self::bit_pos(q);
+                    let xq = (xr[w] >> b) & 1;
+                    let zq = (zr[w] >> b) & 1;
+                    *r ^= xq & zq;
+                    xr[w] = (xr[w] & !m) | (zq << b);
+                    zr[w] = (zr[w] & !m) | (xq << b);
+                }
+                COp::S(q) => {
+                    let (w, b, _) = Self::bit_pos(q);
+                    let xq = (xr[w] >> b) & 1;
+                    let zq = (zr[w] >> b) & 1;
+                    *r ^= xq & zq;
+                    zr[w] ^= xq << b;
+                }
+                COp::Sdg(q) => {
+                    let (w, b, _) = Self::bit_pos(q);
+                    for _ in 0..3 {
+                        let xq = (xr[w] >> b) & 1;
+                        let zq = (zr[w] >> b) & 1;
+                        *r ^= xq & zq;
+                        zr[w] ^= xq << b;
+                    }
+                }
+                COp::X(q) => {
+                    let (w, b, _) = Self::bit_pos(q);
+                    *r ^= (zr[w] >> b) & 1;
+                }
+                COp::Z(q) => {
+                    let (w, b, _) = Self::bit_pos(q);
+                    *r ^= (xr[w] >> b) & 1;
+                }
+                COp::Y(q) => {
+                    let (w, b, _) = Self::bit_pos(q);
+                    let xq = (xr[w] >> b) & 1;
+                    let zq = (zr[w] >> b) & 1;
+                    *r ^= xq ^ zq;
+                }
+                COp::Cnot(a, b) => {
+                    let (wa, ba, _) = Self::bit_pos(a);
+                    let (wb, bb, _) = Self::bit_pos(b);
+                    let xa = (xr[wa] >> ba) & 1;
+                    let xb = (xr[wb] >> bb) & 1;
+                    let za = (zr[wa] >> ba) & 1;
+                    let zb = (zr[wb] >> bb) & 1;
+                    *r ^= xa & zb & (xb ^ za ^ 1);
+                    xr[wb] ^= xa << bb;
+                    zr[wa] ^= zb << ba;
+                }
+                COp::Swap(a, b) => {
+                    let (wa, ba, ma) = Self::bit_pos(a);
+                    let (wb, bb, mb) = Self::bit_pos(b);
+                    let xa = (xr[wa] >> ba) & 1;
+                    let xb = (xr[wb] >> bb) & 1;
+                    let za = (zr[wa] >> ba) & 1;
+                    let zb = (zr[wb] >> bb) & 1;
+                    xr[wa] = (xr[wa] & !ma) | (xb << ba);
+                    xr[wb] = (xr[wb] & !mb) | (xa << bb);
+                    zr[wa] = (zr[wa] & !ma) | (zb << ba);
+                    zr[wb] = (zr[wb] & !mb) | (za << bb);
+                }
+            }
+        }
     }
 
     // ── Phase of product (AG 2004) ──
@@ -320,10 +578,11 @@ impl StabilizerTableau {
     // ── Measure Z_q (AG algorithm 1) ──
 
     /// Single-shot reference implementation.  `sample()` no longer calls it
-    /// (it builds a measurement plan instead); it is kept as the reference
-    /// path for the replay tests and for future mid-circuit work.
+    /// (it builds a measurement plan instead); it is kept as the single-shot
+    /// reference for tests and for future mid-circuit work.
     #[allow(dead_code)]
     fn measure_z(&mut self, q: usize, rng: &mut StdRng) -> u8 {
+        self.invalidate_plan();
         let n = self.n;
         let w = q / 64;
         let mask = 1u64 << (q % 64);
@@ -545,46 +804,169 @@ impl StabilizerTableau {
 
     // ── Sampling ──
 
-    /// Sample `shots` bitstrings. Uses rayon for multi-core parallelism.
+    /// Sample `shots` bitstrings and return the counts map.
     ///
-    /// The per-shot AG pass (`measure_z` × n, O(n³) per shot) is replaced by
-    /// a precomputed measurement plan (see [`PlanEntry`]): the pass runs once
-    /// over the supports, then each shot only draws the random bits and
-    /// evaluates parities — O(n · random/64) per shot.  Draws use the same
-    /// `StdRng::seed_from_u64(base + shot)` and the same `u8`
-    /// `gen_range(0..2)` calls in the same q order as the historical pass,
-    /// so same-seed counts are unchanged.
+    /// Bit-sliced block evaluation (64 shots per block): every plan entry's
+    /// outcome for a whole block is one `u64` (bit i = shot i) — `Random`
+    /// entries read a fresh word from a per-block ChaCha stream, `Determined`
+    /// entries XOR their mask slices.  A block costs O(Σ|mask| + 64·n) word
+    /// ops instead of 64 separate per-shot passes.
+    ///
+    /// Keys use the shared little-endian convention (qubit q = bit q of the
+    /// integer form; the leftmost character is the highest qubit) — the same
+    /// keys the Python layer previously produced by reversing the raw
+    /// output, so `RunResult.counts` is unchanged.
+    ///
+    /// Determinism: with an explicit `seed`, the shot→randomness mapping is
+    /// fixed per build (block b draws from `seed + b`); two calls with the
+    /// same arguments return identical counts.
+    ///
+    /// The measurement plan is cached per tableau revision, so all calls
+    /// after the first pay only the block evaluation.
     pub fn sample(&self, shots: usize, seed: Option<u64>) -> HashMap<String, usize> {
         if shots == 0 {
             return HashMap::new();
         }
         let base_seed = seed.unwrap_or_else(rand::random);
         let n = self.n;
-        let plan = self.build_sample_plan();
-
-        // Parallel sampling: each shot is independent.
-        (0..shots)
-            .into_par_iter()
-            .map(|shot_idx| {
-                let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(shot_idx as u64));
-                self.eval_plan(&plan, n, &mut rng)
+        // The plan depends only on the tableau; the (possibly expensive)
+        // AG pass runs once per tableau revision and is reused across
+        // `sample()` calls (mutators call `invalidate_plan`).
+        let plan = self.plan_cache.get_or_init(|| self.build_sample_plan());
+        let var_count = plan
+            .iter()
+            .map(|e| match e {
+                PlanEntry::Random { var } => *var as usize + 1,
+                PlanEntry::Determined { .. } => 0,
             })
-            .fold(
-                HashMap::new,
-                |mut acc: HashMap<String, usize>, bs: String| {
-                    *acc.entry(bs).or_insert(0) += 1;
-                    acc
-                },
-            )
-            .reduce(
-                HashMap::new,
-                |mut a: HashMap<String, usize>, b: HashMap<String, usize>| {
-                    for (k, v) in b {
-                        *a.entry(k).or_insert(0) += v;
+            .max()
+            .unwrap_or(0);
+
+        /// Shots per block — one `u64` lane per shot.
+        const BLOCK: usize = 64;
+        let nblocks = shots.div_ceil(BLOCK);
+        // Evaluate the cached plan for one block into a `u64` per qubit
+        // (bit i = shot i's outcome for q); bits >= cnt are garbage and never
+        // read. Shared by both packing paths below.
+        let eval_block = |b: usize| -> Vec<u64> {
+            let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(b as u64));
+            let mut vars = vec![0u64; var_count];
+            rng.fill(&mut vars[..]);
+            let mut out = vec![0u64; n];
+            for (q, e) in plan.iter().enumerate() {
+                out[q] = match e {
+                    PlanEntry::Random { var } => vars[*var as usize],
+                    PlanEntry::Determined { mask, c } => {
+                        let mut lane: u64 = if *c & 1 != 0 { u64::MAX } else { 0 };
+                        for (k, m) in mask.iter().enumerate() {
+                            let mut m = *m;
+                            while m != 0 {
+                                let j = m.trailing_zeros() as usize;
+                                m &= m - 1;
+                                lane ^= vars[64 * k + j];
+                            }
+                        }
+                        lane
                     }
-                    a
-                },
-            )
+                };
+            }
+            out
+        };
+
+        if n <= 64 {
+            // u64-keyed counting, then ONE string materialization per distinct
+            // pack across the whole run. Each block emits a
+            // `HashMap<u64, usize>` (bit q of the key = that shot's outcome for
+            // qubit q); the per-block maps merge on integer keys (cheap Fx
+            // hashing) so the `String::from_utf8` allocation + the `acc` string
+            // re-hash run once over the global distinct set instead of once per
+            // block. Attribution (`SF_STAB_TRACE`) showed this per-block String
+            // layer dominates the sampling window (pack >> plan-eval >> var-gen
+            // on the n<=20 bench sizes), while the mask->lane XOR loop is ~1-2%
+            // of it — so the win is in removing the redundant key materializer,
+            // not SIMD-ing the XOR accumulate. The result map is identical
+            // (same keys, same summed counts); only the materialization order
+            // changes.
+            let per_block: Vec<HashMap<u64, usize, FxBuildHasher>> = (0..nblocks)
+                .into_par_iter()
+                .map(|b| {
+                    let cnt = (shots - b * BLOCK).min(BLOCK);
+                    let out = eval_block(b);
+                    let mut keyed: HashMap<u64, usize, FxBuildHasher> =
+                        HashMap::with_hasher(FxBuildHasher);
+                    for i in 0..cnt {
+                        let mut pack = 0u64;
+                        for (q, lane) in out.iter().enumerate() {
+                            pack |= ((*lane >> i) & 1) << q;
+                        }
+                        *keyed.entry(pack).or_insert(0) += 1;
+                    }
+                    keyed
+                })
+                .collect();
+            // Merge the per-block u64 maps (cheap integer Fx hashing, kept
+            // serial), then materialize the LE strings once over the global
+            // distinct set — that decode is parallelized (each task owns its
+            // scratch buffer). Removes the redundant per-block String layer
+            // (dominant on small-n / high-collision runs) without serialising
+            // the decode on large-n / low-collision runs.
+            let mut gk: HashMap<u64, usize, FxBuildHasher> = HashMap::with_hasher(FxBuildHasher);
+            for m in per_block {
+                for (k, v) in m {
+                    *gk.entry(k).or_insert(0) += v;
+                }
+            }
+            // LE key: leftmost char = highest qubit.
+            let entries: Vec<(u64, usize)> = gk.into_iter().collect();
+            let acc: HashMap<String, usize> = entries
+                .into_par_iter()
+                .map(|(pack, c)| {
+                    let mut buf = vec![b'0'; n];
+                    let mut bits = pack;
+                    while bits != 0 {
+                        let q = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        buf[n - 1 - q] = b'1';
+                    }
+                    // Only ASCII '0'/'1' was written above.
+                    (String::from_utf8(buf).unwrap(), c)
+                })
+                .collect();
+            acc
+        } else {
+            // n > 64: a pack does not fit a u64. Build the LE string per shot,
+            // reusing a scratch buffer; allocate only for distinct keys.
+            let per_block: Vec<HashMap<String, usize, FxBuildHasher>> = (0..nblocks)
+                .into_par_iter()
+                .map(|b| {
+                    let cnt = (shots - b * BLOCK).min(BLOCK);
+                    let out = eval_block(b);
+                    let mut map: HashMap<String, usize, FxBuildHasher> =
+                        HashMap::with_hasher(FxBuildHasher);
+                    let mut buf = String::with_capacity(n);
+                    for i in 0..cnt {
+                        buf.clear();
+                        for q in (0..n).rev() {
+                            buf.push(if (out[q] >> i) & 1 != 0 { '1' } else { '0' });
+                        }
+                        match map.get_mut(buf.as_str()) {
+                            Some(v) => *v += 1,
+                            None => {
+                                map.insert(buf.clone(), 1);
+                            }
+                        }
+                    }
+                    map
+                })
+                .collect();
+            let mut acc: HashMap<String, usize> = HashMap::new();
+            for m in per_block {
+                for (k, v) in m {
+                    *acc.entry(k).or_insert(0) += v;
+                }
+            }
+            acc
+        }
     }
 
     /// Run the AG pass once, tracking each row phase as a GF(2) linear form
@@ -720,42 +1102,6 @@ impl StabilizerTableau {
         }
         plan
     }
-
-    /// Evaluate the plan for one shot.  Draws exactly one `u8`
-    /// `gen_range(0..2)` per random measurement, in q order — the same stream
-    /// sequence the historical per-shot AG pass consumed.
-    fn eval_plan(&self, plan: &[PlanEntry], n: usize, rng: &mut StdRng) -> String {
-        let mwords = plan
-            .iter()
-            .map(|e| match e {
-                PlanEntry::Determined { mask, .. } => mask.len(),
-                PlanEntry::Random { .. } => 0,
-            })
-            .max()
-            .unwrap_or(0);
-        let mut bits = vec![0u64; mwords];
-        let mut out = String::with_capacity(n);
-        for e in plan {
-            let b: u8 = match e {
-                PlanEntry::Random { var } => {
-                    let b: u8 = rng.gen_range(0..2);
-                    if mwords > 0 {
-                        bits[(*var as usize) / 64] |= (b as u64) << ((*var as usize) % 64);
-                    }
-                    b
-                }
-                PlanEntry::Determined { mask, c } => {
-                    let mut par = *c & 1;
-                    for (k, m) in mask.iter().enumerate() {
-                        par ^= ((m & bits[k]).count_ones() & 1) as u8;
-                    }
-                    par
-                }
-            };
-            out.push(if b == 1 { '1' } else { '0' });
-        }
-        out
-    }
 }
 
 impl Clone for StabilizerTableau {
@@ -768,6 +1114,7 @@ impl Clone for StabilizerTableau {
             r: self.r.clone(),
             sx_buf: self.sx_buf.clone(),
             sz_buf: self.sz_buf.clone(),
+            plan_cache: OnceLock::new(),
         }
     }
 }
@@ -950,10 +1297,12 @@ mod tests {
         tab.h(50);
         tab.cnot(50, 80);
         let counts = tab.sample(200, Some(123));
-        // Bell-like on qubits 50,80: should only see 0 on qubit 50 XOR qubit 80
+        // Keys are LE (qubit q = bit q of the integer form); the Bell-like
+        // pair on qubits 50,80 must agree in every shot.
         for (bs, _) in &counts {
-            let b50 = bs.chars().nth(50).unwrap();
-            let b80 = bs.chars().nth(80).unwrap();
+            let v = u128::from_str_radix(bs, 2).unwrap();
+            let b50 = (v >> 50) & 1;
+            let b80 = (v >> 80) & 1;
             assert_eq!(b50, b80, "Expected correlated bits 50,80 in {}", bs);
         }
     }
@@ -964,10 +1313,10 @@ mod tests {
         tab.h(0);
         tab.swap(0, 2);
         let counts = tab.sample(500, Some(99));
-        // Qubit 2 now has the |+> state → ~50% 0, 50% 1 at position 2
+        // Qubit 2 now has the |+> state → ~50% 0, 50% 1 at bit 2 of the LE key
         let ones: usize = counts
             .iter()
-            .filter(|(bs, _)| bs.chars().nth(2).unwrap() == '1')
+            .filter(|(bs, _)| (u64::from_str_radix(bs, 2).unwrap() >> 2) & 1 == 1)
             .map(|(_, c)| c)
             .sum();
         assert!(
@@ -987,6 +1336,35 @@ mod tests {
         let z11 = *counts.get("11").unwrap_or(&0);
         assert!(z00 > 180 && z00 < 320);
         assert!(z11 > 180 && z11 < 320);
+    }
+
+    #[test]
+    fn test_fused_builder_matches_sequential_apply() {
+        // The fused row-major builder must be bit-for-bit identical to
+        // applying the same gates one at a time through `apply_gate`
+        // (the historical path), for every gate kind and both loop regimes
+        // (serial below the rayon threshold, parallel above).
+        for &n in &[3usize, 10, 70, 300, 512] {
+            for &circ_seed in &[5u64, 11] {
+                let mut gates = random_clifford_gates(n, circ_seed, 8 * n);
+                for (k, name) in ["SXDG", "SX", "SWAP", "X", "Y", "Z"].iter().enumerate() {
+                    let q0 = (3 * k + 1) % n;
+                    if *name == "SWAP" {
+                        gates.push((name.to_string(), vec![q0, (q0 + 2) % n]));
+                    } else {
+                        gates.push((name.to_string(), vec![q0]));
+                    }
+                }
+                let mut seq = StabilizerTableau::new(n);
+                for (name, qubits) in &gates {
+                    seq.apply_gate(name, qubits).unwrap();
+                }
+                let fused = StabilizerTableau::from_gate_list(n, &gates).unwrap();
+                assert_eq!(seq.x, fused.x, "x mismatch n={} seed={}", n, circ_seed);
+                assert_eq!(seq.z, fused.z, "z mismatch n={} seed={}", n, circ_seed);
+                assert_eq!(seq.r, fused.r, "r mismatch n={} seed={}", n, circ_seed);
+            }
+        }
     }
 
     /// Random Clifford circuit for replay tests (H/S/CX/CZ, seeded).
@@ -1024,33 +1402,71 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_plan_matches_measure_z_replay() {
-        // The precomputed plan evaluated with a seeded StdRng must equal
-        // replaying the historical per-shot AG pass (`measure_z` × n) with an
-        // identically seeded RNG - bit for bit, same draw stream.
-        use rand::SeedableRng;
-        for &n in &[5usize, 6, 8, 12, 70] {
-            for &circ_seed in &[1u64, 2] {
-                let gates = random_clifford_gates(n, circ_seed, 6 * n);
-                let tab = StabilizerTableau::from_gate_list(n, &gates).unwrap();
-                let plan = tab.build_sample_plan();
-                for &seed in &[7u64, 99, 123456] {
-                    let mut rng_new = StdRng::seed_from_u64(seed);
-                    let got = tab.eval_plan(&plan, n, &mut rng_new);
-                    let mut rng_ref = StdRng::seed_from_u64(seed);
-                    let mut tab_ref = tab.clone();
-                    let mut want = String::with_capacity(n);
-                    for q in 0..n {
-                        let b = tab_ref.measure_z(q, &mut rng_ref);
-                        want.push(if b == 1 { '1' } else { '0' });
-                    }
-                    assert_eq!(
-                        got, want,
-                        "plan mismatch n={} circ_seed={} seed={}",
-                        n, circ_seed, seed
-                    );
-                }
+    fn test_sample_deterministic_and_block_totals() {
+        // Same seed → identical counts; totals equal shots for block-aligned,
+        // tail-block, and single-shot runs (exercises the 64-shot tail).
+        let n = 5usize;
+        let gates: Vec<(String, Vec<usize>)> = vec![
+            ("H".into(), vec![0]),
+            ("CX".into(), vec![0, 1]),
+            ("H".into(), vec![2]),
+            ("CZ".into(), vec![2, 3]),
+            ("H".into(), vec![3]),
+            ("CX".into(), vec![1, 4]),
+            ("S".into(), vec![4]),
+            ("H".into(), vec![4]),
+        ];
+        let tab = StabilizerTableau::from_gate_list(n, &gates).unwrap();
+        for &shots in &[1usize, 63, 64, 65, 500] {
+            let a = tab.sample(shots, Some(4242));
+            let b = tab.sample(shots, Some(4242));
+            assert_eq!(a, b, "same-seed mismatch shots={}", shots);
+            assert_eq!(
+                a.values().sum::<usize>(),
+                shots,
+                "total mismatch shots={}",
+                shots
+            );
+        }
+    }
+
+    #[test]
+    fn test_sample_marginals_match_exact() {
+        // Statistical parity of the bit-sliced sampler vs exact <Z_q>.
+        let n = 5usize;
+        let gates: Vec<(String, Vec<usize>)> = vec![
+            ("H".into(), vec![0]),
+            ("CX".into(), vec![0, 1]),
+            ("H".into(), vec![2]),
+            ("CZ".into(), vec![2, 3]),
+            ("H".into(), vec![3]),
+            ("CX".into(), vec![1, 4]),
+            ("S".into(), vec![4]),
+            ("H".into(), vec![4]),
+        ];
+        let tab = StabilizerTableau::from_gate_list(n, &gates).unwrap();
+        let shots = 20000usize;
+        let counts = tab.sample(shots, Some(7));
+        for q in 0..n {
+            let px = vec![0u8; n];
+            let mut pz = vec![0u8; n];
+            pz[q] = 1;
+            let exact = tab.pauli_expval(&px, &pz);
+            let mut ones = 0.0f64;
+            for (bs, c) in &counts {
+                let v = u64::from_str_radix(bs, 2).unwrap();
+                ones += ((v >> q) & 1) as f64 * *c as f64;
             }
+            let m = 1.0 - 2.0 * ones / shots as f64;
+            let sigma = ((1.0 - exact * exact).max(1e-12) / shots as f64).sqrt();
+            assert!(
+                (m - exact).abs() <= 5.0 * sigma,
+                "q={} sampled={} exact={} 5sigma={}",
+                q,
+                m,
+                exact,
+                5.0 * sigma
+            );
         }
     }
 
@@ -1080,37 +1496,25 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_counts_match_manual_measure_loop() {
-        // `sample()` (plan-based) must reproduce the historical per-shot pass
-        // (clone + n × measure_z with the same seeded StdRng) count for count.
-        use rand::SeedableRng;
-        let n = 5usize;
-        let gates: Vec<(String, Vec<usize>)> = vec![
-            ("H".into(), vec![0]),
-            ("CX".into(), vec![0, 1]),
-            ("H".into(), vec![2]),
-            ("CZ".into(), vec![2, 3]),
-            ("H".into(), vec![3]),
-            ("CX".into(), vec![1, 4]),
-            ("S".into(), vec![4]),
-            ("H".into(), vec![4]),
-        ];
-        let tab = StabilizerTableau::from_gate_list(n, &gates).unwrap();
-        let shots = 500usize;
-        let seed = 4242u64;
-        let counts = tab.sample(shots, Some(seed));
-        let mut manual: HashMap<String, usize> = HashMap::new();
-        for shot in 0..shots {
-            let mut rng = StdRng::seed_from_u64(seed.wrapping_add(shot as u64));
-            let mut t = tab.clone();
-            let mut s = String::with_capacity(n);
-            for q in 0..n {
-                let b = t.measure_z(q, &mut rng);
-                s.push(if b == 1 { '1' } else { '0' });
-            }
-            *manual.entry(s).or_insert(0) += 1;
-        }
-        assert_eq!(counts, manual);
+    fn test_plan_cache_invalidated_on_mutation() {
+        // A cached plan must never outlive a tableau mutation: sample (which
+        // fills the cache), apply a gate, then sample again — the result must
+        // match a freshly built tableau carrying the full gate list.
+        let mut tab = StabilizerTableau::new(4);
+        tab.h(0);
+        tab.cnot(0, 1);
+        let _ = tab.sample(128, Some(3)); // populates the plan cache
+        tab.h(2);
+        tab.cnot(2, 3);
+        let mutated = tab.sample(256, Some(9));
+
+        let mut fresh = StabilizerTableau::new(4);
+        fresh.h(0);
+        fresh.cnot(0, 1);
+        fresh.h(2);
+        fresh.cnot(2, 3);
+        let expected = fresh.sample(256, Some(9));
+        assert_eq!(mutated, expected);
     }
 
     #[test]

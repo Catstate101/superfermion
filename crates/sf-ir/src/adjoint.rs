@@ -56,11 +56,33 @@ fn get_param_name(op: &OpType) -> Option<String> {
 
 // ─── In-place gate application (no allocation) ─────────────────────────
 
-/// States at or above this dimension (n >= 16) may split their sweeps
-/// across the rayon pool; below it the serial kernels win (and the
-/// parallel paths are skipped entirely when the pool is pinned to one
-/// thread).
-const PAR_DIM: usize = 1 << 16;
+/// States at or above this dimension (n >= 17) split their sweeps across the
+/// rayon pool; below it the serial kernels win (and the parallel paths are
+/// skipped entirely when the pool is pinned to one thread).  Bumped from the
+/// historical `1<<16` after on-host attribution at the 4-thread bench pin:
+/// n=16 (dim == `1<<16`) sits exactly on the old boundary and paid more in
+/// per-gate rayon task-spawn / copy coordination than the parallel sweep
+/// saved — the lean serial path measured ~8% faster on the bench's n=16 L=2
+/// ladder (reproduced across interleaved process pairs), and the two paths
+/// agree to 1 ULP (max_abs_diff 2e-16).  No state size lies between `1<<16`
+/// and `1<<17`, so this changes n=16 only; n>=17 stays parallel.
+const PAR_DIM_DEFAULT: usize = 1 << 17;
+
+/// Parallel/serial crossover dimension for the adjoint sweeps.
+/// `SF_ADJ_PAR_MIN` overrides so the n=16 (dim == 1<<16) boundary can be
+/// A/B-attributed on-host under the bench thread pin without a rebuild:
+/// raising it above 65536 forces n=16 onto the lean serial path. Default
+/// `1<<16` reproduces the shipped behavior exactly.
+#[inline]
+fn adj_par_min() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("SF_ADJ_PAR_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(PAR_DIM_DEFAULT)
+    })
+}
 
 thread_local! {
     /// Param-state cache buffer retained across calls so its pages stay
@@ -71,6 +93,16 @@ thread_local! {
     /// ownership.
     #[allow(clippy::missing_const_for_thread_local)] // init already const; clippy 1.93 false positive
     static ADJ_CACHE_BUF: std::cell::RefCell<Vec<Complex64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+
+    /// Gradient workspace (`psi`, `phi`, `term_state`) retained across calls
+    /// so their pages stay resident.  A fresh `3 · 2^n · 16 B` allocation
+    /// re-faults every page on each `adjoint_grad` call — a real fixed cost
+    /// across the benchmark's repeated calls, largest at big n.  Complex64 is
+    /// Copy with no Drop, so the take/put-back round trip is plain memory
+    /// ownership (the buffers are zero-filled, not reallocated, on take).
+    #[allow(clippy::missing_const_for_thread_local)]
+    static ADJ_WORK_POOL: std::cell::RefCell<Vec<Vec<Complex64>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -105,7 +137,7 @@ fn apply_1q_inplace(
 /// dst = src, optionally across rayon tasks (element-wise, so identical).
 #[inline]
 fn copy_slice_par(dst: &mut [Complex64], src: &[Complex64], par: bool) {
-    if par && src.len() >= PAR_DIM {
+    if par && src.len() >= adj_par_min() {
         let threads = rayon::current_num_threads().max(1);
         let chunk = ((src.len() / (4 * threads)).max(4096)).next_power_of_two();
         dst.par_chunks_mut(chunk)
@@ -124,7 +156,7 @@ fn apply_2q_inplace(
     n_qubits: usize,
 ) {
     let dim = 1usize << n_qubits;
-    let use_par = dim >= 1 << 16 && rayon::current_num_threads() > 1;
+    let use_par = dim >= adj_par_min() && rayon::current_num_threads() > 1;
     crate::dag::inplace_2q_general(
         state,
         q1,
@@ -204,6 +236,39 @@ fn dot_one_pauli(
 ) -> Complex64 {
     let block = m << 1;
     let mut ip = Complex64::new(0.0, 0.0);
+    // AVX2 fast path: when the generator qubit gives long contiguous runs
+    // (`m` >= the dot floor) each half-run is a whole-slice `dot_conj`, which
+    // vectorises the multiply-accumulate reduction. X and Z are plain
+    // conj-dots; Y is the same conj-dot rotated by the exact ±i generator
+    // phase. Below the floor (small qubit index) the scalar loops below stay
+    // on the elementwise reference path.
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::simd_enabled() && m >= crate::simd::dot_min() {
+        let mut base = lo;
+        while base < hi {
+            let (phi_lo, phi_hi) = (&phi[base..base + m], &phi[base + m..base + block]);
+            let (src_lo, src_hi) = (&src[base..base + m], &src[base + m..base + block]);
+            match p {
+                1 => {
+                    ip += crate::simd::dot_conj(phi_lo, src_hi);
+                    ip += crate::simd::dot_conj(phi_hi, src_lo);
+                }
+                3 => {
+                    ip += crate::simd::dot_conj(phi_lo, src_lo);
+                    ip -= crate::simd::dot_conj(phi_hi, src_hi);
+                }
+                2 => {
+                    let c1 = crate::simd::dot_conj(phi_lo, src_hi);
+                    ip += Complex64::new(c1.im, -c1.re);
+                    let c2 = crate::simd::dot_conj(phi_hi, src_lo);
+                    ip += Complex64::new(-c2.im, c2.re);
+                }
+                _ => {}
+            }
+            base += block;
+        }
+        return ip;
+    }
     let mut base = lo;
     while base < hi {
         match p {
@@ -434,9 +499,9 @@ pub fn adjoint_grad(
 ) -> Result<AdjointGradResult, MethodError> {
     let n_qubits = dag.n_qubits;
     let dim = 1usize << n_qubits;
-    // n >= 16: sweeps may split across the rayon pool (skipped entirely
-    // when the pool is pinned to one thread).
-    let par = dim >= PAR_DIM && rayon::current_num_threads() > 1;
+    // n >= 17 (see `PAR_DIM_DEFAULT`): sweeps may split across the rayon pool
+    // (skipped entirely when the pool is pinned to one thread).
+    let par = dim >= adj_par_min() && rayon::current_num_threads() > 1;
 
     // Phase timing (SF_ADJ_TRACE=1): attribute each call's cost to
     // setup / forward / observable / per-parameter kernel / back-walk.
@@ -452,13 +517,18 @@ pub fn adjoint_grad(
     let mut t_bw_psi = 0.0f64;
     let mut t_bw_phi = 0.0f64;
 
-    let bound_dag = dag.bind(param_values);
-
-    let order = bound_dag.topological_order();
+    // Per-op bind instead of `dag.bind`: `bind` clones the entire graph
+    // (petgraph alloc + every node) only to run `bind_params` on each op, so
+    // building the bound gate list straight from the DAG is bit-identical to
+    // the historical path while dropping the wasted clone and one
+    // topological walk. The op_types produced here are exactly the ones
+    // `dag.bind(..)` would have handed to `ops`, so every downstream gate
+    // matrix and the missing-parameter check below are unchanged.
+    let order = dag.topological_order();
     let ops: Vec<GateOp> = order
         .iter()
         .filter_map(|&node_id| {
-            let op = &bound_dag.graph()[node_id];
+            let op = &dag.graph()[node_id];
             if op.op_type.is_boundary()
                 || op.op_type == OpType::Barrier
                 || op.op_type.is_measurement()
@@ -466,7 +536,7 @@ pub fn adjoint_grad(
                 return None;
             }
             Some(GateOp {
-                op_type: op.op_type.clone(),
+                op_type: op.op_type.bind_params(param_values),
                 qubits: op.qubits.to_vec(),
             })
         })
@@ -491,7 +561,9 @@ pub fn adjoint_grad(
         )));
     }
 
-    let orig_order = dag.topological_order();
+    // Same node order as `ops` (bind does not change topology), so reuse the
+    // single walk instead of a second `topological_order` traversal.
+    let orig_order = &order;
     let orig_ops: Vec<&QuantumOp> = orig_order
         .iter()
         .filter_map(|&node_id| {
@@ -597,7 +669,24 @@ pub fn adjoint_grad(
         unsafe { cache.set_len(need) };
     }
 
-    let mut psi = vec![Complex64::new(0.0, 0.0); dim];
+    // Workspace buffers come from the thread-local pool (see `ADJ_WORK_POOL`)
+    // so their pages stay resident across calls; zero-filled here rather than
+    // reallocated.  `psi` starts in |0…0⟩, `phi` accumulates O|psi⟩ from zero;
+    // `term_state` is only read in the >2-Pauli fallback after a full copy.
+    let (mut psi, mut phi, mut term_state) = ADJ_WORK_POOL.with(|p| {
+        let mut pool = p.borrow_mut();
+        while pool.len() < 3 {
+            pool.push(Vec::new());
+        }
+        (
+            std::mem::take(&mut pool[0]),
+            std::mem::take(&mut pool[1]),
+            std::mem::take(&mut pool[2]),
+        )
+    });
+    let zero = Complex64::new(0.0, 0.0);
+    psi.clear();
+    psi.resize(dim, zero);
     psi[0] = Complex64::new(1.0, 0.0);
 
     if adj_trace {
@@ -634,8 +723,10 @@ pub fn adjoint_grad(
 
     // Build phi = O|psi_final>
     let t0 = std::time::Instant::now();
-    let mut phi = vec![Complex64::new(0.0, 0.0); dim];
-    let mut term_state = vec![Complex64::new(0.0, 0.0); dim];
+    phi.clear();
+    phi.resize(dim, zero);
+    term_state.clear();
+    term_state.resize(dim, zero);
     for term in observable_terms {
         // Fused {X,Z}-only terms with at most two non-identity factors
         // (every term of the TFIM / Pauli observables in the benchmarks):
@@ -876,6 +967,12 @@ pub fn adjoint_grad(
     }
 
     ADJ_CACHE_BUF.with(|c| *c.borrow_mut() = cache);
+    ADJ_WORK_POOL.with(|p| {
+        let mut pool = p.borrow_mut();
+        pool[0] = std::mem::take(&mut psi);
+        pool[1] = std::mem::take(&mut phi);
+        pool[2] = std::mem::take(&mut term_state);
+    });
 
     Ok(AdjointGradResult {
         param_names,

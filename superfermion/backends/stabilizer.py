@@ -55,16 +55,15 @@ def is_clifford_circuit(circuit: Circuit) -> bool:
 
 
 def _stab_keys(counts: Dict[str, int]) -> Dict[str, int]:
-    """Re-key stabilizer counts from q0-first to the shared LE convention.
+    """Legacy re-key from q0-first to the shared LE convention (unused).
 
-    The Rust tableau sampler (``crates/sf-ir/src/stabilizer.rs::sample``)
-    measures qubits in ``q = 0..n`` order and joins the bits left-to-right,
-    so its keys are q0-*first* (big-endian): qubit 0 is the leftmost
-    character.  Every other method — statevector, MPS, density_matrix,
-    default sampling — keys by the little-endian index (qubit q is bit q of
-    ``int(key, 2)``; ``"001"`` = qubit 0 is ``|1>``).  A full bit-reversal
-    maps one to the other.  The raw Rust state handle's own ``sample()``
-    still returns q0-first keys — only the RunResult reads are re-keyed.
+    Older builds of the Rust tableau sampler
+    (``crates/sf-ir/src/stabilizer.rs::sample``) joined the measured bits
+    left-to-right (qubit 0 leftmost), so callers reversed the strings to
+    match the little-endian index convention every other method uses
+    (qubit q is bit q of ``int(key, 2)``; ``"001"`` = qubit 0 is ``|1>``).
+    The sampler now emits LE keys directly, so nothing in this package
+    calls this helper anymore; it is kept for external compatibility.
     """
     return {bs[::-1]: c for bs, c in counts.items()}
 

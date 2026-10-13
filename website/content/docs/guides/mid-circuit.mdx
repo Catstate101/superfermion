@@ -98,8 +98,20 @@ mode, which means:
 - `shots` must be positive — the collapsed mixture is not a pure state,
   so `shots=0` raises a `RuntimeError` with a `Fix:` hint (PennyLane has
   the same restriction for one-shot semantics).
-- `method="statevector"` and `device="cpu"` are required; other methods
+- `device="cpu"` is required (the trajectory engine is CPU-only) and
+  `method` must be `"statevector"` (default) or `"mps"`; other methods
   raise a clean `RuntimeError` naming the fix.
+
+MPS replays each trajectory by collapsing the tensor network itself,
+with `bond_dim` (default 64) capping the bond — the same feed-forward
+example, run on the tensor network:
+
+```python
+qc = sf.Circuit(2).h(0).measure(0, 0).c_if(0, 1).x(1)
+res = sf.run(qc, method="mps", bond_dim=64, shots=4000, seed=7)
+print(res.counts)                 # {'00': 2023, '11': 1977} (seeded)
+print(res.metadata["bond_dim"])   # 64
+```
 
 ```python
 try:

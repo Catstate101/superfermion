@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/sf-ir",
+    "crates/sf-cat",
     "crates/sf-compiler",
     "crates/sf-router",
     "crates/sf-bindings",

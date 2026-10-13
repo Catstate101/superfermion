@@ -63,6 +63,12 @@ result = sf.run(qc, method="mps", bond_dim=64, shots=1024)
 
 Higher bond dimension = more accuracy, more memory. Start at 64.
 
+MPS also executes **dynamic (mid-circuit) circuits** with `shots>0`: each
+shot replays the circuit while collapsing the tensor network at every mid
+measure, with `bond_dim` capping the bond (default 64; reported in
+`result.metadata["bond_dim"]`). See
+[Mid-Circuit Measurement & Feed-Forward](/docs/guides/mid-circuit).
+
 MPS `shots=0` densifies the tensor network into a full statevector. For more than 26 qubits this raises a `MemoryError` with guidance — pass `shots>0` to sample directly from the tensor network instead, or `densify=False` to skip densification and receive only the MPS `State` handle (`result.state.numpy()` densifies once on demand). MPS sampling and statevector output use the same qubit order as the statevector backend.
 
 ### Stabilizer
