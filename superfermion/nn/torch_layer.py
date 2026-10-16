@@ -68,7 +68,11 @@ class _QuantumFunction(torch.autograd.Function):
         p_np = params.detach().cpu().numpy()
         p_dict = dict(zip(circuit.parameters, p_np.tolist()))
         bound = circuit.bind(p_dict)
-        state = sf.simulate(bound, device=device_str, method=method)
+        if method == "statevector" and device_str == "cpu":
+            state = sf.run(bound, device=device_str, method=method, shots=0,
+                           return_statevector=False).state
+        else:
+            state = sf.simulate(bound, device=device_str, method=method)
         val = state.expectation(rust_obs)
         return torch.tensor(val, dtype=params.dtype)
 
@@ -77,10 +81,13 @@ class _QuantumFunction(torch.autograd.Function):
         (params,) = ctx.saved_tensors
         p_np = params.detach().cpu().numpy()
         p_dict = dict(zip(ctx.circuit.parameters, p_np.tolist()))
-        bound = ctx.circuit.bind(p_dict)
-        state = sf.simulate(bound, device=ctx.device_str, method=ctx.method)
         dag = ctx.circuit.to_ir()
-        grads = state.grad(ctx.rust_obs, dag, p_dict)
+        if ctx.method == "statevector" and ctx.device_str == "cpu":
+            grads = dag.adjoint_grad(ctx.rust_obs, p_dict)
+        else:
+            bound = ctx.circuit.bind(p_dict)
+            state = sf.simulate(bound, device=ctx.device_str, method=ctx.method)
+            grads = state.grad(ctx.rust_obs, dag, p_dict)
         grad_np = np.array([grads.get(k, 0.0) for k in ctx.circuit.parameters])
         grad_tensor = torch.from_numpy(grad_np).to(params.dtype) * grad_output
         return grad_tensor, None, None, None, None

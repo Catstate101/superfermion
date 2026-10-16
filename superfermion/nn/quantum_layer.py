@@ -58,7 +58,11 @@ def _make_quantum_fn(circuit, observable, device_str, method):
     def _quantum_expectation(params_array):
         p_dict = dict(zip(param_names, np.asarray(params_array).tolist()))
         bound = circuit.bind(p_dict)
-        state = sf.simulate(bound, device=device_str, method=method)
+        if method == "statevector" and device_str == "cpu":
+            state = sf.run(bound, device=device_str, method=method, shots=0,
+                           return_statevector=False).state
+        else:
+            state = sf.simulate(bound, device=device_str, method=method)
         return jnp.array(float(state.expectation(rust_obs)))
 
     def _fwd(params_array):
@@ -67,10 +71,13 @@ def _make_quantum_fn(circuit, observable, device_str, method):
 
     def _bwd(params_array, g):
         p_dict = dict(zip(param_names, np.asarray(params_array).tolist()))
-        bound = circuit.bind(p_dict)
-        state = sf.simulate(bound, device=device_str, method=method)
         dag = circuit.to_ir()
-        grads = state.grad(rust_obs, dag, p_dict)
+        if method == "statevector" and device_str == "cpu":
+            grads = dag.adjoint_grad(rust_obs, p_dict)
+        else:
+            bound = circuit.bind(p_dict)
+            state = sf.simulate(bound, device=device_str, method=method)
+            grads = state.grad(rust_obs, dag, p_dict)
         grad_np = np.array([grads.get(k, 0.0) for k in param_names])
         return (jnp.array(grad_np) * g,)
 
