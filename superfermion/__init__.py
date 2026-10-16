@@ -38,6 +38,7 @@ from superfermion.runner import run, simulate
 from superfermion.compiler.manager import compile
 from superfermion.parameters import param
 from superfermion.results import RunResult
+from superfermion.prepared import PreparedCircuit, prepare
 try:
     from superfermion._sf_core import State as _RustState
 except ImportError as e:
@@ -71,6 +72,7 @@ def _state_qfim_with_check(self, dag, param_values):
 _RustState.grad = _state_grad_with_check
 _RustState.qfim = _state_qfim_with_check
 State = _RustState
+from superfermion._sf_core import DiagonalObservable
 
 # SUP-22: expose classical-shadow utilities on State (pure states only; the
 # snapshots are sampled from the exact statevector returned by numpy()).
@@ -121,7 +123,7 @@ from superfermion.cat import cat
 __all__ = [
     # Core
     "Circuit", "run", "simulate", "compile", "param", "cat",
-    "RunResult", "State", "MethodError",
+    "RunResult", "State", "MethodError", "PreparedCircuit", "prepare", "DiagonalObservable",
     # Device/Provider protocols
     "DeviceExecutor", "DeviceCapabilities",
     "Provider", "Job", "Algorithm", "AlgorithmResult",
