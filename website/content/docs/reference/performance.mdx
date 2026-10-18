@@ -298,6 +298,15 @@ PennyLane gets the fair baseline: one broadcasted QNode over the bank,
 `qml.dot` for the observable, `diff_method=None`, `interface="numpy"`. The two
 sides agree on every entry to `2.1e-13` or better.
 
+Both sides scale linearly in the bank size — at n=16 the per-point cost is
+5.4 ms against 23 ms at B=8, and 4.8 against 23 at B=32 — so the gap is a lower
+cost per point, not an amortised setup. That cost is what the engine page's
+batch methods are for: `diagonal_batch` and `mean_z_batch` never materialise a
+probability array or export a state, and the GIL is released around each call,
+which is the only reason the thread variants can help at all. See
+[Export costs, and the batch methods](/docs/reference/execution-engine#export-costs-and-the-batch-methods)
+and [The GIL](/docs/reference/execution-engine#the-gil).
+
 Which SuperFermion path wins changes with size, and that is worth more than the
 constant: `diagonal_batch` twice is fastest at n=12/B=8 and n=18/B=32; threading
 the sweep is what wins at n=16 (43 ms against 53 ms unthreaded at B=8, 153
