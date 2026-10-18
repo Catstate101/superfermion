@@ -1,0 +1,134 @@
+---
+title: "Laptop execution modes - stab / adjoint / dm / clifford"
+description: "Execution-mode suite on laptop-l5lb07gu: stabilizer sampling, large Clifford, adjoint gradients and density matrices with same-window medians."
+---
+
+## Provenance
+
+| Field | Value |
+|---|---|
+| Host | `laptop-l5lb07gu` |
+| Generated | 2026-10-12T17:43:15 |
+| Binary | `l1_bench.exe`, md5 `c0c9679b215e` |
+| Config hash | `3b88281923` |
+| Protocol | shots = 2000, reps = 7, depth = 8, ABBA order per rung |
+| Seeds | layer 11, Clifford 7, adjoint 7 |
+| Competitor versions | numpy 2.5.3, pandas 2.3.2, matplotlib 3.10.6, stim 1.16.0, qiskit 2.1.2, qiskit_aer 0.17.2, pennylane 0.45.0, cirq 1.6.1, qulacs 0.6.14 |
+
+The suite is one notebook with four sections over the same Rust binary: stabilizer sampling,
+adjoint gradients, density matrices and large-Clifford sampling. Rust lanes use 4-thread
+RAYON; competitor lanes run shipped defaults.
+
+## Verdicts
+
+- Stabilizer: strictly beats every lane on 1/6 warm / 1/6 cold rungs; beats every lane that produced data on 5/6 warm / 2/6 cold rungs.
+- Clifford: beats every available lane on 5/5 warm / 2/5 cold rungs; Stim stays ahead on cold large-n brick and randcliff.
+- Adjoint: cat beats Qulacs on 10/10 rows and sf-ir on 9/10; max |cat − qulacs| = 2.817e-15; FD anchor error 3.904e-11.
+- Density matrix (sf-ir): sf/aer = 8q 0.577, 10q 1.238, 12q 1.549 — faster at 8 qubits, slower at 10 and 12.
+
+## Section tables
+
+
+**Section 1 — stab (small/mid n, full competitor field) - Cold (ms)**
+
+| circuit | n | cat_pf cold | sf-ir cold | stim full | aer cold | pl cold | cirq cold |
+|---|---|---|---|---|---|---|---|
+| ghz | 64 | 0.2255 | 0.38 | 0.4263 | 224.9 | 16.31 | 2.769e+04 |
+| ghz | 256 | 1.274 | 1.786 | 2.23 | 4661 | 52.76 | nan |
+| brick | 64 | 2.027 | 2.06 | 0.3666 | 294.5 | 55.57 | nan |
+| brick | 256 | 9.047 | 9.024 | 2.648 | 3626 | 381.9 | nan |
+| randcliff | 256 | 11.47 | 8.467 | 3.654 | 7534 | 180.9 | nan |
+| randcliff | 1024 | 210 | 188.9 | 54.92 | nan | 746.5 | nan |
+
+**Section 1 — stab (small/mid n, full competitor field) - Warm (ms)**
+
+| circuit | n | cat_pf counts | sf-ir sample | stim sample | aer warm | pl warm | cirq warm |
+|---|---|---|---|---|---|---|---|
+| ghz | 64 | 0.06543 | 0.1865 | 0.3435 | 232.9 | 11.99 | 2.553e+04 |
+| ghz | 256 | 0.2036 | 0.3565 | 2.058 | 4817 | 52.02 | nan |
+| brick | 64 | 0.5228 | 0.8207 | 0.2366 | 270.6 | 54.26 | nan |
+| brick | 256 | 2.008 | 1.475 | 2.114 | 3419 | 237.7 | nan |
+| randcliff | 256 | 1.512 | 1.564 | 2.112 | 7432 | 125.3 | nan |
+| randcliff | 1024 | 3.986 | 4.639 | 10.56 | nan | 661 | nan |
+
+**Section 2 — adjoint (compile-once handle)**
+
+| n | L | P | cat grad ms | cat compile ms | sf-ir grad ms | qulacs ms | win vs qulacs | parity cat/qulacs | \|g\| ref diff |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 6 | 1 | 12 | 0.0184 | 0.04255 | 0.08235 | 0.0739 | yes | 4.44e-16 | nan |
+| 8 | 1 | 16 | 0.04165 | 0.0563 | 0.1697 | 0.2203 | yes | 4.44e-16 | 8.83e-10 |
+| 10 | 1 | 20 | 0.252 | 0.2064 | 0.4396 | 0.3196 | yes | 3.89e-16 | nan |
+| 12 | 1 | 24 | 0.6909 | 0.6925 | 1.518 | 181.7 | yes | 1.51e-16 | nan |
+| 14 | 1 | 28 | 5.301 | 3.699 | 7.995 | 102.8 | yes | 2.50e-16 | nan |
+| 16 | 1 | 32 | 19.82 | 15.88 | 27.45 | 23.17 | yes | 2.78e-16 | nan |
+| 18 | 1 | 36 | 191.3 | 63.93 | 163.9 | 245 | yes | 1.29e-15 | nan |
+| 20 | 1 | 40 | 923.8 | 363.9 | 1093 | 1264 | yes | 2.82e-15 | nan |
+| 8 | 2 | 32 | 0.0855 | 0.164 | 0.2129 | 0.2176 | yes | 1.67e-16 | 8.90e-08 |
+| 8 | 4 | 64 | 0.1485 | 0.08495 | 0.5326 | 0.3698 | yes | 1.40e-16 | 3.36e-07 |
+
+**Section 3 — dm (sf-ir simulate_dm vs aer density_matrix)**
+
+| n | sf-ir dm ms | sf-ir sv anchor ms | aer dm ms | sf/aer | sf trace | sf purity | sf pmatch | aer trace | aer purity | aer pmatch |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 8 | 28.42 | 0.5535 | 49.22 | 0.5775 | 1 | 1 | yes | 1 | 1 | yes |
+| 10 | 815.9 | 1.459 | 659.1 | 1.238 | 1 | 1 | yes | 1 | 1 | no |
+| 12 | 1.424e+04 | 2.728 | 9193 | 1.549 | 1 | 1 | yes | 1 | 1 | yes |
+
+**Section 4 — clifford (large-n #1-preserve regime) - Cold (ms)**
+
+| circuit | n | cat_pf cold | sf-ir cold | stim full | pl cold |
+|---|---|---|---|---|---|
+| ghz | 1024 | 8.678 | 14.1 | 13.83 | 355.9 |
+| ghz | 4096 | 116.2 | 245.5 | 149.6 | 3524 |
+| brick | 1024 | 119.2 | 139.9 | 20.37 | 1190 |
+| brick | 4096 | 2106 | 2122 | 231.2 | 7231 |
+| randcliff | 4096 | 9397 | 1.254e+04 | 4413 | 9547 |
+
+**Section 4 — clifford (large-n #1-preserve regime) - Warm (ms)**
+
+| circuit | n | cat_pf counts | sf-ir sample | stim sample | pl warm |
+|---|---|---|---|---|---|
+| ghz | 1024 | 0.8224 | 1.135 | 10.75 | 345.8 |
+| ghz | 4096 | 2.653 | 4.951 | 76.53 | 3181 |
+| brick | 1024 | 4.676 | 4.734 | 14.36 | 1267 |
+| brick | 4096 | 17.28 | 18.61 | 93.33 | 6917 |
+| randcliff | 4096 | 14.08 | 16.29 | 94.05 | 9599 |
+
+## Figures
+
+<img src="/benchmarks/laptop/fig_stab_cold_ms.png" alt="Stabilizer section, cold-pass medians per lane." style={{maxWidth: "100%"}} />
+
+*Stabilizer section, cold-pass medians per lane.*
+
+<img src="/benchmarks/laptop/fig_stab_warm_ms.png" alt="Stabilizer section, warm-pass medians per lane." style={{maxWidth: "100%"}} />
+
+*Stabilizer section, warm-pass medians per lane.*
+
+<img src="/benchmarks/laptop/fig_stab_warm_ratio_vs_stim.png" alt="Warm stabilizer ratio against Stim." style={{maxWidth: "100%"}} />
+
+*Warm stabilizer ratio against Stim.*
+
+<img src="/benchmarks/laptop/fig_cliff_ratio_vs_stim.png" alt="Large-Clifford ratio against Stim (n = 1024/4096)." style={{maxWidth: "100%"}} />
+
+*Large-Clifford ratio against Stim (n = 1024/4096).*
+
+<img src="/benchmarks/laptop/fig_adj_grad_ms.png" alt="Adjoint gradient cost, cat handle vs Qulacs and SF-IR." style={{maxWidth: "100%"}} />
+
+*Adjoint gradient cost, cat handle vs Qulacs and SF-IR.*
+
+<img src="/benchmarks/laptop/fig_dm_ms.png" alt="Density-matrix cost, sf-ir simulate_dm vs Aer." style={{maxWidth: "100%"}} />
+
+*Density-matrix cost, sf-ir simulate_dm vs Aer.*
+
+## Disclosures
+
+- cat Mode::Stab and Mode::Cliff compile to the SAME Pauli-frame tableau (plan.rs) -- stab and clifford sections measure one pipeline in two n-regimes.
+- cat Mode::Dm is a documented hold-out (feasibility probe measured a tie with the routed aer path; keep-only-if-win) -- the dm section benches the sf-ir simulate_dm engine through the same binary, never framed as a cat-mode win.
+- cat_pf = 4-thread RAYON; competitors at shipped defaults; Rust lanes not yet reachable from the Python package (engines compared, not shipped APIs).
+- Per-lane first-call budget 40 s (over = over_budget, unranked); cirq capped n&lt;=64, stabilizer aer capped n&lt;=256 with probe evidence; capped = not_run_capped, never fabricated.
+- GHZ rungs must sample only the all-0/all-1 branches (ghz_ok, validated live).
+
+## Downloads
+
+- [Suite archive](/downloads/sfmodes_bench_suite_laptop-l5lb07gu.zip) — executed notebook, generator and pack scripts.
+- [Results archive](/downloads/sfmodes_bench_results_laptop-l5lb07gu.zip) — raw JSONL, section CSVs, summary JSON, figures and report.

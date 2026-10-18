@@ -1,0 +1,85 @@
+{
+  "checks": [
+    {
+      "check": "grid: job counts",
+      "ok": true,
+      "detail": "expected=2156 completed=2156 successful=2156 failed=0"
+    },
+    {
+      "check": "grid: conditions and lanes",
+      "ok": true,
+      "detail": "conditions=252 lanes=8"
+    },
+    {
+      "check": "grid: per-lane condition counts",
+      "ok": true,
+      "detail": "{\"analytical_angle\": 35, \"cirq\": 252, \"cirq_f64\": 252, \"classical\": 105, \"pennylane\": 252, \"qiskit\": 252, \"qulacs\": 252, \"superfermion_optimized\": 252, \"superfermion_source_baseline\": 252, \"superfermion_wheel\": 252}"
+    },
+    {
+      "check": "paper: corpus size",
+      "ok": true,
+      "detail": "records=1652 (1512 simulator + 140 controls expected)"
+    },
+    {
+      "check": "desktop: job rows",
+      "ok": true,
+      "detail": "all_results rows=2156"
+    },
+    {
+      "check": "paper-vs-desktop: every record maps to a grid job",
+      "ok": true,
+      "detail": "matched=1652/1652 missed=0",
+      "missed": []
+    },
+    {
+      "check": "paper-vs-desktop: latency bounds contain the exact job runtime",
+      "ok": true,
+      "detail": "violations=0 by lane={}",
+      "sample": []
+    },
+    {
+      "check": "paper-vs-desktop: RAM bounds contain the job peak RSS",
+      "ok": true,
+      "detail": "violations=0",
+      "sample": []
+    },
+    {
+      "check": "paper-vs-desktop: all desktop jobs covered by paper records",
+      "ok": true,
+      "detail": "unconsumed per lane={}"
+    },
+    {
+      "check": "paper-vs-desktop: per-framework compute totals",
+      "ok": true,
+      "detail": "superfermion_optimized: recomputed=27.36min paper=27.36min dev=0.00%; qulacs: recomputed=70.04min paper=70.04min dev=0.00%; qiskit: recomputed=34.30min paper=34.30min dev=0.01%; pennylane: recomputed=132.99min paper=132.99min dev=0.00%; cirq: recomputed=72.38min paper=72.38min dev=0.00%; cirq_f64: recomputed=138.52min paper=138.52min dev=0.00%",
+      "worst_rel_dev": 5.5294401993222424e-05
+    },
+    {
+      "check": "paper: mode observation count",
+      "ok": true,
+      "detail": "rows=81 conditions=24"
+    },
+    {
+      "check": "paper-vs-laptop: all 81 mode observations match raw laptop rows",
+      "ok": true,
+      "detail": "compared=81 mismatches=0",
+      "sample": []
+    },
+    {
+      "check": "paper-vs-laptop: dm ratios identical",
+      "ok": true,
+      "detail": "{\"8\": 0.5774964521075606, \"10\": 1.2379962435458747, \"12\": 1.5490119080777223}"
+    },
+    {
+      "check": "paper abstract: headline compute totals present",
+      "ok": true,
+      "detail": "27.36 min / 34.30 min in main.tex"
+    },
+    {
+      "check": "paper abstract: parity 2.8172e-15 matches laptop",
+      "ok": true,
+      "detail": "laptop summary 2.8172e-15, laptop raw max 2.8172e-15, paper text '2.8172e-15'"
+    }
+  ],
+  "failures": []
+}

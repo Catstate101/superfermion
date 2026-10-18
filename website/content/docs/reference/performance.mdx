@@ -1,6 +1,6 @@
 ---
 title: "Performance Benchmarks"
-description: "Benchmark results: MPS 23–33x vs Qiskit Aer on GHZ, adjoint gradients 1.5–800x vs PennyLane for small qubit counts."
+description: "Benchmark results: MPS 23–33x vs Qiskit Aer on GHZ, statevector crossover vs Qulacs, adjoint gradients verified against finite differences and PennyLane, and a per-operation profile against PennyLane."
 ---
 
 Superfermion's Rust simulation core delivers significant speedups over popular
@@ -35,6 +35,48 @@ Note: GHZ is the trivially-best case for MPS (bond dimension 2) — it
 demonstrates framework overhead, not tensor-network scaling on heavily
 entangled workloads.
 
+### Statevector vs Qulacs (v0.1.15)
+
+56 statevector cases, the `superfermion_optimized` build against Qulacs 0.6.14
+on the same host, 4 threads, rotated paired ordering, 2 warmups, medians over
+41/21/13/9 repetitions as the case gets slower. All 56 cases agree on the final
+state to a maximum absolute difference of `9.4e-16`. The table reports the
+regime, not a single cherry-picked point:
+
+| Regime | Measured result |
+|---|---|
+| n = 4–10 | Qulacs faster at every point, from 7.2x (n=6, 64 layers) down to 2.8x (n=10) |
+| n = 12 | excluded — Qulacs threading defect at exactly 12 qubits; at 1 thread the margin is 1.10–1.38x |
+| n = 14 | depth-dependent: SF 1.28x at L=1, Qulacs 1.33x at L=64; at 1 thread SF wins all depths (1.5–2.0x) |
+| n = 16 | SF 1.05–1.26x, two cases flip under the export-free Qulacs contract |
+| n = 18 | SF 1.17–1.73x |
+| n = 20 | SF 5.36–7.37x; at L=64, 1.51 s versus 10.77 s |
+| dense n=16, 564 → 6,324 gates | SF margin grows 1.08x → 9.65x |
+
+Primary timing uses the same deliverable on both sides: a freshly built
+Qulacs `QuantumState`, `update_quantum_state`, and a `get_vector()` export,
+versus `sf.simulate()`. An export-free Qulacs variant (`q_core`, no
+`get_vector`) is also recorded as a lower bound; it changes the winner in two
+n=16 cases. The n=12 row is a measured OpenMP pathology in Qulacs at that exact
+size — 0.12 ms at one thread for the shallow circuit, 4.4 ms at four threads for
+the same circuit, 292 ms at four threads and 64 layers — not a SuperFermion
+advantage, so it is reported separately rather than folded into the win count.
+
+All SuperFermion numbers on this page are 0.1.15. The campaign ran on the
+`superfermion_optimized` lane tree, extension SHA-256 `53A476E3…`; the published
+`superfermion==0.1.15` wheel is a separate compilation, extension SHA-256
+`2D040118…`. Before either was used the two were audited against each other:
+identical public surface, and three independent batch paths agree to
+`4.7e-16` on identical inputs. (The lane tree's `__version__` string reads
+`0.1.14` because the version bump landed after the optimisation work; the code
+and extension are the 0.1.15 release. The only API difference between the 0.1.15
+and 0.1.14 wheels is `sf.prepare()` and `PreparedCircuit`.)
+
+Why the curve has this shape is explained on
+[Why SuperFermion Is Fast](/docs/reference/execution-engine): the planner only
+enables fusion and run merging at `2^20` amplitudes (n=20) and above, because
+below that size the state is cache-resident and the rewrites measured slower.
+
 ## Gradient Benchmarks
 
 ### Adjoint Differentiation
@@ -42,21 +84,259 @@ entangled workloads.
 The adjoint method computes all parameter gradients in one backward pass,
 independently of parameter count (Jones & Gacon 2020).
 
-vs PennyLane's end-user `qml.grad` pipeline (hardware-efficient ansatz,
-depth 1):
+The grid is an SU(2) ansatz: `RY` then `RZ` on every qubit in each layer, a
+ring of `CX` between layers, so `2nL` parameters. The observable is a ring
+TFIM, `sum_i Z_i + sum_i X_i X_(i+1)`. SuperFermion is the
+`superfermion_optimized` build (extension SHA-256 `53A476E3...`); PennyLane is
+0.45.0 on `lightning.qubit` with `diff_method="adjoint"`, driven through
+`qml.grad`. Both columns are end-user calls — each framework's own dispatch,
+tape and plan construction is inside the timer.
 
-| Circuit | Params | Superfermion (adjoint) | PennyLane (adjoint) | Speedup |
-|---------|--------|----------------------|----------------------|---------|
-| SU(2) layer, 4 qubits | 8 | 0.1 ms | 80 ms | **~800x** |
-| SU(2) layer, 8 qubits | 16 | 0.3 ms | 44 ms | **~137x** |
-| SU(2) layer, 12 qubits | 24 | 14 ms | 58 ms | **4x** |
-| SU(2) layer, 16 qubits | 32 | 83 ms | 126 ms | **1.5x** |
+**More qubits, one layer** — milliseconds, median of repeated calls:
 
-**Read the trend, not just the big number:** the large speedups at small
-qubit counts come from dispatch overhead — a single FFI call vs PennyLane's
-full autograd transform. At n ≥ 18, PennyLane's adjoint backend is faster
-than ours. The robust claim is *parameter-count-independent* gradient cost:
-vs our own parameter-shift, adjoint is 44–198x faster as circuit depth grows.
+| Qubits | Params | Superfermion | PennyLane | Ratio |
+|---------|--------|-------------|-----------|-------|
+| 4 | 8 | 0.08 | 3.5 | ~43x |
+| 6 | 12 | 0.11 | 3.5 | ~32x |
+| 8 | 16 | 0.21 | 5.5 | ~27x |
+| 10 | 20 | 0.41 | 10.8 | ~26x |
+| 12 | 24 | 0.75 | 6.2 | ~8x |
+| 14 | 28 | 4.3 | 12.9 | ~3.0x |
+| 16 | 32 | 19 | 60 | ~3.2x |
+| 18 | 36 | 102 | 367 | ~3.6x |
+| 20 | 40 | 924 | 1,742 | ~1.9x |
+
+**More layers** — SuperFermion adjoint, milliseconds:
+
+| Qubits | L=1 | L=2 | L=4 | L=8 |
+|---------|------|------|------|------|
+| 4 | 0.08 | 0.25 | 0.28 | 0.48 |
+| 6 | 0.11 | 0.21 | 0.40 | 1.11 |
+| 8 | 0.21 | 0.41 | 0.76 | 1.85 |
+| 10 | 0.41 | 0.85 | 1.49 | 3.10 |
+| 12 | 0.75 | 2.06 | 4.54 | 8.87 |
+| 14 | 4.29 | 8.83 | 18.9 | 38.0 |
+| 16 | 19.0 | 46.6 | 84.8 | 151 |
+| 18 | 102 | 221 | 598 | 1,294 |
+| 20 | 924 | 1,933 | 3,792 | 7,352 |
+
+Eight layers is eight times the parameters of one layer and 6–13x the time:
+each layer is also `2n` more gates, and the adjoint pays per gate. What it
+never pays is the `2P` factor.
+
+**Against our own parameter-shift, 20 qubits:**
+
+| Layers | Params | Adjoint | Parameter-shift | Ratio |
+|---------|--------|---------|-----------------|-------|
+| 1 | 40 | 924 ms | 71 s | ~77x |
+| 2 | 80 | 1.93 s | 142 s | ~73x |
+
+Both sides grow with depth, so the ratio stays flat. Each parameter costs
+parameter-shift two full circuit runs — 160 of them at 80 parameters, against
+two sweeps for the adjoint. L=4 and L=8 are not tabulated: one parameter-shift
+call at that size takes 5–10 minutes to measure.
+
+**Every case is checked three ways.** Across all 36 grid points the largest
+difference between SuperFermion's adjoint and central finite differences is
+`9.9e-9` (truncation error of the difference), against parameter-shift
+`4.4e-13`, and against PennyLane's adjoint `4.0e-14` absolute, `6.2e-14`
+relative. The public API and the raw IR call return bit-identical values.
+The gradients themselves were never the weak point of this page.
+
+**How to read the ratio.** At n=4 the 43x is dispatch: one FFI call against
+`qml.grad`'s tape construction and autograd transform. It falls to 3.6x at
+n=18 and 1.9x at n=20, where both sides pay for a 16 MB state and a 40-term
+observable. SuperFermion's adjoint also costs 7–42x its own forward pass at
+n >= 14 — 19 ms against 2.8 ms at n=16, 924 ms against 30 ms at n=20 — while
+PennyLane's costs about 1x its forward pass. That asymmetry, not the
+algorithm, is what flattens the last column. Small-n timings move by up to
+~40% between runs (the n=10 and n=12 PennyLane points swap order); the trend
+does not.
+
+**Withdrawn.** The earlier version of this table reported 0.1 ms against
+80 ms at n=4 — about 800x — and stated that PennyLane's adjoint wins at
+n >= 18. Neither survives. The 80 ms does not reproduce: the repo's stored
+artifact (`notebooks/benchmark_adjoint_data.json`) records 3.44 ms for the
+same point, the notebook's own printed run says 80.24 ms, and this run
+measures 3.5 ms. The notebook attributes its number to the PennyLane side
+building the observable as nested `qml.prod`, which measures observable
+construction, not the adjoint. The n >= 18 loss came from a 0.1.x build that
+turned in 579 ms at n=18; the current build turns in 102 ms there.
+
+## Per-Operation Benchmarks
+
+A training step is not one call. This is the same circuit and the same
+observable split into the operations a user actually invokes, one layer, 4 to
+24 qubits, on the same machine as the tables above.
+
+SuperFermion is timed as `sf.run(circuit, device="cpu", shots=0)` for execution
+plus `result.expectation(obs)` for the observable. The second call reads the
+Rust state handle directly; the older `obs.expectation(result.statevector)`
+exports the state to NumPy first and costs 4–6.5x more — 25.2 s against 4.1 s
+for the same 48-term observable at n=24. Every row below uses the native call.
+
+PennyLane's forward cost depends on `diff_method`, by up to 4x at n=24, so both
+modes are reported instead of picking the flattering one. `"adjoint"` is what
+`qml.qnode(dev)` chooses by default on `lightning.qubit`; `"parameter-shift"`
+is cheaper above n=16.
+
+**SuperFermion**, milliseconds, median of repeated calls:
+
+| Qubits | Build | Execute | Execute + `<Z0>` | Execute + `<TFIM>` | Statevector | Adjoint | 2048 shots |
+|---------|-------|---------|------------------|--------------------|-------------|---------|------------|
+| 4 | 0.05 | 0.13 | 0.19 | 0.21 | 0.11 | 0.08 | 0.35 |
+| 8 | 0.08 | 0.42 | 0.45 | 0.50 | 0.27 | 0.21 | 0.62 |
+| 12 | 0.21 | 4.1 | 4.2 | 4.8 | 5.6 | 0.75 | 5.5 |
+| 16 | 0.15 | 3.2 | 3.2 | 10.2 | 3.2 | 19 | 5.6 |
+| 18 | 0.09 | 9.8 | 11.7 | 47.8 | 11.7 | 102 | 16.4 |
+| 20 | 0.08 | 40.9 | 46.5 | 214 | 44.7 | 924 | 49.1 |
+| 22 | 0.11 | 164 | 178 | 930 | 196 | 4.39 s | 243 |
+| 24 | 0.11 | 794 | 795 | 3.87 s | 798 | 18.48 s | 1.49 s |
+
+**PennyLane, `diff_method="parameter-shift"`**, milliseconds:
+
+| Qubits | `<Z0>` | `<TFIM>` | Statevector | 2048 shots |
+|---------|--------|----------|-------------|------------|
+| 4 | 18.5 | 18.4 | 20.2 | 39.0 |
+| 8 | 19.6 | 23.8 | 27.3 | 37.1 |
+| 12 | 20.3 | 23.6 | 21.6 | 37.9 |
+| 16 | 27.7 | 39.5 | 27.0 | 44.6 |
+| 18 | 53.9 | 191 | 70.4 | 67.7 |
+| 20 | 196 | 807 | 206 | 230 |
+| 22 | 837 | 3.64 s | 900 | 826 |
+| 24 | 4.41 s | 18.85 s | 4.26 s | 4.06 s |
+
+**Speedup over PennyLane's cheaper forward mode:**
+
+| Qubits | Execute + `<Z0>` | Execute + `<TFIM>` | Statevector | 2048 shots |
+|---------|------------------|--------------------|-------------|------------|
+| 4 | 98x | 87x | 192x | 112x |
+| 8 | 44x | 48x | 99x | 60x |
+| 12 | 4.9x | 4.9x | 3.8x | 6.9x |
+| 16 | 8.6x | 3.9x | 8.5x | 8.0x |
+| 18 | 4.6x | 4.0x | 6.0x | 4.1x |
+| 20 | 4.2x | 3.8x | 4.6x | 4.7x |
+| 22 | 4.7x | 3.9x | 4.6x | 3.4x |
+| 24 | 5.5x | 4.9x | 5.3x | 2.7x |
+
+**Speedup over PennyLane's default mode:**
+
+| Qubits | Execute + `<Z0>` | Execute + `<TFIM>` | Statevector | Adjoint | 2048 shots |
+|---------|------------------|--------------------|-------------|---------|------------|
+| 4 | 16x | 21x | 163x | 42.7x | 103x |
+| 8 | 11x | 17x | 65x | 26.6x | 57x |
+| 12 | 1.44x | 1.95x | 3.5x | 8.2x | 6.4x |
+| 16 | 11x | 7.0x | 7.9x | 3.2x | 7.0x |
+| 18 | 18x | 9.7x | 3.9x | 3.6x | 4.5x |
+| 20 | 20x | 10x | 4.5x | 1.9x | 3.9x |
+| 22 | 25x | 11x | 4.5x | 2.3x | 3.4x |
+| 24 | 35x | 13x | 4.9x | 2.4x | 2.5x |
+
+**Same numbers, not just the same circuit.** The timings use a ring TFIM,
+which is invariant under relabelling qubits, so it cannot catch a wire-order
+mismatch. The grid was therefore re-run with per-qubit angles that differ and
+with asymmetric observables: `<Z0>`, `<Z1>`, `<Z0Z1>` and the TFIM agree with
+PennyLane's parameter-shift result at every size from 4 to 22 qubits, worst
+absolute difference `5.1e-12` on a value of 11.2 (n=22, `4.6e-13` relative).
+Both columns simulate the same state at the same wire convention, where the
+leftmost character of an observable string is qubit 0. Note that the raw
+`result.statevector` array is little-endian (qubit `q` is bit `q` of the
+index), unlike `qml.state()`; `result.expectation` handles that for you.
+
+Three things set the shape of these tables.
+
+*The observable is the operation that dominates.* Above n=16 the 2n-term
+Hamiltonian is 69–82% of SuperFermion's own call and 72–77% of PennyLane's, so
+the `Execute + <TFIM>` ratio measures the expectation-value kernel, not the
+simulator. Execution alone is 4.2–5.5x against PennyLane's cheaper mode; the
+full call is 3.8–4.9x. Per term at n=24, over 16.8M amplitudes, SuperFermion
+spends about 64 ms and PennyLane about 300 ms.
+
+*SuperFermion's fixed cost is not monotonic below 16 qubits.* `sf.run` takes
+4.1 ms at n=12 but 3.2 ms at n=16, for 16x less work at n=12; a separate probe
+measured 1.1 ms at n=14. Plan construction and dispatch, not the kernel, set
+those rows, so read them as ceiling estimates rather than scaling data.
+
+*PennyLane wins one operation: parameter-shift gradients.* Same rule, same
+circuit, `2P` evaluations: 0.22 s against 0.10 s at n=12, 2.24 s against
+1.02 s at n=16, 12.3 s against 12.1 s at n=18, and 70.7 s against 60.5 s at
+n=20. SuperFermion's parameter-shift loop re-exports the state per shift, so
+each evaluation costs 0.88 s where `result.expectation` costs 0.21 s — the
+adjoint path avoids the loss entirely, which is what the gradient tables above
+measure.
+
+**Boundaries of this run.** One host (8 CPU, 7.9 GB RAM, Windows). The n=24 row
+is 1–3 repetitions with about ±25% spread; every other row is the median of
+3–5 calls. No GPU, hardware backend, or qubit count above 24 was measured in
+this section — a 24-qubit state is 268 MB, and 26 would not fit alongside
+PennyLane in the RAM available here. Batched parameter sweeps are a separate
+run, below.
+
+## Batched Parameter Sweeps
+
+Training does not evaluate one parameter point, it evaluates a bank of them.
+`sf.prepare(circuit)` compiles the gate ordering, constants and fusion plan
+once and returns a `PreparedCircuit` that runs the whole bank in one call, with
+the Python GIL released so a thread pool composes with the inner Rayon pool.
+The observable is the ring TFIM used above (`2n` terms); its `⟨X_iX_j⟩` half is
+taken as `⟨Z_iZ_j⟩` after `H^⊗n`, which makes it two `diagonal_batch` calls on
+the circuit and a rotated copy.
+
+Same circuit, same observable, one process, 4 threads. Milliseconds for the
+whole sweep, `Batch` = parameter points evaluated per call:
+
+| Qubits | Batch | SuperFermion | `lightning.qubit` | `default.qubit` | Speedup | Fastest path |
+|---|---|---|---|---|---|---|
+| 12 | 8 | 2.9 | 25.5 | 89 | 8.9x | `diagonal_batch` x2 |
+| 12 | 32 | 10.8 | 67.8 | 331 | 6.3x | threaded `diagonal_batch` |
+| 16 | 8 | 42.9 | 187 | 1.65 s | 4.4x | threaded `diagonal_batch` |
+| 16 | 32 | 153 | 726 | 5.9 s | 4.8x | threaded `prepare` |
+| 18 | 8 | 202 | 2.04 s | 6.5 s | 10.1x | threaded `diagonal_batch` |
+| 18 | 32 | 931 | 8.24 s | 24.8 s | 8.9x | `diagonal_batch` x2 |
+
+PennyLane gets the fair baseline: one broadcasted QNode over the bank,
+`qml.dot` for the observable, `diff_method=None`, `interface="numpy"`. The two
+sides agree on every entry to `2.1e-13` or better.
+
+Which SuperFermion path wins changes with size, and that is worth more than the
+constant: `diagonal_batch` twice is fastest at n=12/B=8 and n=18/B=32; threading
+the sweep is what wins at n=16 (43 ms against 53 ms unthreaded at B=8, 153
+against 214 at B=32); threading *loses* at n=18/B=32,
+where the block is already Rayon-parallel and the second pool only adds
+contention (1.13 s against 931 ms).
+
+The native batch Pauli call — `Circuit.to_ir()` followed by
+`simulate_pauli_expval_batch(...)` — looks like the obvious entry point for a
+sweep and is the wrong one. It is the only path here that still rebuilds the
+fusion plan on every call, and it needs 12.2 s for the n=18/B=32 sweep.
+
+The naive version of this benchmark — `sf.run()` once per parameter point —
+loses to `lightning.qubit` at n=12 (47.9 ms against 25.5, 171 against 67.8) and
+wins from n=16 up (102 against 187, 391 against 726, 451 against 2.04 s, 1.92 s
+against 8.24 s). Batching on SuperFermion is a property of the prepared paths,
+not of looping the public API.
+
+**Where it loses, and what changes it.** Three cases in this sweep go the wrong
+way, and all three are path choices rather than engine limits — the same
+SuperFermion build wins each one once the right path is used:
+
+| Case | Loses with | Use instead | Result |
+|---|---|---|---|
+| n=12, per-point loop | `sf.run()` per point, 47.9 ms against 25.5 | `sf.prepare()` + `simulate` | 4.3 ms, 5.9x ahead of Lightning |
+| n=18/B=32, native batch Pauli | `to_ir()` + `simulate_pauli_expval_batch`, 12.2 s | `prepare()` + `diagonal_batch` x2 | 931 ms, 13x faster |
+| n=18/B=32, outer thread pool | `PreparedCircuit` across 4 threads, 1.17 s | one call, no outer pool | 931 ms |
+
+The first row's result is measured against `lightning.qubit`; the other two are
+the same build against itself. None of the three is a case where the engine is
+out-run — each is a call made outside the compiled path, which is what the
+prepared handles exist to remove.
+
+Both columns come from a single process and one host state, and that matters
+more than it sounds: absolute milliseconds move with host load between
+sessions, and the ratio moves with them. The n=12/B=8 cell has measured 6.2x,
+8.9x and 9.2x across three sessions — same script, same host. Read each row as
+the middle of a distribution rather than a constant; the ordering of the paths
+and the 4.4x–10.1x band are what reproduce.
 
 ## Circuit Construction
 
@@ -77,18 +357,43 @@ jupyter lab notebooks/benchmarks_walkthrough.ipynb
 
 The walkthrough notebook contains the methodology, stored per-trial data,
 and live small-scale reproductions when Qiskit/PennyLane are installed
-(with graceful fallback to the stored results otherwise).
+(with graceful fallback to the stored results otherwise). Its adjoint data
+predates the grid on this page and disagrees with it; the withdrawal note in
+that section says where.
 
 ## Why the Speedup
 
-1. **Rust with Rayon** — statevector simulation parallelized across CPU
-   cores with zero GIL contention
-2. **No interpreter overhead** — gate application, sampling, and
-   expectation values run entirely in Rust; Python calls cross the FFI
-   boundary once
-3. **faer linear algebra** — pure-Rust BLAS-quality QR for MPS, avoiding
-   LAPACK overhead
-4. **Word-packed stabilizer** — Clifford tableau operations on packed
-   64-bit words, O(n²) time for n qubits
-5. **Memory locality** — custom `StatevectorState` struct with
-   column-major layout optimized for AVX auto-vectorization
+Five mechanisms, each removing a different cost:
+
+| Mechanism | Removes | Where |
+|---|---|---|
+| Compile-once handles | DAG walk, matrix rebuild, parameter rebinding on every call | `sf.prepare()`, `sf.cat()` |
+| 1q fusion and diagonal / CNOT run merging | whole passes over the `2^n` amplitudes | `sf-ir` instruction plan |
+| One in-place buffer | the second buffer's write-allocate traffic and resident footprint | statevector kernels |
+| Hand-written AVX2/FMA plus Rayon above measured size floors | scalar arithmetic, and thread overhead below the floor | `sf-ir` kernels |
+| Adjoint instead of parameter-shift | the `2P` factor in gradient cost | `sf-ir`, `sf-cat` |
+
+One nuance changes how these numbers should be read: the instruction-plan
+rewrites are only enabled from `2^20` amplitudes (n=20) upward. Below that the
+state is cache-resident and the same rewrites measured **1.34–2.63x slower** at
+n=16–18, so the planner keeps the faithful pair-pass path. That is part of why
+Qulacs wins at n ≤ 10 and why the statevector crossover sits around n = 14–16.
+
+The mechanism-level explanation — pair and group transforms, the `CX·D·CX`
+rewrite, the Gray-code phase sweep, the GF(2) permutation run, the SIMD shuffle
+forms, the `sf.cat` modes, and the memory accounting — is on
+**[Why SuperFermion Is Fast](/docs/reference/execution-engine)**.
+
+## Full Benchmark Archive
+
+This page summarizes headline results. The complete run-by-run evidence — the
+2,156-job desktop grid archive, the 24-condition laptop execution-mode suite, and
+every table, figure and equation of the TechRxiv paper — is published with raw
+data, provenance and a row-by-row consistency check:
+
+- [Desktop grid](/docs/benchmarks/desktop) — the TechRxiv paper edition; the underlying campaign is 252 conditions, one SuperFermion 0.1.15 lane plus five external comparators, 288 correctness checks
+- [Laptop execution modes](/docs/benchmarks/laptop) — stabilizer, large Clifford, adjoint gradients, density matrices
+- [TechRxiv paper](/docs/benchmarks/techrxiv) — 132 tables, 42 figures, Markdown and LaTeX downloads
+
+See the [archive overview](/docs/benchmarks) for the verification table showing that the
+paper's numbers match the raw archives.

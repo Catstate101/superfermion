@@ -251,6 +251,20 @@ sf.State (Rust-native handle)
 RunResult(counts, state, metadata)
 ```
 
+### Inside the statevector path
+
+The `dag.simulate()` box above hides the layer that does most of the work.
+Before any amplitude is touched, the DAG is lowered once into a flat
+instruction list: consecutive 1q gates fuse into one 2×2, a diagonal between
+two CX gates becomes a 4-entry two-qubit phase, diagonal runs collapse into a
+single Gray-code sweep, and CNOT runs collapse into one GF(2) index
+permutation. Above `2^20` amplitudes those rewrites are enabled; below it they
+are switched off because a cache-resident state made them measurably slower.
+
+That lowering, the maths of each rewrite, the AVX2/Rayon kernels, the
+`sf.prepare` / `sf.cat` handles that cache it, and the memory budget are all
+covered in **[Why SuperFermion Is Fast](/docs/reference/execution-engine)**.
+
 ---
 
 ## Simulation Methods

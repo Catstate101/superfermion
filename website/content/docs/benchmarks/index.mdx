@@ -1,0 +1,63 @@
+---
+title: "Benchmark evidence archive"
+description: "Every SuperFermion benchmark run - desktop grid, laptop execution modes and the TechRxiv paper - with raw data, figures and a row-by-row consistency check."
+---
+
+Every benchmark run behind the SuperFermion TechRxiv paper is archived here with its raw
+evidence, the machine it ran on, and a row-by-row check that the paper's numbers still
+match that evidence.
+
+## The three evidence bundles
+
+| Bundle | Machine | Scope | Evidence |
+|---|---|---|---|
+| [Desktop grid](/docs/benchmarks/desktop) | Desktop, 16 threads | TechRxiv paper edition; the 2,156-job campaign behind it has 392 condition records from 4 to 20 qubits, one SuperFermion 0.1.15 lane plus 5 external comparators and classical/analytical controls | `Superfermion_requested_grid_Expanded_Results.zip` |
+| [Laptop execution modes](/docs/benchmarks/laptop) | Laptop `laptop-l5lb07gu` | 24 conditions: stabilizer, large Clifford, adjoint gradient and density-matrix suites | `sfmodes_bench_suite_laptop-l5lb07gu.zip` |
+| [TechRxiv paper](/docs/benchmarks/techrxiv) | Integrated study | 132 tables, 42 figures, 17 equations, 21 references, 107 pages | `SuperFermion_TechRxiv_LaTeX.zip` |
+
+## Does the paper match the raw runs?
+
+The paper integrates three studies. The desktop and laptop archives were replayed against
+the paper's saved records: every statevector record must fall inside the rounding bounds of
+its exact desktop job, and every execution-mode value must be identical to the laptop CSV.
+
+| Check | Result | Detail |
+|---|---|---|
+| grid: job counts | PASS | expected=2156 completed=2156 successful=2156 failed=0 |
+| grid: conditions and lanes | PASS | conditions=252 lanes=8 |
+| grid: per-lane condition counts | PASS | &#123;"analytical_angle": 35, "cirq": 252, "cirq_f64": 252, "classical": 105, "pennylane": 252, "qiskit": 252, "qulacs": 252, "superfermion_optimized": 252&#125; |
+| paper: corpus size | PASS | records=1652 (1512 simulator + 140 controls expected) |
+| desktop: job rows | PASS | all_results rows=2156 |
+| paper-vs-desktop: every record maps to a grid job | PASS | matched=1652/1652 missed=0 |
+| paper-vs-desktop: latency bounds contain the exact job runtime | PASS | violations=0 by lane=&#123;&#125; |
+| paper-vs-desktop: RAM bounds contain the job peak RSS | PASS | violations=0 |
+| paper-vs-desktop: all desktop jobs covered by paper records | PASS | unconsumed per lane=&#123;&#125; |
+| paper-vs-desktop: per-framework compute totals | PASS | superfermion_optimized: recomputed=27.36min paper=27.36min dev=0.00%; qulacs: recomputed=70.04min paper=70.04min dev=0.00%; qiskit: recomputed=34.30min paper=34.30min dev=0.01%; pennylane: recomputed=132.99min paper=132.99min dev=0.00%; cirq: recomputed=72.38min paper=72.38min dev=0.00%; cirq_f64: recomputed=138.52min paper=138.52min dev=0.00% |
+| paper: mode observation count | PASS | rows=81 conditions=24 |
+| paper-vs-laptop: all 81 mode observations match raw laptop rows | PASS | compared=81 mismatches=0 |
+| paper-vs-laptop: dm ratios identical | PASS | &#123;"8": 0.5774964521075606, "10": 1.2379962435458747, "12": 1.5490119080777223&#125; |
+| paper abstract: headline compute totals present | PASS | 27.36 min / 34.30 min in main.tex |
+| paper abstract: parity 2.8172e-15 matches laptop | PASS | laptop summary 2.8172e-15, laptop raw max 2.8172e-15, paper text '2.8172e-15' |
+
+**15/15 checks passed.** The machine-readable report is
+[benchmark_consistency_report.json](/downloads/benchmark_consistency_report.json).
+
+## What is deliberately not comparable
+
+- The three studies keep separate timing contracts: statevector jobs report the primary
+  compute stage, execution-mode rungs report ABBA window means, and MPS jobs report their
+  own contracts. No cross-study compute total is introduced.
+- `Mode::Stab` and `Mode::Cliff` compile to the same Pauli-frame tableau; matching rows at
+  equal circuit and qubit count are by construction.
+- `Mode::Dm` is a documented hold-out in the cat crate; the density-matrix section measures
+  the sf-ir `simulate_dm` engine and is never framed as a cat-mode win.
+- cat lanes run 4-thread RAYON; competitor lanes run shipped defaults; cirq is capped at
+  n = 64 and stabilizer Aer at n = 256 (`not_run_capped` rows carry no numbers).
+- The desktop study is CPU-only ideal statevector work: no GPU, noise or hardware results.
+
+## Downloads
+
+- [Desktop grid](/docs/benchmarks/desktop#downloads) — the TechRxiv paper edition; the raw
+grid tables ship in `Superfermion_requested_grid_Expanded_Results.zip`.
+- [Laptop suite and results archives](/docs/benchmarks/laptop#downloads).
+- [Paper archive](/docs/benchmarks/techrxiv#downloads) — Markdown edition and LaTeX source.

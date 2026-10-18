@@ -1,0 +1,662 @@
+---
+title: "Why SuperFermion Is Fast"
+description: "Execution-engine deep dive for SuperFermion 0.1.15: the statevector IR, the instruction-plan math, the Rust kernels, and the sf.prepare / sf.cat handles that remove per-call cost."
+---
+
+This page is the mechanism-level answer to "why is it faster". It is not a
+benchmark table — those live on [Performance](/docs/reference/performance) and
+in the [benchmark archive](/docs/benchmarks). Here we follow one circuit from
+the Python builder to the amplitude buffer and name every place where work is
+removed, plus the places where the optimisation is deliberately **not** used
+because it measured slower.
+
+Everything below is grounded in the 0.1.15 source: `crates/sf-ir`,
+`crates/sf-cat`, `crates/sf-compiler`, and `crates/sf-bindings`.
+
+## The four cost terms
+
+A statevector run spends its wall clock in four places. They scale differently,
+so a change that helps one can be invisible in another.
+
+| Cost term | What it is | Scales with | Lever in 0.1.15 |
+|---|---|---|---|
+| Per-call fixed | DAG walk, gate-matrix construction, parameter binding, FFI marshalling | circuit size, per call | `sf.prepare()`, `sf.cat()` |
+| Arithmetic | the complex multiplies the algebra actually requires | gates × amplitudes | fusion, diagonal rewrite, phase form |
+| Bytes moved | the state must be read and written once per *pass* | passes × 16·2^n | in-place buffer, k-qubit fusion, run merging |
+| Coordination | allocations, thread split/join, GIL, exports | calls, threads | pooled scratch, size thresholds, `allow_threads` |
+
+A 2x kernel win is worth nothing if the per-call fixed cost is 40% of the
+measurement. That is why there are two distinct layers of optimisation in
+0.1.15, and why they show up in different regimes:
+
+- The **statevector IR** attacks terms 2 and 3. It only pays once the state
+  stops fitting in cache — in practice from **n = 20** upward.
+- The **API handles** (`sf.prepare`, `sf.cat`) attack term 1. They pay at
+  **every** qubit count, including the small ones where the kernel work is
+  microseconds.
+
+## The path a circuit takes
+
+```
+sf.Circuit (Python, immutable builder)
+   |
+   |  to_ir()
+   v
+QuantumDAG (Rust) ................. semantic layer: gates, conditions, measure,
+   |                               resets, classical bits, parameter names
+   |
+   |  build_sim_plan()
+   |     1. topological_order()
+   |     2. OpType -> 2x2 / 4x4 constant matrix
+   |     3. fuse_1q_sequence()        consecutive 1q gates on one qubit -> one 2x2
+   |
+   |  build_sim_instructions()
+   |     4. CX.D.CX          -> Diag2 (or Diag1 for the control/disjoint case)
+   |     5. fuse_1q_blocks() -> Fused over k disjoint qubits (k up to 8)
+   |     6. merge_cnot_runs() -> PermuteRun (one GF(2) index permutation)
+   |     7. fold_diags_into_fused()
+   |     8. cluster_commuting_diags() -> PhaseRun (one Gray-code sweep)
+   v
+Vec<SimInst> ...................... the execution layer: a flat instruction
+   |                               list, no graph, no strings, no dispatch
+   |                               on gate names
+   |
+   |  execute_statevector_plan()
+   v
+StatevectorState { data: Vec<Complex64>, num_qubits, device }
+```
+
+Two properties matter:
+
+1. **The graph is left behind.** Once the instruction list exists, execution
+   never asks "what gate is this?" again. Every instruction is a kernel call
+   with all constants already baked in. No per-gate `DMatrix` allocation, no
+   `sin_cos` inside the loop, no `HashMap` lookup.
+2. **Planning is cheap and reusable.** The plan depends only on the circuit
+   *structure*, so it can be cached across parameter rebinds. That is exactly
+   what `sf.prepare()` and `sf.cat(...)` do — see the API section.
+
+You can inspect the plan yourself; `SF_PLAN_DUMP=1` prints a census to stderr:
+
+```text
+[sf-plan] n=20 total=32 gate=0 diag1=0 diag2=0 phase=0 fused=24 [8, 8, 4, 8, 8, 4, 8, 8, 4, 8, 8, 4, 8, 8, 4, 8, 8, 4, 8, 8, 4, 8, 8, 4] perm=8 [20, 20, 20, 20, 20, 20, 20, 20]
+```
+
+That is the actual output of the command above on SuperFermion 0.1.15. The
+circuit has 260 logical gates — 20 Hadamards, 160 parameterized `RZ` and 80
+`CNOT`s — and the kernels execute 32 instructions.
+
+Read the fields together, because the zeros are the interesting part:
+
+- `gate=0`, `diag1=0`, `diag2=0`, `phase=0` — **nothing survived as a standalone
+  kernel.** No gate is applied one at a time.
+- `fused=24 [8, 8, 4, …]` — the 20 Hadamards fuse into the first layer's
+  rotations, and each layer's 20 rotations become three blocks of 8, 8 and 4,
+  because the k cap at 20 qubits is 8. Eight layers times three blocks is 24.
+- `perm=8 [20, …]` — each layer's ten CNOTs compose into one GF(2) permutation
+  run, and every run touches all 20 qubits. Eight layers, eight runs.
+- `total=32` — 24 fused sweeps plus 8 permutation sweeps. That is the whole
+  execution.
+
+A `[sf-trace]` line follows because the plan is short enough to print one; it is
+omitted here.
+
+## What "SV-IR" means here
+
+There is no crate named `sf-sv-ir`. The statevector IR is a path inside
+`sf-ir`, and it has two public faces:
+
+- the **instruction plan** produced by `build_sim_instructions()` — the
+  `SimInst` list above;
+- `PreparedStatevector`, the immutable snapshot that caches the topological
+  order and constant matrices and is exposed to Python as
+  `sf.PreparedCircuit` via `sf.prepare()`.
+
+`sf.cat(circuit, mode="statevector")` owns a `PreparedStatevector` inside its
+`CatPlan`. So "the cat statevector lane" and "the prepared statevector lane"
+are the same kernels with the same arithmetic — the difference is only what is
+cached and where the handle lives.
+
+## The math of the instruction plan
+
+### Layout
+
+The state is a flat, interleaved array of `Complex64` values in **basis-index
+order** (qubit `q` is bit `q` of the index, little-endian). There is no
+column-major matrix anywhere in the statevector path. Footprint is exactly
+`16 · 2^n` bytes.
+
+### One-qubit gates: independent pairs
+
+A 1q unitary on qubit `q` transforms 2^n pairs that never interact, so the
+kernel is one strided loop with no scratch:
+
+```text
+for every index i with bit q of i == 0:
+    a = state[i]
+    b = state[i | 2^q]
+    state[i]        = u00·a + u01·b
+    state[i | 2^q]  = u10·a + u11·b
+```
+
+Cost: `2^n` multiplies-adds, one read and one write per amplitude. The stride
+`2^q` is the only thing that changes between qubits — the same kernel serves
+every 1q gate in the library.
+
+### Two-qubit gates: independent groups of four
+
+A controlled gate touches the four amplitudes selected by the two bits
+`(b_c, b_t)`; all other bits are bystanders and stay in place. The kernel walks
+groups of four and applies a 4×4 matrix restricted to that subspace. Same
+structure, four multiplies per amplitude instead of two, still no scratch.
+
+### Fusion: multiply 2x2 matrices, not passes
+
+Consecutive 1q gates on the *same* qubit compose exactly:
+
+```text
+U = U_k · … · U_2 · U_1        (2x2 complex product)
+U(θ,φ,λ) = [ cos(θ/2)          -e^{iλ} sin(θ/2) ]
+           [ e^{iφ} sin(θ/2)    e^{i(φ+λ)} cos(θ/2) ]
+```
+
+`fuse_1q_sequence()` does this during planning, and `decompose_u3` folds the
+product back into one `U(θ,φ,λ)` instruction; near-identity results (below
+`1e-6`) are dropped entirely. A depth-64 rotation chain on one qubit becomes
+**one** pass instead of 64. This is the cheapest possible win: it reduces both
+arithmetic and memory traffic at the same time, with no accuracy cost beyond
+one 2×2 product per chain.
+
+### Rewrite 1: a phase between two CX gates
+
+A diagonal 1q gate sandwiched between CNOTs on the same pair is a two-qubit
+phase, not three passes:
+
+```text
+CX(c,t) · D(t) · CX(c,t) = diag(m0, m1, m1, m0)      (the ZZ phase)
+```
+
+The planner recognises the triple and emits a single `Diag2` with four
+precomputed entries. `RZ` inside a CX ladder — the most common shape in VQE
+and QAOA ansätze — therefore costs one pass with four multiplies per group
+instead of three passes. If the diagonal sits on the control or on a disjoint
+qubit it collapses to `Diag1` instead, which is a plain 2-way phase.
+
+### Rewrite 2: a whole diagonal run becomes one phase function
+
+Any run of 1q and 2q diagonal gates is a diagonal operator, so the *entire run*
+is one function of the basis index:
+
+```text
+Φ(b) = c + Σ_q L[q]·b_q + Σ_{q<p} Q[q][p]·b_q·b_p
+
+amplitude[b]  <-  amplitude[b] · exp(i·Φ(b))
+```
+
+This is exact for any diagonal gate with unit-modulus entries; the planner
+refuses the rewrite otherwise (`build_phase_plan` returns `None` if any entry
+deviates from unit modulus).
+
+The naive evaluation costs `O(n^2)` per amplitude. Instead the kernel walks
+the basis indices in **Gray-code order**, so consecutive steps differ in
+exactly one bit `q`, and
+
+```text
+ΔΦ_q = (2·b_q' − 1) · ( L[q] + Σ_{p≠q} Q[q][p]·b_p )
+```
+
+costs `O(n)` to evaluate and one `sin_cos`. Accuracy is protected two ways:
+the complex product is error-free-transformed (each rounding residual is
+folded into the next step), and the phase is recomputed from scratch every 256
+steps. Net drift is at the `sin_cos` rounding floor, about `1e-15`. For banded
+forms (nearest-neighbour ZZ chains) a 16-entry lookup table replaces the
+`sin_cos`; `SF_PHASE_TABLE=0` forces the reference loop for A/B runs.
+
+Net effect: a run of `m` diagonal gates becomes **one** pass of the state
+instead of `m`.
+
+### Rewrite 3: a CNOT run becomes one GF(2) permutation
+
+Every CNOT is a linear map on the basis index over GF(2). A run of them
+composes into a single matrix, so the whole run is one index permutation:
+
+```text
+dest(i) = XOR of cols[q] for every set bit q of i
+```
+
+Instead of `m` read-write sweeps, the kernel does one out-of-place sweep:
+`out[dest(i)] = state[i]`. The implementation walks it in the **gather**
+direction (`out[d] = state[src(d)]`) so writes are sequential and reads are
+scattered-but-prefetched; `src` comes from byte-chunk tables built by
+Gauss-Jordan reducing the GF(2) matrix, giving `n/8` blocks of 256 `usize`
+entries. The historical scatter form issued one write-allocate miss per
+element and measured about 15 individual CX passes at n=24.
+
+Two guards keep this honest: runs shorter than 4 CNOTs are left alone (one
+sweep is worth roughly 2–4 single passes), and states above `2^24` amplitudes
+skip the merge entirely because the scratch buffer would double peak memory.
+That is a deliberate speed-for-memory trade, not an oversight.
+
+### Rewrite 4: k disjoint qubits in one pass
+
+Maximal runs of 1q gates on *distinct* qubits commute, so they form a tensor
+product:
+
+```text
+U = U_{k-1} ⊗ … ⊗ U_1 ⊗ U_0
+```
+
+applied to `2^k`-element groups in one sweep. The arithmetic is identical to
+`k` separate passes, but the state is read and written **once instead of k
+times** — the source comment puts it as "same arithmetic, `1/k` of the memory
+traffic". The kernel is dispatched through const-generic instantiations for
+`k = 2..10` so the inner loops fully unroll, and group buffers skip
+initialisation entirely because every slot is written by the gather.
+
+Two implementation details are worth naming because they are where naive fused
+kernels lose their win:
+
+- **Banded processing.** For high-qubit windows the group gather touches
+  `2^k` scattered pages per group and becomes DTLB-bound. The banded worker
+  gathers a whole band of groups into contiguous scratch, runs the `k` stage
+  passes with long loops, then scatters back — bit-identical arithmetic,
+  address-ordered page walks.
+- **Tiled processing.** For a contiguous qubit run the gather addresses of a
+  band are themselves contiguous, so gather and scatter degrade into `2^k`
+  contiguous copies per band instead of `2^k` strided 16-byte touches per
+  group.
+
+### Why the planner is size-dependent
+
+This is the part most "fast framework" pages omit. The rewrites above are
+**switched off below n = 20**, and that is a measurement, not a guess:
+
+| Regime | Plan | Measured effect |
+|---|---|---|
+| `2^n` below `2^20` (n up to 19) | faithful pair-pass plan, `k = 1` | rewrites measured **1.34–2.63x slower** at n=16–18 |
+| `2^n` at or above `2^20` (n 20+) | fusion + diagonal/CNOT run merging | rewrites measured **1.5–2.6x faster** at n=20–24 |
+
+The reason is cache residency. At n=18 the whole state is ~4 MiB and stays in
+L3, so re-reading it is nearly free and the rewrite only adds setup. At n=24
+the state is 256 MiB and every extra pass is a DRAM round trip, so removing
+passes dominates. The k-cap follows the same logic: `k = 8` below 23 qubits,
+`k = 6` at 23 and above, because the `2^k` gather window blows past L3 at
+23–24 qubits (measured: `vqc_24q` 1603 ms at K=8 vs 839 ms at K=6).
+
+This threshold is also why the Qulacs crossover looks the way it does: Qulacs
+wins at n ≤ 10, the curves cross around n = 14–16, and SuperFermion pulls away
+from n = 20 — precisely where the planner starts rewriting. See the
+[crossover table](/docs/reference/performance#statevector-vs-qulacs-v0115) for
+the numbers and the disclosures.
+
+## The Rust layer
+
+### One buffer, modified in place
+
+Each pass reads and writes the same allocation. There is no ping-pong pair of
+buffers, which halves the resident footprint and avoids the write-allocate
+traffic of a second buffer. `StatevectorState` is a `Complex64` buffer plus
+`num_qubits` and a device tag — nothing else.
+
+| n | amplitudes | state (f64) | per pass (read + write) |
+|---|---|---|---|
+| 16 | 65,536 | 1 MiB | ~2 MiB |
+| 20 | 1,048,576 | 16 MiB | ~32 MiB |
+| 24 | 16,777,216 | 256 MiB | ~512 MiB |
+| 28 | 268,435,456 | 4 GiB | ~8 GiB |
+
+The "per pass" column is why pass-count reduction is the dominant lever at
+large n, and why `16·2^n` is the number to watch when sizing a job.
+
+### SIMD: AVX2 + FMA, dispatched at runtime
+
+The kernels are hand-written AVX2/FMA intrinsics with a scalar fallback chosen
+by `is_x86_feature_detected!`. The portable wheel is built for `x86-64-v2`
+(SSE4.2), so a single wheel runs everywhere and still picks AVX2 on the host
+that has it. `SF_NO_SIMD=1` forces the scalar path.
+
+A `__m256d` register holds two complex numbers, so the complex multiply is
+where the design matters:
+
+```text
+cmul4(v, w)            # historical form
+  vr = movedup(v)      # [re, re, re, re] per complex
+  vi = permute(v,0xF)  # [im, im, im, im]
+  ws = permute(w,0x5)  # [wi, wr, wi, wr]
+  res = fmaddsub(vr, w, vi*ws)          3 shuffles per multiply
+
+cmul_nat(v, mr, mi)    # natural layout, pre-broadcast constants
+  vs = permute(v,0x5)  # [im, re, im, re]
+  res = fmaddsub(v, mr, vs*mi)          1 shuffle per multiply
+```
+
+The one-shuffle form is available via `SF_PAIR_V2=1`. It is not the default
+because the A/B microbenchmark on the reference host measured the two within
+noise: large strides are DRAM-bound and L1-resident chunks are latency-bound,
+so port-5 shuffle pressure was not the limiter there. The code keeps both so
+the choice is a measurement, not a belief.
+
+Size floors are per kernel, and they exist for a concrete reason. A single
+floor of 8192 amplitudes (taken from a phase-gate micro where scalar 1.51 ms
+beat SIMD 3.85 ms at dim 4096) left n=12 entirely on the scalar path, where
+the end-to-end ladder measured ~0.91 µs/amplitude versus ~0.07 µs/amplitude at
+dim 8192 — a 13x cliff caused purely by a threshold. Whole-slice gate kernels
+therefore use a floor of **4096**; chunked kernels are ungated.
+`SF_PAIR_MIN` and `SF_SCALE_MIN` override.
+
+### Threads: a measured threshold, not "always parallel"
+
+```text
+use_par = (2^n >= 65536) && (rayon::current_num_threads() > 1)
+```
+
+65536 amplitudes is exactly n=16. Below it, split/join and chunk setup cost
+more than the work; above it, the state is split into contiguous chunks and
+each chunk runs the same serial kernel. The parallel structure lives in
+`dag.rs`; the kernels themselves stay serial and take caller-provided slices,
+so they compose with `par_chunks_mut` without a second layer of dispatch.
+
+### Scratch is pooled per thread
+
+`PermuteRun` is the only out-of-place instruction. Its buffer is taken from a
+thread-local pool, grown only when a larger state appears, truncated back to
+the exact dimension, and returned after the plan finishes. Repeated simulations
+of the same size therefore do zero large allocations after the first one.
+
+### The f32 lane
+
+`simulate_f32()` reuses the **identical** instruction plan — planning is done
+once, in f64, where it is cheap and exact — and executes it with f32 twins of
+the kernels. Working set halves, arithmetic cost per element halves, and the
+error grows to the `1e-6` to `1e-5` class. It is opt-in at the binding boundary
+with `SF_F32=1`, and uses the same 65536-amplitude parallel threshold.
+
+This is the single largest memory lever available: at n=24, 128 MiB instead of
+256 MiB, which is often the difference between fitting a problem and not.
+
+### Adjoint: cost independent of parameter count
+
+Parameter-shift needs `2P` circuit executions for `P` parameters. Adjoint
+needs **two** sweeps regardless of `P`:
+
+```text
+forward:   |ψ_0> -> |ψ_1> -> … -> |ψ_M>
+backward:  λ_M = ∂⟨O⟩/∂|ψ_M>            (from the observable)
+           λ_{k-1} = U_k† λ_k
+           d⟨O⟩/dθ_k = 2·Re⟨λ_k| (∂U_k/∂θ_k) |ψ_{k-1}⟩
+```
+
+Total cost is `O(M·2^n)` with a small constant, instead of `O(P·M·2^n)`. That
+is the "2N-fold" statement in the source: remove the parameter multiplier, not
+the amplitude work.
+
+Memory is the real design choice. Caching every intermediate costs
+`P·2^n` complex; recomputing them costs one extra forward sweep and `2·2^n`.
+`sf-ir` exposes both and `sf-cat`'s `AdjProgram` enforces a cap:
+`n_param_gates · 2^n` must stay under `2^26` elements (1 GiB), otherwise the
+handle refuses and points you at `sf_ir::adjoint`, which streams over the cap.
+
+The parallel threshold is different too: `PAR_DIM_DEFAULT = 2^17`. At n=16 the
+sweeps are measurably faster serial (~8%) at 1 ULP parity (`2e-16` max
+difference), so the threshold sits one doubling higher than the gate path.
+`SF_ADJ_PAR_MIN` overrides.
+
+### Escape hatches
+
+Every threshold above is a runtime override, because a threshold that cannot
+be re-measured is a threshold you have to trust.
+
+| Variable | Effect |
+|---|---|
+| `SF_NO_SIMD=1` | force scalar kernels |
+| `SF_PAIR_V2=1` | one-shuffle complex multiply |
+| `SF_PAIR_MIN`, `SF_SCALE_MIN` | SIMD size floors |
+| `SF_FUSE_K` | override the k-qubit fusion cap (1 disables fusion) |
+| `SF_MERGE_MIN_RUN` | diagonal-run merge break-even |
+| `SF_PHASE_TABLE=0` | reference phase sweep instead of table lookups |
+| `SF_F32=1` | f32 statevector lane |
+| `SF_ADJ_PAR_MIN` | adjoint parallel threshold |
+| `SF_PLAN_DUMP=1` | instruction census to stderr |
+
+## The API layer
+
+The kernels above are the same ones `sf.run()` uses. What the API handles add
+is the removal of the **per-call fixed cost**, and that is where the large
+multiples at small qubit counts come from.
+
+### `sf.prepare()` — snapshot once, rebind many times
+
+`sf.prepare(circuit)` returns a `PreparedCircuit` wrapping
+`PreparedStatevector`. The snapshot caches:
+
+- the topological order (computed once, never re-walked);
+- the flat `QuantumOp` list with boundary/barrier nodes already filtered out;
+- the constant gate matrices;
+- the parameter names, in binding order.
+
+On each call it only validates the supplied values, binds parameters, rebuilds
+the matrices that actually depend on angles, and rebuilds the fusion plan. No
+DAG clone, no Python circuit clone, no re-parse. Angle-dependent optimisations
+never reuse stale values, which is the correctness half of the same decision.
+
+The contract is unitary-only: measurement, reset, conditioned operations and
+custom gates are rejected at construction. That is what makes the snapshot
+safe to reuse.
+
+### Export costs, and the batch methods
+
+The most common hidden cost is not simulation — it is getting the answer out.
+`state.numpy()` allocates and copies `16·2^n` bytes.
+
+| Method | Per-call allocation | Export |
+|---|---|---|
+| `sf.simulate(qc).numpy()` | state + numpy copy | full `16·2^n` copy |
+| `prepared.simulate(values)` | state | none until you ask |
+| `prepared.states_batch(values)` | one `(B, 2^n)` bank | one copy for all `B` |
+| `prepared.mean_z_batch(values)` | none | scalars only |
+| `prepared.diagonal_batch(values, obs)` | none | scalars only |
+
+`mean_z_batch` is a good example of removing work rather than moving it: the
+mean of single-qubit Z expectations is computed from `|amplitude|^2` and a
+popcount per index, with no probability array allocated at all. `diagonal_batch`
+evaluates a diagonal observable the same way. `states_batch` is capped at 1 GiB
+of bank so that a large request fails loudly instead of swapping.
+
+### `sf.cat()` — compile once, execute many
+
+`sf.cat(circuit, mode)` lowers the circuit into a `CatPlan` **once**:
+
+```text
+CatPlan
+  n_qubits
+  parameter_names
+  mode        Sv | Adj | Stab | Cliff | Dm
+  sv          Option<PreparedStatevector>
+  adj         Option<AdjProgram>
+  stab        Option<FrameTableau>
+```
+
+Then each call rebinds and executes without rebuilding a DAG, re-parsing gate
+names, or re-allocating matrices. `execute_statevector` is documented as
+bit-for-bit identical to `dag.bind(values).simulate()` — the handle changes
+*when* work happens, never *what* is computed.
+
+Mode availability is deliberately uneven:
+
+| Mode | Executes | Path |
+|---|---|---|
+| `statevector` | yes | `CatPlan.simulate(values)` |
+| `adjoint` | yes | `run_gradient(pauli, theta)` |
+| `stabilizer` | yes | Pauli-frame tableau, `sample(shots, seed)` |
+| `clifford` | yes | same tableau pipeline as `stabilizer` |
+| `density_matrix` | **no** | explicit `ValueError` at construction |
+
+Density matrix is the one deliberate hold-out. The feasibility probe measured
+a statistical tie with the routed Aer path, so under a keep-only-if-win rule it
+stays an explicit, non-silent error rather than an implementation that returns
+a slightly worse number under a faster-looking name.
+
+### The representation router
+
+`sf-cat` carries a cost model that maps a circuit profile to the cheapest
+representation:
+
+| Representation | Cost model | Executable in cat today |
+|---|---|---|
+| `Tableau` | `O(n^2)` per gate, no amplitudes | yes, through `stabilizer` / `clifford` |
+| `StabRank` | polynomial in `n`, rank bound `2^t` for `t` magic gates | classifier only |
+| `DenseSv` | `16·2^n` bytes, `O(g·2^n)` | yes, through `statevector` |
+| `Mps` | bond-dimension dependent | classifier only |
+
+The classifier is pure data — no simulation, no host state. Its
+`available_in_cat` flag currently reports `DenseSv` only; the tableau is reached
+through the dedicated `stabilizer` / `clifford` modes rather than the generic
+router, and `StabRank` / `Mps` are routing decisions waiting on kernels.
+
+### Pauli-frame sampling
+
+The stabilizer and Clifford modes compile to one Aaronson–Gottesman tableau
+with two changes over the `sf-ir` reference:
+
+1. **Sparse variable lists.** A determined outcome stores the *indices* of the
+   random bits it depends on (a list of `u32`), not a dense bit mask. Evaluation
+   is one XOR per referenced variable; for lightcone-local outcomes (GHZ:
+   weight 1) there are no words to iterate at all.
+2. **Packed-key counting.** Shots are transposed into `n/64`-word integer keys
+   and counted directly, and the little-endian bit string is materialised once
+   per *distinct* key instead of once per shot. No per-shot `String` build.
+
+The cat tableau also has no 4096-qubit cap (the `sf-ir` tableau asserts one
+internally; this cell does not).
+
+### Measured handle effect
+
+The `sf-cat` adjoint lane (compile-once handle versus raw `sf-ir` and Qulacs)
+was measured on the reference host with the compile step outside the timed
+region:
+
+| n | params | cat gradient | raw sf-ir | speedup vs sf-ir |
+|---|---|---|---|---|
+| 6 | 12 | 0.011 ms | 0.061 ms | 5.6x |
+| 10 | 20 | 0.188 ms | 0.218 ms | 1.2x |
+| 16 | 32 | 16.6 ms | 20.8 ms | 1.25x |
+| 20 | 40 | 759 ms | 1,082 ms | 1.43x |
+
+Gradient parity against Qulacs was `2.8e-15` worst case. The win shrinks as
+the state grows, exactly as a fixed-cost optimisation should: at n=20 the
+`2^20`-amplitude sweeps dominate and 1.4x is what remains.
+
+The scope of that lane is explicit: `AdjProgram` accepts RY/RZ gates with
+variable parameters plus CNOT, and rejects any other gate — or a constant or
+expression parameter — at compile time rather than applying it silently.
+
+Disclosure: these numbers come from the crate's `l1_bench` release example,
+which runs the same `CatPlan` code path as `sf.cat`, not from the Python
+handle itself. The full protocol and raw rows are in the execution-modes
+benchmark.
+
+### The GIL
+
+Every entry point that does real work calls `py.allow_threads(...)` around the
+Rust computation: single simulation, batch simulation, gradient, and sampling.
+Combined with the fact that Rayon owns the thread pool, a Python caller can run
+other threads while a simulation is in flight, and the batch methods do not do
+`B` GIL round trips for `B` circuits.
+
+## Memory accounting
+
+One table, because most "why is it faster" pages stop at CPU time.
+
+| Object | Footprint | When it exists |
+|---|---|---|
+| statevector (f64) | `16 · 2^n` bytes | always |
+| statevector (f32) | `8 · 2^n` bytes | `SF_F32=1` |
+| permutation scratch | `16 · 2^n` bytes | only when a CNOT run is merged |
+| prepared snapshot | `O(gates)` matrices | `sf.prepare` / `sf.cat` |
+| adjoint parameter cache | `P · 2^n · 16` bytes | adjacent gradient, capped at 1 GiB |
+| `states_batch` bank | `B · 2^n · 16` bytes | batch call, capped at 1 GiB |
+| numpy export | `16 · 2^n` bytes | every `.numpy()` call |
+
+Worked example — n=20, 40 parameters, applying for an adjoint gradient:
+
+```text
+state                     16 MiB
+permutation scratch       16 MiB   (only if a CNOT run is merged)
+parameter cache           640 MiB  (40 x 1M amplitudes x 16 B; under the cap)
+peak with all three      672 MiB
+same in the f32 lane     336 MiB   (half of everything)
+```
+
+That 640 MiB is why the cap exists: at n=22 the same job would ask for 2.5 GiB
+of cache alone, so `AdjProgram` refuses and routes to the streaming path.
+
+## Where the speedup stops
+
+The mechanisms above are real, but they are conditional. The statevector numbers
+in this section are the `superfermion_optimized` build against Qulacs 0.6.14 —
+the same crossover the [performance
+page](/docs/reference/performance#statevector-vs-qulacs-v0115) tabulates. Stated
+plainly:
+
+- **Qulacs wins at n ≤ 10** in the statevector crossover, by 2.8x to 7.2x.
+  Their kernel is lean and their per-call path is short; at that size there is
+  nothing for the planner to rewrite.
+- **The curves cross around n = 14–16.** At one thread SuperFermion wins
+  n=14 at every depth measured (1.5–2.0x); at four threads it wins the
+  shallow depths and Qulacs wins the deeper ones.
+- **From n = 20 the rewrite regime dominates**, with 5.4–7.4x on the HEA family
+  and up to 9.7x on dense 16-qubit circuits as gate count grows.
+- **PennyLane's adjoint is within 1.06–1.9x at n = 20**, and SuperFermion's
+  own adjoint costs 7–42x its forward pass there. The large adjoint multiples
+  at small n are dispatch overhead, not a better algorithm. The earlier claim
+  that PennyLane wins at n >= 18 came from a 0.1.x build; the
+  [gradient grid](/docs/reference/performance#adjoint-differentiation) has the
+  current numbers.
+- **`cat` has no density-matrix mode.** That is intentional and documented.
+- **A single n=12 Qulacs data point is not an SF win.** It is a threading
+  pathology in the comparator at that exact size (0.12 ms at 1 thread, 4.4 ms
+  at 4), and it is reported as a defect, not as a result.
+
+Every threshold on this page — 4096, 65536, `2^20`, K=8/6, 1 GiB — is a
+measured break-even on one host, with an environment override so it can be
+re-derived on yours. Numbers move with hardware; the mechanisms do not.
+
+## See the plan for yourself
+
+```bash
+# Instruction census: gates in, instructions out.
+SF_PLAN_DUMP=1 python -c "
+import superfermion as sf
+qc = sf.Circuit(20)
+for q in range(20):
+    qc = qc.h(q)
+for layer in range(8):
+    for q in range(20):
+        qc = qc.rz(sf.param(f'r{layer}_{q}'), q)
+    for q in range(0, 19, 2):
+        qc = qc.cx(q, q + 1)
+sf.simulate(qc, params={f'r{l}_{q}': 0.1 for l in range(8) for q in range(20)})
+"
+```
+
+```bash
+# Same circuit, fusion off: compare the pass count and the wall clock.
+SF_FUSE_K=1 SF_PLAN_DUMP=1 python bench.py
+
+# Scalar vs SIMD on the same plan.
+SF_NO_SIMD=1 python bench.py
+```
+
+If you want the end-to-end numbers under the same conditions, the
+[performance page](/docs/reference/performance) has the headline tables and
+the [benchmark archive](/docs/benchmarks) has every raw row with provenance.
+
+## Related
+
+- [Architecture](/docs/reference/architecture) — the ports-and-adapters layout
+  and the crate map.
+- [Performance](/docs/reference/performance) — headline benchmarks and the
+  methodology behind them.
+- [API reference](/docs/reference/api) — `sf.prepare`, `sf.cat`, `sf.run`.
+- [Benchmark archive](/docs/benchmarks) — desktop grid, laptop suite, TechRxiv
+  paper, all downloadable.

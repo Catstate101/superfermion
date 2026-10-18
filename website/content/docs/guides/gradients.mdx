@@ -48,7 +48,7 @@ grads = adjoint_grad_vector(ansatz, H, ["t0", "t1"], np.array([0.5, 1.2]))
 print(grads)
 ```
 
-Up to **800x faster** than parameter-shift for deep circuits (UCCSD, deep SU(2)).
+Two sweeps instead of `2P` circuit runs. Measured on 20-qubit SU(2) circuits: ~77x faster than parameter-shift at 40 parameters and ~73x at 80 parameters, where the ratio stays flat because both sides grow with depth. The grid, the correctness checks and the caveats are on the [performance page](/docs/reference/performance#adjoint-differentiation).
 
 ### Parameter-Shift
 

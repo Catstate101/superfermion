@@ -95,7 +95,7 @@ grads = state.grad(obs, dag, {"theta": 0.5})
 print(grads)  # {"theta": -0.479...}
 ```
 
-The adjoint method computes gradients in one backward pass regardless of parameter count. Up to **800x faster** than parameter-shift for deep circuits.
+The adjoint method computes gradients in one backward pass regardless of parameter count. On 20-qubit SU(2) circuits it is ~77x faster than parameter-shift at 40 parameters and ~73x at 80, because parameter-shift needs two circuit runs per parameter. Full grid and correctness checks: [gradient benchmarks](/docs/reference/performance#adjoint-differentiation).
 
 ## 8. Try a different simulation method
 

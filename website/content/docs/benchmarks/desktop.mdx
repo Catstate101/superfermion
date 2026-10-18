@@ -1,0 +1,1984 @@
+---
+title: "Desktop grid - TechRxiv paper edition"
+description: "The TechRxiv paper edition served on the desktop grid route: abstract, package statistics, all 132 tables, all 42 figures and downloadable Markdown and LaTeX editions."
+---
+
+## Paper metadata
+
+- **Title:** SuperFermion: A Leap Forward in Quantum Circuit Simulation Efficiency
+- **Subtitle:** Statevector learning matrix product states dynamic circuits and specialized execution modes
+- **Software version:** 0.1.15
+- **Lane label:** the paper reports one SuperFermion lane, **0.1.15**. The 0.1.15 release contains the performance work measured here; its merged path was parity-proven bit-exact against the measured lane, and the recorded values were not rerun after the version bump.
+- **Keywords:** quantum circuit simulation; SuperFermion; quantum machine learning; matrix product states; dynamic circuits; stabilizer sampling; Clifford circuits; adjoint gradients; density matrices
+
+- Md. Hasibul Hassan Himal — Catstate — [0009-0007-3613-5408](https://orcid.org/0009-0007-3613-5408)
+- Muhebbullah Tamim — Catstate — [0009-0004-3790-1408](https://orcid.org/0009-0004-3790-1408)
+
+## Abstract
+
+Efficient quantum simulation requires execution paths that match circuit structure and requested outputs. This study evaluates SuperFermion using three recorded benchmark suites covering statevectors, matrix product states (MPS), dynamic circuits and specialized execution modes. Six statevector configurations share 252 conditions from 4 to 20 qubits, including five-update variational learning from 4 to 12 qubits. The selected corpus contains 1,512 simulator jobs and 140 controls. SuperFermion has the lowest reconstructed primary-compute total, 27.36 min, compared with 34.30 min for Qiskit. Median paired process-memory savings are approximately 16.6% against Qiskit, 44.1% against PennyLane and 34.6-34.7% against Cirq; Qulacs memory is similar and slightly lower. The MPS suite contributes 182 selected unique jobs, including 141 successful observations. Structured circuits reach 1,000 qubits, and native MPS teleportation reaches 120 qubits with passing target-bit checks. At 120 qubits and 1,000 shots, SuperFermion records 0.318 s versus 1.015 s for Aer, while attributed interleaved checks report a narrower ratio near 1.6. The later suite adds 24 conditions across tableau sampling, compiled adjoint gradients and dense-core density matrices. Stabilizer and Clifford labels share one engine. SuperFermion is faster than every available external comparator in 10 of 11 prepared sampling conditions but only four cold conditions. All ten prepared gradients are faster than Qulacs, with maximum saved component-wise discrepancy 2.8172e-15 and one independent eight-qubit finite-difference anchor. The dense-core density-matrix route is faster than Aer at eight qubits and slower at twelve; the ten-qubit Aer diagonal-check flag leaves that comparison unranked. MPS truncation counterexamples, process-memory exceptions, preparation costs, unequal concurrency, different output contracts and incomplete repeated-run records constrain generalization. The evidence supports workload-specific execution benefits and preparation reuse; the three suites retain separate timing definitions and correctness scopes.
+
+## Package statistics
+
+| Item | Value | Note |
+|---|---|---|
+| PDF pages | 107 | verified when the PDF was compiled |
+| Tables | 132 | numbered table sources in the package |
+| Figures | 42 | vector PDF/SVG + PNG |
+| Equations | 17 | nonduplicate display equations |
+| References | 21 | deduplicated |
+| Benchmarks rerun for the revision | no | archived data, original provenance retained |
+
+## Evidence composition
+
+| Study | Corpus | Archive |
+|---|---|---|
+| Statevector | Six configurations × 252 matched conditions = 1,512 simulator records + 140 controls | [Desktop grid](/docs/benchmarks/desktop) |
+| MPS and dynamic circuits | 182 selected unique jobs, 141 successful | `source_mps/` in the LaTeX package |
+| Execution modes | 24 conditions, 81 selected observations | [Laptop suite](/docs/benchmarks/laptop) |
+
+The three studies retain their own timing, output, precision and correctness contracts; the
+paper introduces no cross-study compute total. Every desktop record and every mode
+observation was replayed against the raw archives — see the
+[verification table](/docs/benchmarks#does-the-paper-match-the-raw-runs).
+
+## Every table in the paper (132)
+
+Every numbered table is reproduced below, grouped by the paper's own section headings and
+labelled exactly as in the LaTeX package. No table is omitted.
+
+| Paper section | Tables | Labels |
+|---|---|---|
+| Evidence and workload selection | 2 | protocol, workloads |
+| Matrix product state and measurement protocol | 2 | mps_protocol, mps_software |
+| Two site gates and truncation | 1 | modes_internal_mps |
+| Execution mode benchmark protocol | 1 | modes_protocol |
+| Overall computation and process memory | 1 | overall |
+| Variational learning and objective evaluation | 1 | native_cases |
+| Memory scaling and task quality | 1 | quality |
+| Matrix product state coverage and scaling | 1 | mps_status |
+| Measurement feed forward and execution limits | 1 | mps_mcm_summary |
+| Stabilizer and large Clifford sampling | 1 | modes_outcomes |
+| Density matrix evaluation and numerical checks | 1 | modes_accuracy |
+| Quantum support vector machine | 5 | qsvm_4, qsvm_8, qsvm_12, qsvm_16, qsvm_20 |
+| Quantum kernel ridge regression | 5 | qkrr_4, qkrr_8, qkrr_12, qkrr_16, qkrr_20 |
+| Quantum kernel principal component analysis | 5 | qkpca_4, qkpca_8, qkpca_12, qkpca_16, qkpca_20 |
+| Variational quantum classification | 3 | vqc_4, vqc_8, vqc_12 |
+| Variational quantum regression | 3 | vqr_4, vqr_8, vqr_12 |
+| QAOA feature selection | 5 | qaoa_fs_4, qaoa_fs_8, qaoa_fs_12, qaoa_fs_16, qaoa_fs_20 |
+| QAOA MaxCut | 5 | maxcut_4, maxcut_8, maxcut_12, maxcut_16, maxcut_20 |
+| Variational quantum eigensolver | 5 | vqe_4, vqe_8, vqe_12, vqe_16, vqe_20 |
+| Gradient evaluation | 5 | gradient_4, gradient_8, gradient_12, gradient_16, gradient_20 |
+| Circuit simulation and sweeps | 5 | circuit_4, circuit_8, circuit_12, circuit_16, circuit_20 |
+| Classical controls by nominal qubit setting | 5 | classical_4, classical_8, classical_12, classical_16, classical_20 |
+| Small circuit correctness anchors | 8 | mps_validate_ghz_12_dense, mps_validate_ghz_12_mps, mps_validate_ghz_16_dense, mps_validate_ghz_16_mps, mps_validate_brick4_12_dense, mps_validate_brick4_12_mps, mps_validate_brick4_16_dense, mps_validate_brick4_16_mps |
+| GHZ matrix product state ladder | 5 | mps_ladder_ghz_50, mps_ladder_ghz_100, mps_ladder_ghz_200, mps_ladder_ghz_500, mps_ladder_ghz_1000 |
+| Four layer brick circuit ladder | 5 | mps_ladder_brick4_50, mps_ladder_brick4_100, mps_ladder_brick4_200, mps_ladder_brick4_500, mps_ladder_brick4_1000 |
+| Twelve layer brick circuit stress | 3 | mps_stress_brick12_200, mps_stress_brick12_500, mps_stress_brick12_1000 |
+| Quantum Fourier transform conditions | 6 | mps_qft_8, mps_qft_20, mps_qft_30, mps_qft_50, mps_qft_100, mps_qft_200 |
+| Bond sweep at 16 qubits | 4 | mps_bonds_16_2, mps_bonds_16_4, mps_bonds_16_8, mps_bonds_16_64 |
+| Bond sweep at 200 qubits | 5 | mps_bonds_200_8, mps_bonds_200_16, mps_bonds_200_32, mps_bonds_200_64, mps_bonds_200_128 |
+| Dynamic measurement conditions | 8 | mps_mcm_teleport_12, mps_mcm_teleport_24, mps_mcm_mbqc_17, mps_mcm_repcode_12, mps_mcm_mps_teleport_12, mps_mcm_mps_teleport_30, mps_mcm_mps_teleport_60, mps_mcm_mps_teleport_120 |
+| Stabilizer sampling | 6 | modes_stab_ghz_64, modes_stab_ghz_256, modes_stab_brick_64, modes_stab_brick_256, modes_stab_randcliff_256, modes_stab_randcliff_1024 |
+| Large Clifford sampling | 5 | modes_cliff_ghz_1024, modes_cliff_ghz_4096, modes_cliff_brick_1024, modes_cliff_brick_4096, modes_cliff_randcliff_4096 |
+| Adjoint gradients | 10 | modes_adj_n6_L1, modes_adj_n8_L1, modes_adj_n10_L1, modes_adj_n12_L1, modes_adj_n14_L1, modes_adj_n16_L1, modes_adj_n18_L1, modes_adj_n20_L1, modes_adj_n8_L2, modes_adj_n8_L4 |
+| Density matrix evaluation | 3 | modes_dm_n8, modes_dm_n10, modes_dm_n12 |
+
+### Evidence and workload selection (2 tables)
+
+**Table (protocol) — Selected statevector study protocol**
+
+| Item | Recorded setting or evidence boundary |
+|---|---|
+| Comparison set | Six configurations; 252 identical conditions per configuration |
+| Qubit grid | 4, 8, 12, 16 and 20; VQC/VQR limited to 4, 8 and 12 |
+| Learning split | Full 80/20 held-out split; seed 42 |
+| Training budget | VQC/VQR: five updates |
+| Repeated measurements | One fresh-process repetition per condition |
+| Job timeout | 1,200 s |
+| State-bank cap | 512 MiB exported-bank limit; not a total process-RSS cap |
+| Selected coverage | 1,512 simulator jobs plus 105 classical and 35 analytical controls |
+| Implementation metadata | Full package lock, pinned source patch and detailed adapter settings unavailable |
+| Learning metadata | Row-level predictive outcomes and complete preprocessing audit unavailable |
+
+*Note: These are reported study settings. Descriptive comparisons retain the supplied output contracts and precision differences.*
+
+**Table (workloads) — Matched workload coverage per simulator lane**
+
+| Experiment | Inputs and configured outputs | Qubits | Conditions |
+|---|---|---|---|
+| QSVM | 5 datasets; angle and ZZ; statevector | 4/8/12/16/20 | 50 |
+| QKRR | 2 datasets; angle and ZZ; statevector | 4/8/12/16/20 | 20 |
+| QKPCA | 5 datasets; ZZ; statevector | 4/8/12/16/20 | 25 |
+| VQC | 5 datasets; angle; two output tracks; 5 updates | 4/8/12 | 30 |
+| VQR | 2 datasets; angle; two output tracks; 5 updates | 4/8/12 | 12 |
+| QAOA feature selection | 2 datasets; two output tracks | 4/8/12/16/20 | 20 |
+| QAOA MaxCut | 2 graph families; two output tracks | 4/8/12/16/20 | 20 |
+| VQE | Open-chain TFIM; two output tracks | 4/8/12/16/20 | 10 |
+| Gradient | Synthetic objective; two output tracks | 4/8/12/16/20 | 10 |
+| Circuit | 7 families plus 4 batch/depth sweep settings | 4/8/12/16/20 | 55 |
+| Total | 201 statevector and 51 native-readout conditions | Measured grid | 252 |
+
+*Note: Every included framework has the same 252 condition keys. The six configurations contribute 1,512 simulator jobs; 105 classical controls and 35 analytical controls bring the analyzed statevector corpus to 1,652 rows.*
+
+### Matrix product state and measurement protocol (2 tables)
+
+**Table (mps_protocol) — MPS and dynamic circuit measurement protocol**
+
+| Item | Recorded setting or limitation |
+|---|---|
+| Included records | 182 unique jobs; 141 OK, 12 budget, three error and 26 not offered |
+| Circuit families | GHZ, brick4, brick12, QFT, teleportation, measurement-based wire and repetition code |
+| Structured size grid | 50 to 1,000 qubits at maximum bond 64; stress at 200, 500 and 1,000 |
+| Accuracy anchors | GHZ/brick4 at 12 and 16; TVD at 16; bond sweeps from 2 to 128 |
+| Ordinary timing | One warm call and three timed calls; median recorded |
+| Validation paths | Dense reference and TVD may use single-pass or extraction work; eight successful rows have no time |
+| Teleportation | 12 qubits: 500 shots; 24-qubit boundary: 500 shots and a common 90 s budget |
+| Other dynamic cases | 17-qubit wire: 200 shots; repetition code: four patterns with 200 shots per pattern |
+| Native MPS teleportation | 100 shots at 12; 1,000 at 30, 60 and 120 qubits |
+| Memory metric | Process RSS snapshot/high-water value in MiB, potentially including sampling and earlier chunk work |
+| Sampling | Separate sample-time field; excluded from primary MPS compute time |
+| Failure treatment | Budget, error, not-offered and absent-job outcomes remain distinct |
+
+*Note: MPS and statevector time totals are not pooled. Dynamic paths use a single timed replay per recorded condition.*
+
+**Table (mps_software) — MPS software versions and execution paths**
+
+| Framework | Version | Recorded path |
+|---|---|---|
+| SuperFermion | 0.1.15 | Native MPS state and dynamic measurement interfaces |
+| Qiskit Aer | 0.17.2 | matrix_product_state plus conditional execution |
+| PennyLane | 0.45.0 | default.tensor for MPS; default.qubit trajectories for MCM |
+| Cirq quimb | Cirq 1.6.1 / quimb 1.13.0 | MPS simulator; separate trajectory measurement path |
+| Qulacs | 0.6.14 | No offered MPS/feed-forward path in this adapter |
+
+*Note: The SuperFermion release label is updated to 0.1.15 for this preprint revision; the benchmark values are retained from the archived runs and were not remeasured for the release update. The probe and row identifiers remain in the source archive. The 40 completed SuperFermion rows include 38 with compiled identifier 99304153f6... and two refreshed 12-qubit teleportation/repetition-code rows with f576d0eb7a.... The timeout row lacks an identifier. The records do not establish a single-revision implementation effect.*
+
+### Two site gates and truncation (1 table)
+
+**Table (modes_internal_mps) — Report attributed internal MPS observations**
+
+| Condition | Reported legacy | Reported default | Evidence scope |
+|---|---|---|---|
+| Brick12, 200 qubits | 2.18 s; reported discard metric about 5.2e-4 | 1.04 s; accumulated discarded mass about 6.7e-14 | Source-comment timing; telemetry labels differ |
+| Brick12, 26 qubits; cap 64 | Reported error 4.2e-6 | Reported error 3.6e-14 | The report does not define the error metric here |
+| Same 26-qubit condition | Accumulated discarded mass 6.7e-2 | Accumulated discarded mass 1.1e-16 | Telemetry is not certified global fidelity |
+
+*Note: Values are attributed to internal measurements in native source comments summarized by the supplied methods report. The 200-qubit legacy discard metric has an unspecified aggregation, while the default is stated as an accumulated sum. No call-level record, complete recipe or native source revision is included. These observations do not enter framework rankings, measured RAM comparisons or the 24-condition suite statistics.*
+
+### Execution mode benchmark protocol (1 table)
+
+**Table (modes_protocol) — Recorded execution mode protocol**
+
+| Experiment | Recorded grid | Timing and output contract |
+|---|---|---|
+| Stabilizer | 6 conditions; 64 to 1,024 qubits | GHZ, depth-eight brickwork and random Clifford; 2,000 shots |
+| Large Clifford | 5 conditions; 1,024 and 4,096 qubits | Same Pauli-frame path in the larger regime; 2,000 shots |
+| Gradient | 10 conditions; 6 to 20 qubits | One layer at every measured size; two and four layers at 8 qubits; P = 2 n L |
+| Density matrix | 3 conditions; 8, 10 and 12 qubits | Noiseless depth-eight brickwork; separate native dense-core path |
+| Concurrency | SuperFermion: Rayon limit 4 | Competitors use package defaults; equal-concurrency comparison was not recorded |
+| Random seeds | Brickwork 11; random Clifford 7 | Gradient parameters use seed 7 with draws between 0.1 and 1.2 |
+| Sampling repetitions | Two reversed comparison windows | SF and Stim: 7 timed calls/window; Aer and PennyLane: 2 cold and 3 warm; Cirq: 1 |
+| Gradient repetitions | Two forward comparison cycles | 7 timed gradient calls/window; SF handle compile cost reported separately |
+| Density repetitions | Two SF windows, then two Aer windows | SF: 7 calls/window; Aer: 5 after an excluded warm call |
+| Timing boundaries | Native process startup excluded | Recorded cold contracts differ; SF warm counts versus Stim sample array |
+| Resource guards | 40 s first-call criterion | Cirq capped above 64 qubits; stabilizer Aer above 256; budget checked after the call |
+| RAM | No RSS or allocation measurements | No measured memory ranking is inferred from this suite |
+
+*Note: Timings are means of two window medians. Adjoint and density-matrix order are not the reversed tableau order. Quoted repeat counts describe the saved adapter; per-call values are absent.*
+
+### Overall computation and process memory (1 table)
+
+**Table (overall) — Reconstructed performance on 252 matched conditions per configuration**
+
+| Framework | Compute median (ms) | Compute total (min) | Median pair ratio (n) | RAM median (MiB) | Paired RAM saving (%) |
+|---|---|---|---|---|---|
+| SuperFermion | 29.70 | 27.36 | - | 150.60 | - |
+| Qulacs | 100.95 | 70.04 | 1.083 (238) | 149.55 | -0.37 |
+| Qiskit | 76.30 | 34.30 | 2.291 (242) | 184.70 | 16.56 |
+| PennyLane | 163.95 | 132.99 | 9.216 (242) | 268.95 | 44.15 |
+| Cirq f32 | 212.85 | 72.38 | 14.405 (242) | 228.60 | 34.63 |
+| Cirq f64 | 548.10 | 138.52 | 34.190 (242) | 229.35 | 34.68 |
+
+*Note: Pair ratios compare positive displayed times with SuperFermion; n is the retained pair count. Totals weight expensive conditions more strongly than paired medians. Memory is whole-worker peak RSS; negative saving means SuperFermion's peak is higher. No repeated-run confidence intervals are available.*
+
+### Variational learning and objective evaluation (1 table)
+
+**Table (native_cases) — Individual 20-qubit native-readout times for selected objectives**
+
+| Framework | QAOA FS breast cancer (s) | MaxCut ring (s) | VQE TFIM (s) | Gradient synthetic (s) |
+|---|---|---|---|---|
+| SuperFermion | 0.2604 | 0.1483 | 0.944 | 0.8974 |
+| Qulacs | 7.73 | 1.66 | 1.63 | 5.77 |
+| Qiskit | 1.52 | 0.3959 | 0.5401 | 2.36 |
+| PennyLane | 24.99 | 5.42 | 5.73 | 14.92 |
+| Cirq f32 | 1.19 | 0.1845 | 0.2972 | 0.8688 |
+| Cirq f64 | 59.33 | 5.84 | 12.92 | 29.84 |
+
+*Note: Every numeric entry is one reported primary compute observation. The objective, qubit count, output track, batch, and depth are matched across frameworks within each column. These examples are intentionally shown alongside cases where another lane is faster; they are not repeated-run speedup estimates.*
+
+### Memory scaling and task quality (1 table)
+
+**Table (quality) — Task-quality summaries attributed to the supplied overview**
+
+| Task | Metric | Reported median | Interpretation |
+|---|---|---|---|
+| QSVM | Accuracy | 0.7778 | Mixed datasets, maps, qubits, and lanes |
+| Classical classification | Accuracy | 0.9625 | Different estimator cohort; not a paired accuracy effect |
+| QKRR | R2 | 0.01056 | Limited predictive fit in the reported grid |
+| Classical regression | R2 | 0.4571 | Context control; hyperparameter parity not established |
+| VQC | Accuracy | 0.4167 | Five-update budget; no convergence claim |
+| VQR | R2 | 0.004448 | Five-update budget; no convergence claim |
+| QKPCA | Variance fraction | 0.1184 | Representation metric, not classification accuracy |
+| QAOA feature selection | Downstream accuracy | 0.9327 | Objective quality is separate from simulator speed |
+| MaxCut | Approximation ratio | 0.7285 | No general optimality guarantee |
+| VQE | Energy gap | 12.14 | Reference and units require original task metadata |
+| Gradient | Maximum error | 4.996e-10 | Median of reported per-job maximum gradient errors |
+
+*Note: These are attributed overview summaries of its original heterogeneous task cohort; row-level learning outcomes are unavailable for recalculation over the six included configurations. They do not rank predictive quality. The largest reported gradient error is 1.448e-7.*
+
+### Matrix product state coverage and scaling (1 table)
+
+**Table (mps_status) — Replacement MPS study outcomes by included configuration**
+
+| Framework | OK | Budget | Error | Not offered | Total |
+|---|---|---|---|---|---|
+| SuperFermion | 40 | 1 | 0 | 0 | 41 |
+| Qiskit Aer | 40 | 1 | 0 | 0 | 41 |
+| PennyLane | 31 | 5 | 0 | 0 | 36 |
+| Cirq quimb | 30 | 5 | 3 | 0 | 38 |
+| Qulacs | 0 | 0 | 0 | 26 | 26 |
+
+*Note: Outcomes are deduplicated by recorded job key. A budget outcome has no assigned runtime. Not offered describes the recorded adapter path, not general framework impossibility.*
+
+### Measurement feed forward and execution limits (1 table)
+
+**Table (mps_mcm_summary) — Completed dynamic circuit observations with matched case specifications**
+
+| Case | Framework | Shots | Wall (s) | RAM (MiB) | Correct |
+|---|---|---|---|---|---|
+| TP 12 | SuperFermion | 500 | 0.067684 | 45.5 | Yes |
+| TP 12 | Qiskit Aer | 500 | 0.789876 | 76.7 | Yes |
+| TP 12 | PennyLane | 500 | 6.304416 | 334.2 | Yes |
+| TP 12 | Cirq quimb | 500 | 3.088467 | 202.5 | Yes |
+| Rep 12 | SuperFermion | 200 x 4 | 0.076387 | 47.5 | Yes |
+| Rep 12 | Qiskit Aer | 200 x 4 | 0.894468 | 77.5 | Yes |
+| Rep 12 | PennyLane | 200 x 4 | 6.537493 | 334.5 | Yes |
+| Rep 12 | Cirq quimb | 200 x 4 | 5.352905 | 202.7 | Yes |
+| Wire 17 | SuperFermion | 200 | 2.014718 | 52.8 | Yes |
+| Wire 17 | Qiskit Aer | 200 | 12.330271 | 84.6 | Yes |
+| Wire 17 | PennyLane | 200 | 69.025288 | 342.5 | Yes |
+| Wire 17 | Cirq quimb | 200 | 4.104582 | 208.6 | Yes |
+| MPS TP 120 | SuperFermion | 1000 | 0.317963 | 46.0 | Yes |
+| MPS TP 120 | Qiskit Aer | 1000 | 1.015076 | 79.6 | Yes |
+
+*Note: TP is ordinary teleportation; Wire is the measurement-based circuit; MPS TP is native MPS teleportation. Rep tests four error patterns at 200 shots each. Compare within a case. Correct means all tested target-bit outcomes satisfy the specified invariant, not validation for arbitrary inputs.*
+
+### Stabilizer and large Clifford sampling (1 table)
+
+**Table (modes_outcomes) — Sampling outcomes and available comparator standings**
+
+| Regime | Conditions | Faster cold | Faster warm | Complete field |
+|---|---|---|---|---|
+| Stabilizer | 6 | 2 / 6 | 5 / 6 | 1 / 6 |
+| Large Clifford | 5 | 2 / 5 | 5 / 5 | 0 / 5 |
+| Combined | 11 | 4 / 11 | 10 / 11 | 1 / 11 |
+
+*Note: Faster means below every external comparator with a recorded timing in that condition. Complete field requires all four external sampling comparators to have timings. Missing capped or budget jobs do not count as wins or losses. The selected sampling observations comprise 39 OK, 15 capped and one budget outcome.*
+
+### Density matrix evaluation and numerical checks (1 table)
+
+**Table (modes_accuracy) — Scope of the recorded numerical checks**
+
+| Check | Saved observation | Interpretation |
+|---|---|---|
+| Gradient parity | 10 / 10 conditions; maximum 2.8172e-15 | Component-wise SF/Qulacs agreement in the retained second window |
+| Finite differences | 8 qubits, 1 layer; 3.9037e-11 | One independent gradient anchor, not all sizes |
+| GHZ sample support | All recorded GHZ checks pass | Samples lie in the two GHZ branches; frequencies and all output states are not certified |
+| SF density diagonal | Flags pass at 8, 10 and 12 qubits | Native worker probability check; thresholds differ from the Aer recipe |
+| Aer density diagonal | Pass at 8 and 12; false at 10 | Eight-decimal array comparison; missing unrounded error prevents diagnosis |
+| Density trace and purity | All saved deviations below 4.4e-14 | Reported scalar checks; complete coherences and Hermiticity are not independently verified |
+
+*Note: These values are audit scopes, not repeated-run confidence bounds. Full brickwork/random sampling distributions and complete density matrices are not supplied for independent reconstruction.*
+
+### Quantum support vector machine (5 tables)
+
+**Table (qsvm_4) — Quantum support vector machine at 4 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 2.9 ms | 147.9 | 4.4 ms | 148.2 |
+| Qulacs | 2.5 ms | 147.3 | 3.3 ms | 147.0 |
+| Qiskit | 17.5 ms | 181.3 | 20.3 ms | 181.8 |
+| PennyLane | 24.8 ms | 265.0 | 45.6 ms | 264.7 |
+| Cirq f32 | 69.1 ms | 225.0 | 140 ms | 225.6 |
+| Cirq f64 | 133 ms | 225.0 | 226 ms | 225.3 |
+| Analytical angle | 5.6 ms | 147.2 | N/A | N/A |
+
+*Note: Each framework uses the same 5 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qsvm_8) — Quantum support vector machine at 8 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 10.3 ms | 148.2 | 14.3 ms | 148.7 |
+| Qulacs | 9.1 ms | 147.5 | 11.2 ms | 147.6 |
+| Qiskit | 28.1 ms | 183.0 | 33.2 ms | 184.0 |
+| PennyLane | 52 ms | 265.6 | 99.7 ms | 267.1 |
+| Cirq f32 | 123 ms | 226.4 | 283 ms | 226.5 |
+| Cirq f64 | 261 ms | 228.9 | 507 ms | 230.3 |
+| Analytical angle | 11 ms | 152.7 | N/A | N/A |
+
+*Note: Each framework uses the same 5 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qsvm_12) — Quantum support vector machine at 12 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 108 ms | 169.6 | 122 ms | 170.9 |
+| Qulacs | 111 ms | 169.2 | 7.17 s | 171.1 |
+| Qiskit | 138 ms | 215.3 | 159 ms | 216.8 |
+| PennyLane | 197 ms | 299.3 | 314 ms | 301.7 |
+| Cirq f32 | 282 ms | 273.0 | 539 ms | 282.8 |
+| Cirq f64 | 542 ms | 320.0 | 998 ms | 335.1 |
+| Analytical angle | 15.8 ms | 157.4 | N/A | N/A |
+
+*Note: Each framework uses the same 5 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qsvm_16) — Quantum support vector machine at 16 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 1.88 s | 517.3 | 2.22 s | 520.2 |
+| Qulacs | 1.83 s | 515.3 | 2.02 s | 516.1 |
+| Qiskit | 1.91 s | 564.9 | 2.06 s | 567.2 |
+| PennyLane | 2.37 s | 650.2 | 3.21 s | 652.3 |
+| Cirq f32 | 2.28 s | 707.9 | 2.88 s | 742.1 |
+| Cirq f64 | 3.05 s | 1,044.5 | 4.25 s | 1,105.9 |
+| Analytical angle | 20.6 ms | 162.7 | N/A | N/A |
+
+*Note: Each framework uses the same 5 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qsvm_20) — Quantum support vector machine at 20 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 75.19 s | 932.4 | 75.13 s | 920.7 |
+| Qulacs | 82.47 s | 929.5 | 86.45 s | 930.0 |
+| Qiskit | 90.37 s | 943.6 | 95.27 s | 945.6 |
+| PennyLane | 224.8 s | 1,044.5 | 404.1 s | 1,044.5 |
+| Cirq f32 | 160.4 s | 1,187.8 | 139.5 s | 1,249.3 |
+| Cirq f64 | 307.5 s | 1,884.2 | 367.9 s | 2,017.3 |
+| Analytical angle | 22.2 ms | 337.9 | N/A | N/A |
+
+*Note: Each framework uses the same 5 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### Quantum kernel ridge regression (5 tables)
+
+**Table (qkrr_4) — Quantum kernel ridge regression at 4 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 3.4 ms | 150.8 | 4.75 ms | 151.0 |
+| Qulacs | 3.35 ms | 149.8 | 3.85 ms | 150.1 |
+| Qiskit | 24.7 ms | 183.2 | 18.1 ms | 183.1 |
+| PennyLane | 31.1 ms | 268.1 | 54.8 ms | 268.6 |
+| Cirq f32 | 80.7 ms | 228.2 | 169 ms | 229.2 |
+| Cirq f64 | 156 ms | 228.8 | 271 ms | 229.3 |
+| Analytical angle | 8 ms | 148.8 | N/A | N/A |
+
+*Note: Each framework uses the same 2 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qkrr_8) — Quantum kernel ridge regression at 8 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 13 ms | 151.2 | 17.3 ms | 151.2 |
+| Qulacs | 12.2 ms | 150.1 | 13.8 ms | 150.2 |
+| Qiskit | 37 ms | 185.2 | 37.7 ms | 185.6 |
+| PennyLane | 60.2 ms | 268.6 | 116 ms | 271.1 |
+| Cirq f32 | 142 ms | 228.6 | 325 ms | 229.9 |
+| Cirq f64 | 304 ms | 230.9 | 594 ms | 232.8 |
+| Analytical angle | 15.9 ms | 155.9 | N/A | N/A |
+
+*Note: Each framework uses the same 2 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qkrr_12) — Quantum kernel ridge regression at 12 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 144 ms | 174.7 | 161 ms | 175.3 |
+| Qulacs | 159 ms | 173.6 | 8.555 s | 175.5 |
+| Qiskit | 190 ms | 219.4 | 216 ms | 220.1 |
+| PennyLane | 245 ms | 305.6 | 374 ms | 307.9 |
+| Cirq f32 | 351 ms | 280.6 | 636 ms | 292.6 |
+| Cirq f64 | 645 ms | 341.1 | 1.16 s | 353.4 |
+| Analytical angle | 22.5 ms | 163.2 | N/A | N/A |
+
+*Note: Each framework uses the same 2 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qkrr_16) — Quantum kernel ridge regression at 16 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 2.505 s | 578.7 | 2.79 s | 582.1 |
+| Qulacs | 2.48 s | 577.2 | 2.67 s | 578.0 |
+| Qiskit | 2.54 s | 852.8 | 2.69 s | 853.0 |
+| PennyLane | 3.07 s | 938.6 | 4.065 s | 942.4 |
+| Cirq f32 | 3.055 s | 1,126.4 | 3.805 s | 1,239.0 |
+| Cirq f64 | 3.9 s | 2,073.6 | 5.18 s | 2,252.8 |
+| Analytical angle | 26.3 ms | 170.1 | N/A | N/A |
+
+*Note: Each framework uses the same 2 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qkrr_20) — Quantum kernel ridge regression at 20 qubits**
+
+| Framework | Angle time | Angle RAM (MiB) | ZZ time | ZZ RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 87.78 s | 935.9 | 110 s | 921.7 |
+| Qulacs | 96.71 s | 930.8 | 131.2 s | 931.0 |
+| Qiskit | 114.3 s | 944.7 | 135.9 s | 945.7 |
+| PennyLane | 251.6 s | 1,044.5 | 708.2 s | 1,044.5 |
+| Cirq f32 | 179.9 s | 1,187.8 | 429.6 s | 1,249.3 |
+| Cirq f64 | 344.8 s | 1,935.4 | 582.1 s | 2,017.3 |
+| Analytical angle | 29.5 ms | 337.9 | N/A | N/A |
+
+*Note: Each framework uses the same 2 datasets. Map columns are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### Quantum kernel principal component analysis (5 tables)
+
+**Table (qkpca_4) — Quantum kernel principal component analysis at 4 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 4.3 ms | 6.7 ms | 150.6 | 158.1 |
+| Qulacs | 3.3 ms | 5.7 ms | 149.6 | 156.9 |
+| Qiskit | 17.7 ms | 35.7 ms | 181.2 | 192.4 |
+| PennyLane | 45.6 ms | 70.6 ms | 266.9 | 275.2 |
+| Cirq f32 | 140 ms | 224 ms | 228.3 | 236.6 |
+| Cirq f64 | 230 ms | 364 ms | 228.2 | 237.1 |
+
+*Note: Each framework uses the same 5 datasets. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qkpca_8) — Quantum kernel principal component analysis at 8 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 14.4 ms | 27.5 ms | 151.0 | 158.8 |
+| Qulacs | 11 ms | 22.9 ms | 150.1 | 157.6 |
+| Qiskit | 31.5 ms | 52.9 ms | 183.6 | 193.6 |
+| PennyLane | 97.1 ms | 156 ms | 269.1 | 279.0 |
+| Cirq f32 | 272 ms | 442 ms | 229.3 | 240.4 |
+| Cirq f64 | 492 ms | 804 ms | 229.7 | 240.0 |
+
+*Note: Each framework uses the same 5 datasets. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qkpca_12) — Quantum kernel principal component analysis at 12 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 124 ms | 289 ms | 170.7 | 186.5 |
+| Qulacs | 7.34 s | 11.74 s | 171.0 | 186.8 |
+| Qiskit | 157 ms | 314 ms | 216.1 | 239.1 |
+| PennyLane | 305 ms | 583 ms | 301.9 | 324.0 |
+| Cirq f32 | 527 ms | 920 ms | 282.2 | 318.0 |
+| Cirq f64 | 1 s | 1.65 s | 334.4 | 399.9 |
+
+*Note: Each framework uses the same 5 datasets. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qkpca_16) — Quantum kernel principal component analysis at 16 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 2.14 s | 4.33 s | 520.1 | 557.6 |
+| Qulacs | 1.93 s | 3.59 s | 516.4 | 556.9 |
+| Qiskit | 2.01 s | 3.79 s | 566.6 | 819.5 |
+| PennyLane | 3.28 s | 9.72 s | 652.3 | 909.2 |
+| Cirq f32 | 2.83 s | 6.96 s | 742.6 | 1,187.8 |
+| Cirq f64 | 4.22 s | 12.59 s | 1,105.9 | 2,150.4 |
+
+*Note: Each framework uses the same 5 datasets. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qkpca_20) — Quantum kernel principal component analysis at 20 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 74.71 s | 185.9 s | 920.1 | 922.0 |
+| Qulacs | 88.95 s | 273.3 s | 930.8 | 932.6 |
+| Qiskit | 95.14 s | 247.1 s | 944.9 | 947.1 |
+| PennyLane | 406.9 s | 1117 s | 1,044.5 | 1,044.5 |
+| Cirq f32 | 136.1 s | 461.1 s | 1,249.3 | 1,249.3 |
+| Cirq f64 | 363.8 s | 949.4 s | 2,017.3 | 2,017.3 |
+
+*Note: Each framework uses the same 5 datasets. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### Variational quantum classification (3 tables)
+
+**Table (vqc_4) — Variational quantum classification at 4 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 65.5 ms | 145.0 | 66.8 ms | 144.6 |
+| Qulacs | 59.2 ms | 144.0 | 8.73 s | 146.5 |
+| Qiskit | 280 ms | 183.6 | 242 ms | 183.3 |
+| PennyLane | 898 ms | 262.7 | 973 ms | 263.4 |
+| Cirq f32 | 2.66 s | 223.8 | 2.5 s | 222.6 |
+| Cirq f64 | 4.91 s | 222.9 | 6.14 s | 221.6 |
+
+*Note: Each framework uses the same 5 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (vqc_8) — Variational quantum classification at 8 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 174 ms | 148.1 | 145 ms | 145.6 |
+| Qulacs | 138 ms | 146.9 | 9.59 s | 147.0 |
+| Qiskit | 383 ms | 186.9 | 310 ms | 185.0 |
+| PennyLane | 2.31 s | 269.9 | 1.89 s | 265.1 |
+| Cirq f32 | 6.17 s | 229.6 | 4.62 s | 223.6 |
+| Cirq f64 | 12.64 s | 231.6 | 12.56 s | 223.5 |
+
+*Note: Each framework uses the same 5 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (vqc_12) — Variational quantum classification at 12 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 553 ms | 182.5 | 416 ms | 147.0 |
+| Qulacs | 138.5 s | 183.0 | 151.2 s | 147.3 |
+| Qiskit | 904 ms | 216.2 | 670 ms | 185.7 |
+| PennyLane | 5.05 s | 306.8 | 5.15 s | 267.0 |
+| Cirq f32 | 10 s | 281.9 | 11.97 s | 226.1 |
+| Cirq f64 | 23.83 s | 327.6 | 29.3 s | 224.7 |
+
+*Note: Each framework uses the same 5 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### Variational quantum regression (3 tables)
+
+**Table (vqr_4) — Variational quantum regression at 4 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 59.8 ms | 145.2 | 61 ms | 144.8 |
+| Qulacs | 53.7 ms | 143.8 | 8.165 s | 146.6 |
+| Qiskit | 248 ms | 185.0 | 228 ms | 185.8 |
+| PennyLane | 843 ms | 263.1 | 921 ms | 262.7 |
+| Cirq f32 | 2.43 s | 223.7 | 2.31 s | 222.3 |
+| Cirq f64 | 4.535 s | 223.2 | 5.72 s | 222.0 |
+
+*Note: Each framework uses the same 2 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (vqr_8) — Variational quantum regression at 8 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 155 ms | 149.2 | 141 ms | 145.9 |
+| Qulacs | 115 ms | 146.9 | 8.22 s | 146.6 |
+| Qiskit | 335 ms | 188.6 | 268 ms | 186.8 |
+| PennyLane | 1.735 s | 271.0 | 1.775 s | 265.1 |
+| Cirq f32 | 4.665 s | 230.2 | 4.31 s | 224.1 |
+| Cirq f64 | 9.53 s | 233.3 | 11.1 s | 223.4 |
+
+*Note: Each framework uses the same 2 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (vqr_12) — Variational quantum regression at 12 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 569 ms | 188.9 | 421 ms | 146.8 |
+| Qulacs | 130.1 s | 189.0 | 141 s | 147.2 |
+| Qiskit | 771 ms | 223.6 | 558 ms | 187.2 |
+| PennyLane | 4.55 s | 313.0 | 4.735 s | 268.2 |
+| Cirq f32 | 9.185 s | 291.2 | 10.84 s | 226.9 |
+| Cirq f64 | 21.1 s | 344.0 | 25.31 s | 225.8 |
+
+*Note: Each framework uses the same 2 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### QAOA feature selection (5 tables)
+
+**Table (qaoa_fs_4) — QAOA feature selection at 4 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 0.75 ms | 145.0 | 0.6 ms | 144.9 |
+| Qulacs | 0.55 ms | 144.0 | 33.5 ms | 145.6 |
+| Qiskit | 12.2 ms | 171.6 | 11.7 ms | 171.6 |
+| PennyLane | 24.7 ms | 261.2 | 24.8 ms | 261.3 |
+| Cirq f32 | 21.1 ms | 220.9 | 23.5 ms | 221.1 |
+| Cirq f64 | 33.5 ms | 220.2 | 42.3 ms | 220.6 |
+
+*Note: Each framework uses the same 2 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qaoa_fs_8) — QAOA feature selection at 8 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 1.65 ms | 144.8 | 1.2 ms | 145.0 |
+| Qulacs | 1.25 ms | 143.8 | 35.7 ms | 145.4 |
+| Qiskit | 27 ms | 171.4 | 27.2 ms | 171.8 |
+| PennyLane | 65.5 ms | 261.1 | 73.6 ms | 261.4 |
+| Cirq f32 | 51 ms | 221.2 | 67.2 ms | 221.0 |
+| Cirq f64 | 89.9 ms | 220.2 | 119 ms | 220.4 |
+
+*Note: Each framework uses the same 2 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qaoa_fs_12) — QAOA feature selection at 12 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 7.2 ms | 145.8 | 7 ms | 145.6 |
+| Qulacs | 2.155 s | 146.0 | 2.155 s | 146.4 |
+| Qiskit | 87.2 ms | 172.6 | 93.2 ms | 172.7 |
+| PennyLane | 155 ms | 261.6 | 155 ms | 262.0 |
+| Cirq f32 | 108 ms | 222.2 | 158 ms | 223.2 |
+| Cirq f64 | 193 ms | 221.9 | 267 ms | 221.3 |
+
+*Note: Each framework uses the same 2 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qaoa_fs_16) — QAOA feature selection at 16 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 39.2 ms | 155.0 | 33.8 ms | 156.0 |
+| Qulacs | 41.1 ms | 154.9 | 295 ms | 154.9 |
+| Qiskit | 153 ms | 181.2 | 186 ms | 181.8 |
+| PennyLane | 432 ms | 270.9 | 672 ms | 271.7 |
+| Cirq f32 | 204 ms | 230.6 | 257 ms | 230.9 |
+| Cirq f64 | 496 ms | 229.7 | 2.035 s | 229.7 |
+
+*Note: Each framework uses the same 2 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (qaoa_fs_20) — QAOA feature selection at 20 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 359 ms | 254.1 | 255 ms | 262.7 |
+| Qulacs | 657 ms | 281.0 | 5.775 s | 281.1 |
+| Qiskit | 656 ms | 277.8 | 1.145 s | 278.4 |
+| PennyLane | 6.71 s | 397.8 | 18.15 s | 398.1 |
+| Cirq f32 | 1.045 s | 327.2 | 849 ms | 327.6 |
+| Cirq f64 | 11.05 s | 327.7 | 37.98 s | 328.4 |
+
+*Note: Each framework uses the same 2 datasets. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### QAOA MaxCut (5 tables)
+
+**Table (maxcut_4) — QAOA MaxCut at 4 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 0.6 ms | 144.1 | 0.55 ms | 144.2 |
+| Qulacs | 0.55 ms | 143.2 | 33.5 ms | 144.9 |
+| Qiskit | 11.1 ms | 170.6 | 10.5 ms | 170.8 |
+| PennyLane | 21.2 ms | 260.5 | 23.5 ms | 260.5 |
+| Cirq f32 | 15.8 ms | 220.3 | 17.4 ms | 220.2 |
+| Cirq f64 | 30.9 ms | 219.2 | 30.8 ms | 219.6 |
+
+*Note: Each framework uses the same 2 graph families. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (maxcut_8) — QAOA MaxCut at 8 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 0.95 ms | 144.2 | 0.8 ms | 144.3 |
+| Qulacs | 0.9 ms | 143.2 | 34.7 ms | 145.1 |
+| Qiskit | 17.8 ms | 171.1 | 19.4 ms | 170.9 |
+| PennyLane | 40.8 ms | 260.8 | 41.7 ms | 260.6 |
+| Cirq f32 | 35 ms | 220.7 | 38.8 ms | 220.4 |
+| Cirq f64 | 57.2 ms | 219.8 | 73.6 ms | 219.7 |
+
+*Note: Each framework uses the same 2 graph families. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (maxcut_12) — QAOA MaxCut at 12 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 4.75 ms | 144.9 | 4 ms | 144.9 |
+| Qulacs | 843 ms | 146.1 | 913 ms | 145.8 |
+| Qiskit | 42.6 ms | 171.8 | 46 ms | 171.4 |
+| PennyLane | 85.3 ms | 261.2 | 80.5 ms | 261.1 |
+| Cirq f32 | 56.9 ms | 221.1 | 82.9 ms | 222.2 |
+| Cirq f64 | 108 ms | 221.0 | 144 ms | 221.1 |
+
+*Note: Each framework uses the same 2 graph families. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (maxcut_16) — QAOA MaxCut at 16 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 38.9 ms | 156.9 | 31.6 ms | 157.9 |
+| Qulacs | 28.9 ms | 155.8 | 170 ms | 155.8 |
+| Qiskit | 108 ms | 181.9 | 116 ms | 181.7 |
+| PennyLane | 265 ms | 271.9 | 403 ms | 272.0 |
+| Cirq f32 | 126 ms | 231.2 | 145 ms | 231.1 |
+| Cirq f64 | 378 ms | 230.9 | 974 ms | 230.2 |
+
+*Note: Each framework uses the same 2 graph families. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (maxcut_20) — QAOA MaxCut at 20 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 316 ms | 256.1 | 201 ms | 264.9 |
+| Qulacs | 484 ms | 284.5 | 3.38 s | 284.8 |
+| Qiskit | 538 ms | 281.1 | 788 ms | 281.4 |
+| PennyLane | 4.635 s | 400.9 | 11.09 s | 401.3 |
+| Cirq f32 | 913 ms | 330.1 | 473 ms | 331.0 |
+| Cirq f64 | 8.44 s | 331.1 | 21.91 s | 331.4 |
+
+*Note: Each framework uses the same 2 graph families. Output tracks are summarized separately. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### Variational quantum eigensolver (5 tables)
+
+**Table (vqe_4) — Variational quantum eigensolver at 4 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 1.8 ms | 144.0 | 0.9 ms | 144.5 |
+| Qulacs | 1.8 ms | 143.5 | 34.9 ms | 145.3 |
+| Qiskit | 13.6 ms | 170.8 | 11.5 ms | 170.8 |
+| PennyLane | 27.7 ms | 260.6 | 30.6 ms | 260.8 |
+| Cirq f32 | 24 ms | 220.7 | 26 ms | 221.2 |
+| Cirq f64 | 33.2 ms | 220.4 | 42.2 ms | 220.1 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (vqe_8) — Variational quantum eigensolver at 8 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 3.7 ms | 144.1 | 1 ms | 144.4 |
+| Qulacs | 4.2 ms | 143.7 | 33.5 ms | 145.7 |
+| Qiskit | 22.7 ms | 171.6 | 19.3 ms | 171.3 |
+| PennyLane | 47.4 ms | 260.7 | 45.5 ms | 261.3 |
+| Cirq f32 | 41.6 ms | 220.7 | 44.7 ms | 221.0 |
+| Cirq f64 | 68.4 ms | 220.2 | 76.7 ms | 220.3 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (vqe_12) — Variational quantum eigensolver at 12 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 16.4 ms | 144.7 | 3.7 ms | 145.1 |
+| Qulacs | 823 ms | 146.0 | 805 ms | 145.8 |
+| Qiskit | 51.9 ms | 171.5 | 38.9 ms | 171.3 |
+| PennyLane | 87.8 ms | 260.5 | 61.3 ms | 261.4 |
+| Cirq f32 | 72.8 ms | 221.5 | 76.1 ms | 222.0 |
+| Cirq f64 | 130 ms | 220.7 | 125 ms | 220.6 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (vqe_16) — Variational quantum eigensolver at 16 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 447 ms | 154.5 | 62.2 ms | 154.7 |
+| Qulacs | 435 ms | 154.3 | 83.4 ms | 153.7 |
+| Qiskit | 531 ms | 180.6 | 101 ms | 179.9 |
+| PennyLane | 635 ms | 270.8 | 265 ms | 270.5 |
+| Cirq f32 | 526 ms | 229.8 | 103 ms | 230.2 |
+| Cirq f64 | 699 ms | 229.7 | 712 ms | 230.0 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (vqe_20) — Variational quantum eigensolver at 20 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 15.47 s | 260.6 | 944 ms | 259.8 |
+| Qulacs | 15.89 s | 273.2 | 1.63 s | 272.8 |
+| Qiskit | 15.9 s | 269.1 | 540 ms | 268.8 |
+| PennyLane | 18.49 s | 389.6 | 5.73 s | 389.5 |
+| Cirq f32 | 16.04 s | 318.6 | 297 ms | 318.4 |
+| Cirq f64 | 20.92 s | 318.7 | 12.92 s | 334.4 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### Gradient evaluation (5 tables)
+
+**Table (gradient_4) — Gradient evaluation at 4 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 0.1 ms | 144.3 | 0.3 ms | 144.0 |
+| Qulacs | 0.1 ms | 143.2 | 32.6 ms | 145.4 |
+| Qiskit | 1.6 ms | 172.8 | 1.9 ms | 173.0 |
+| PennyLane | 3.7 ms | 260.9 | 4.2 ms | 260.3 |
+| Cirq f32 | 10 ms | 220.5 | 9.7 ms | 220.6 |
+| Cirq f64 | 19.1 ms | 220.2 | 24.6 ms | 220.0 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (gradient_8) — Gradient evaluation at 8 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 0.8 ms | 144.8 | 1.1 ms | 143.7 |
+| Qulacs | 0.5 ms | 142.7 | 67.7 ms | 145.9 |
+| Qiskit | 2.8 ms | 173.6 | 2.8 ms | 174.1 |
+| PennyLane | 12.5 ms | 260.8 | 14.9 ms | 260.7 |
+| Cirq f32 | 34.6 ms | 221.7 | 34.2 ms | 220.5 |
+| Cirq f64 | 75.3 ms | 221.1 | 84.3 ms | 220.6 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (gradient_12) — Gradient evaluation at 12 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 5.3 ms | 150.5 | 4.1 ms | 144.6 |
+| Qulacs | 1.16 s | 151.6 | 1.31 s | 145.7 |
+| Qiskit | 9.3 ms | 180.4 | 6.2 ms | 175.8 |
+| PennyLane | 43.9 ms | 270.1 | 35.6 ms | 262.1 |
+| Cirq f32 | 74.6 ms | 232.1 | 90.6 ms | 222.8 |
+| Cirq f64 | 167 ms | 236.8 | 212 ms | 221.2 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (gradient_16) — Gradient evaluation at 16 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 126 ms | 275.8 | 98.1 ms | 153.6 |
+| Qulacs | 86.4 ms | 274.5 | 193 ms | 152.3 |
+| Qiskit | 113 ms | 304.2 | 80.8 ms | 194.6 |
+| PennyLane | 366 ms | 392.5 | 434 ms | 271.0 |
+| Cirq f32 | 284 ms | 416.4 | 182 ms | 229.8 |
+| Cirq f64 | 770 ms | 554.1 | 1.56 s | 229.6 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (gradient_20) — Gradient evaluation at 20 qubits**
+
+| Framework | Statevector time | Statevector RAM (MiB) | Native readout time | Native readout RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 1.43 s | 684.4 | 897 ms | 245.1 |
+| Qulacs | 1.75 s | 680.3 | 5.77 s | 240.9 |
+| Qiskit | 2.53 s | 694.9 | 2.36 s | 431.0 |
+| PennyLane | 9.98 s | 797.5 | 14.92 s | 356.6 |
+| Cirq f32 | 3.31 s | 999.3 | 869 ms | 302.5 |
+| Cirq f64 | 13.87 s | 1,577.0 | 29.84 s | 327.3 |
+
+*Note: Each framework uses the same 1 condition per output track. Output tracks are summarized separately. The single-condition columns are individual measurements, not repeated-run medians. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### Circuit simulation and sweeps (5 tables)
+
+**Table (circuit_4) — Circuit simulation at 4 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | &lt;0.05 ms | 0.2 ms | 144.0 | 144.6 |
+| Qulacs | &lt;0.05 ms | 0.1 ms | 143.1 | 143.5 |
+| Qiskit | 0.9 ms | 1.2 ms | 171.5 | 172.2 |
+| PennyLane | 1.4 ms | 3 ms | 260.4 | 261.0 |
+| Cirq f32 | 2 ms | 4.7 ms | 220.2 | 220.7 |
+| Cirq f64 | 2.8 ms | 7 ms | 219.6 | 220.3 |
+
+*Note: Each framework uses the same 11 matched circuit and sweep configurations. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (circuit_8) — Circuit simulation at 8 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 0.1 ms | 0.2 ms | 144.0 | 144.8 |
+| Qulacs | 0.1 ms | 0.1 ms | 143.3 | 143.6 |
+| Qiskit | 1.4 ms | 2.2 ms | 171.4 | 172.3 |
+| PennyLane | 2.5 ms | 6.7 ms | 260.6 | 260.8 |
+| Cirq f32 | 3.3 ms | 8 ms | 220.4 | 221.0 |
+| Cirq f64 | 7.4 ms | 15.1 ms | 219.7 | 220.2 |
+
+*Note: Each framework uses the same 11 matched circuit and sweep configurations. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (circuit_12) — Circuit simulation at 12 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 0.3 ms | 0.9 ms | 144.7 | 145.3 |
+| Qulacs | 24.7 ms | 311 ms | 145.2 | 145.9 |
+| Qiskit | 1.6 ms | 6.4 ms | 172.4 | 173.2 |
+| PennyLane | 3.6 ms | 17.7 ms | 261.1 | 262.0 |
+| Cirq f32 | 5.4 ms | 12 ms | 221.8 | 223.1 |
+| Cirq f64 | 13.7 ms | 23.7 ms | 221.5 | 224.6 |
+
+*Note: Each framework uses the same 11 matched circuit and sweep configurations. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (circuit_16) — Circuit simulation at 16 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 9.2 ms | 16.3 ms | 155.4 | 158.4 |
+| Qulacs | 5.2 ms | 10.1 ms | 152.7 | 154.8 |
+| Qiskit | 10.8 ms | 15.6 ms | 182.1 | 189.2 |
+| PennyLane | 22.6 ms | 48.3 ms | 270.2 | 278.1 |
+| Cirq f32 | 21.5 ms | 33.1 ms | 231.3 | 246.7 |
+| Cirq f64 | 40.6 ms | 75.7 ms | 229.9 | 269.8 |
+
+*Note: Each framework uses the same 11 matched circuit and sweep configurations. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+**Table (circuit_20) — Circuit simulation at 20 qubits**
+
+| Framework | Median time | Maximum time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| SuperFermion | 92.2 ms | 119 ms | 263.7 | 309.9 |
+| Qulacs | 83.7 ms | 138 ms | 256.7 | 304.7 |
+| Qiskit | 77.8 ms | 180 ms | 272.0 | 428.8 |
+| PennyLane | 518 ms | 1.28 s | 374.2 | 533.1 |
+| Cirq f32 | 83.3 ms | 326 ms | 321.0 | 606.1 |
+| Cirq f64 | 619 ms | 1.03 s | 320.9 | 926.9 |
+
+*Note: Each framework uses the same 11 matched circuit and sweep configurations. Medians describe the listed workload cohort, not repeated-run uncertainty. RAM is whole-worker peak RSS. N/A means this evaluation is not defined for that lane.*
+
+### Classical controls by nominal qubit setting (5 tables)
+
+**Table (classical_4) — Classical controls for the nominal 4 qubit setting**
+
+| Estimator | Datasets | Median time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| rbf svc | 5 | 3.6 ms | 142.3 | 142.6 |
+| logistic | 5 | 4.1 ms | 142.4 | 143.2 |
+| rf classifier | 5 | 60.3 ms | 143.0 | 143.8 |
+| ridge | 2 | 1.5 ms | 141.9 | 141.9 |
+| rbf krr | 2 | 7.2 ms | 146.5 | 147.0 |
+| rf regressor | 2 | 94.8 ms | 145.0 | 145.0 |
+
+*Note: Classical controls execute no quantum circuit. The nominal qubit setting indexes the paired study configuration; it is not a physical qubit allocation. Classification estimators cover five datasets and regression estimators cover two.*
+
+**Table (classical_8) — Classical controls for the nominal 8 qubit setting**
+
+| Estimator | Datasets | Median time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| rbf svc | 5 | 4.1 ms | 142.3 | 142.8 |
+| logistic | 5 | 4.2 ms | 142.5 | 143.1 |
+| rf classifier | 5 | 60.9 ms | 143.0 | 144.3 |
+| ridge | 2 | 1.8 ms | 142.2 | 142.4 |
+| rbf krr | 2 | 7.05 ms | 146.6 | 147.1 |
+| rf regressor | 2 | 138 ms | 144.8 | 144.8 |
+
+*Note: Classical controls execute no quantum circuit. The nominal qubit setting indexes the paired study configuration; it is not a physical qubit allocation. Classification estimators cover five datasets and regression estimators cover two.*
+
+**Table (classical_12) — Classical controls for the nominal 12 qubit setting**
+
+| Estimator | Datasets | Median time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| rbf svc | 5 | 4.6 ms | 142.8 | 142.9 |
+| logistic | 5 | 3.9 ms | 142.8 | 142.9 |
+| rf classifier | 5 | 65.3 ms | 143.2 | 143.8 |
+| ridge | 2 | 1.7 ms | 142.4 | 142.4 |
+| rbf krr | 2 | 7.55 ms | 146.4 | 146.6 |
+| rf regressor | 2 | 163 ms | 145.1 | 145.2 |
+
+*Note: Classical controls execute no quantum circuit. The nominal qubit setting indexes the paired study configuration; it is not a physical qubit allocation. Classification estimators cover five datasets and regression estimators cover two.*
+
+**Table (classical_16) — Classical controls for the nominal 16 qubit setting**
+
+| Estimator | Datasets | Median time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| rbf svc | 5 | 4.9 ms | 142.5 | 143.3 |
+| logistic | 5 | 3.9 ms | 142.8 | 143.2 |
+| rf classifier | 5 | 65.4 ms | 143.1 | 143.8 |
+| ridge | 2 | 1.6 ms | 141.9 | 142.0 |
+| rbf krr | 2 | 7.35 ms | 146.8 | 147.6 |
+| rf regressor | 2 | 161 ms | 145.1 | 145.2 |
+
+*Note: Classical controls execute no quantum circuit. The nominal qubit setting indexes the paired study configuration; it is not a physical qubit allocation. Classification estimators cover five datasets and regression estimators cover two.*
+
+**Table (classical_20) — Classical controls for the nominal 20 qubit setting**
+
+| Estimator | Datasets | Median time | Median RAM (MiB) | Maximum RAM (MiB) |
+|---|---|---|---|---|
+| rbf svc | 5 | 4.8 ms | 142.6 | 143.0 |
+| logistic | 5 | 4.5 ms | 142.8 | 143.0 |
+| rf classifier | 5 | 83.4 ms | 143.4 | 144.0 |
+| ridge | 2 | 1.55 ms | 142.1 | 142.2 |
+| rbf krr | 2 | 6.6 ms | 146.8 | 147.0 |
+| rf regressor | 2 | 154 ms | 145.2 | 145.3 |
+
+*Note: Classical controls execute no quantum circuit. The nominal qubit setting indexes the paired study configuration; it is not a physical qubit allocation. Classification estimators cover five datasets and regression estimators cover two.*
+
+### Small circuit correctness anchors (8 tables)
+
+**Table (mps_validate_ghz_12_dense) — GHZ correctness anchor at 12 qubits using dense**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | N/A | 44.4 | 1 | OK |
+| Qiskit Aer | 0.002834 | 75.1 | 1 | OK |
+| PennyLane | 0.003626 | 333.4 | 1 | OK |
+| Cirq quimb | N/A | 200.8 | 1 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_validate_ghz_12_mps) — GHZ correctness anchor at 12 qubits using mps**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.000145 | 52.8 | 1 | OK |
+| Qiskit Aer | 0.001606 | 84.6 | 1 | OK |
+| PennyLane | 0.048847 | 404.7 | 1 | OK |
+| Cirq quimb | 0.050912 | 276 | 1 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_validate_ghz_16_dense) — GHZ correctness anchor at 16 qubits using dense**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | N/A | 46.9 | 1 | OK |
+| Qiskit Aer | 0.004229 | 76.2 | 1 | OK |
+| PennyLane | 0.028864 | 335.5 | 1 | OK |
+| Cirq quimb | N/A | 201.1 | 1 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_validate_ghz_16_mps) — GHZ correctness anchor at 16 qubits using mps**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.000176 | 48.7 | 1 | OK |
+| Qiskit Aer | 0.001612 | 74.9 | 1 | OK |
+| PennyLane | 0.033939 | 404.4 | 1 | OK |
+| Cirq quimb | 0.073207 | 276.8 | 1 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_validate_brick4_12_dense) — Brick4 correctness anchor at 12 qubits using dense**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | N/A | 46.7 | -0.0330144 | OK |
+| Qiskit Aer | 0.006051 | 74.7 | -0.0330144 | OK |
+| PennyLane | 0.022606 | 333 | -0.0330144 | OK |
+| Cirq quimb | N/A | 200.9 | -0.0330144 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_validate_brick4_12_mps) — Brick4 correctness anchor at 12 qubits using mps**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.000668 | 47.6 | -0.0330144 | OK |
+| Qiskit Aer | 0.003687 | 75.4 | -0.0330144 | OK |
+| PennyLane | 0.074584 | 405.7 | -0.0330144 | OK |
+| Cirq quimb | 0.083455 | 277 | -0.0330144 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_validate_brick4_16_dense) — Brick4 correctness anchor at 16 qubits using dense**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | N/A | 48.6 | -0.157829 | OK |
+| Qiskit Aer | 0.017519 | 76.3 | -0.157829 | OK |
+| PennyLane | 0.183592 | 336.8 | -0.157829 | OK |
+| Cirq quimb | N/A | 201.6 | -0.15783 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_validate_brick4_16_mps) — Brick4 correctness anchor at 16 qubits using mps**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.000975 | 49.1 | -0.157829 | OK |
+| Qiskit Aer | 0.006275 | 76.2 | -0.157829 | OK |
+| PennyLane | 0.085308 | 406.6 | -0.157829 | OK |
+| Cirq quimb | 0.109924 | 276.6 | -0.157829 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+### GHZ matrix product state ladder (5 tables)
+
+**Table (mps_ladder_ghz_50) — GHZ at 50 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.000513 | 45.3 | 1 | OK |
+| Qiskit Aer | 0.003371 | 78.1 | 1 | OK |
+| PennyLane | 0.091111 | 405.8 | 1 | OK |
+| Cirq quimb | 0.331065 | 288.6 | 1 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_ladder_ghz_100) — GHZ at 100 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.00088 | 45.5 | 1 | OK |
+| Qiskit Aer | 0.005211 | 79.8 | 1 | OK |
+| PennyLane | 0.139522 | 412 | 1 | OK |
+| Cirq quimb | 0.695074 | 354.2 | 1 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_ladder_ghz_200) — GHZ at 200 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.001788 | 45.7 | 1 | OK |
+| Qiskit Aer | 0.005984 | 83.8 | 1 | OK |
+| PennyLane | 0.45368 | 428.8 | 1 | OK |
+| Cirq quimb | N/A | N/A | N/A | OB |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_ladder_ghz_500) — GHZ at 500 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.005105 | 47.1 | 1 | OK |
+| Qiskit Aer | 0.01704 | 96.3 | 1 | OK |
+| PennyLane | 1.15688 | 514.3 | 1 | OK |
+| Cirq quimb | 2.41519 | 294 | 1 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_ladder_ghz_1000) — GHZ at 1000 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.01204 | 48.3 | 1 | OK |
+| Qiskit Aer | 0.031483 | 117.3 | 1 | OK |
+| PennyLane | 3.73314 | 825.1 | 1 | OK |
+| Cirq quimb | 5.44048 | 331.3 | 1 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+### Four layer brick circuit ladder (5 tables)
+
+**Table (mps_ladder_brick4_50) — Brick4 at 50 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.001412 | 49.5 | -0.362315 | OK |
+| Qiskit Aer | 0.01736 | 79.1 | -0.362315 | OK |
+| PennyLane | 0.219291 | 407.6 | -0.362315 | OK |
+| Cirq quimb | 0.428856 | 289.3 | -0.362315 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_ladder_brick4_100) — Brick4 at 100 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.001773 | 50.8 | -0.192091 | OK |
+| Qiskit Aer | 0.053491 | 81.9 | -0.192091 | OK |
+| PennyLane | 0.478772 | 413.5 | -0.192091 | OK |
+| Cirq quimb | 0.863467 | 354.5 | -0.192091 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_ladder_brick4_200) — Brick4 at 200 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.003783 | 52.7 | 0.840186 | OK |
+| Qiskit Aer | 0.046151 | 87.6 | 0.840186 | OK |
+| PennyLane | 0.972763 | 433.4 | 0.840186 | OK |
+| Cirq quimb | N/A | N/A | N/A | OB |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_ladder_brick4_500) — Brick4 at 500 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.008581 | 58 | -0.0857184 | OK |
+| Qiskit Aer | 0.100235 | 103.9 | -0.0857184 | OK |
+| PennyLane | 3.4381 | 525.7 | -0.0857184 | OK |
+| Cirq quimb | 3.23684 | 288 | -0.0857184 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_ladder_brick4_1000) — Brick4 at 1000 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.020053 | 64.8 | 0.0596901 | OK |
+| Qiskit Aer | 0.288328 | 130.9 | 0.0596901 | OK |
+| PennyLane | 9.00519 | 845.2 | 0.0596901 | OK |
+| Cirq quimb | 6.86412 | 304.8 | 0.0596901 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+### Twelve layer brick circuit stress (3 tables)
+
+**Table (mps_stress_brick12_200) — Brick12 stress at 200 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.455114 | 135.6 | 0.133363 | OK |
+| Qiskit Aer | 0.813775 | 126.3 | 0.133363 | OK |
+| PennyLane | 71.8163 | 500.1 | 0.133363 | OK |
+| Cirq quimb | N/A | N/A | N/A | OB |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_stress_brick12_500) — Brick12 stress at 500 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 1.14085 | 260.5 | -0.00368592 | OK |
+| Qiskit Aer | 1.70573 | 190.3 | -0.00368592 | OK |
+| PennyLane | N/A | N/A | N/A | OB |
+| Cirq quimb | 35.8766 | 582.1 | -0.00368592 | OK |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_stress_brick12_1000) — Brick12 stress at 1000 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 2.35995 | 473.8 | -0.235859 | OK |
+| Qiskit Aer | 2.8796 | 296.7 | -0.235859 | OK |
+| PennyLane | N/A | N/A | N/A | OB |
+| Cirq quimb | N/A | N/A | N/A | OB |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+### Quantum Fourier transform conditions (6 tables)
+
+**Table (mps_qft_8) — QFT at 8 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | N/A | N/A | N/A | NT |
+| Qiskit Aer | N/A | N/A | N/A | NT |
+| PennyLane | N/A | N/A | N/A | NT |
+| Cirq quimb | 0.041238 | 276.5 | 0 | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_qft_20) — QFT at 20 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | N/A | N/A | N/A | NT |
+| Qiskit Aer | N/A | N/A | N/A | NT |
+| PennyLane | 35.457 | 414.4 | -9.02695e-18 | OK |
+| Cirq quimb | N/A | N/A | N/A | E |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_qft_30) — QFT at 30 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | N/A | N/A | N/A | NT |
+| Qiskit Aer | N/A | N/A | N/A | NT |
+| PennyLane | N/A | N/A | N/A | NT |
+| Cirq quimb | N/A | N/A | N/A | E |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_qft_50) — QFT at 50 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.049639 | 40.8 | 0 | OK |
+| Qiskit Aer | 0.124498 | 90.4 | -3.69779e-32 | OK |
+| PennyLane | N/A | N/A | N/A | OB |
+| Cirq quimb | N/A | N/A | N/A | E |
+| Qulacs | N/A | N/A | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_qft_100) — QFT at 100 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.152423 | 49.1 | 0 | OK |
+| Qiskit Aer | 0.455453 | 85.7 | -1.47911e-31 | OK |
+| PennyLane | N/A | N/A | N/A | NT |
+| Cirq quimb | N/A | N/A | N/A | NT |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_qft_200) — QFT at 200 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Z0 Zlast | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.586371 | 62.3 | 0 | OK |
+| Qiskit Aer | 2.08164 | 116.4 | -1.72563e-31 | OK |
+| PennyLane | N/A | N/A | N/A | NT |
+| Cirq quimb | N/A | N/A | N/A | NT |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+### Bond sweep at 16 qubits (4 tables)
+
+**Table (mps_bonds_16_2) — Brick4 at 16 qubits and maximum bond 2**
+
+| Framework | Time (s) | RAM (MiB) | TVD | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.013897 | 58.1 | 0.0905422 | OK |
+| Qiskit Aer | 0.103846 | 91.9 | 0.0407567 | OK |
+| PennyLane | 0.085862 | 406.6 | N/A | OK |
+| Cirq quimb | 0.037756 | 329.1 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_bonds_16_4) — Brick4 at 16 qubits and maximum bond 4**
+
+| Framework | Time (s) | RAM (MiB) | TVD | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.014847 | 55.3 | 7.99819e-16 | OK |
+| Qiskit Aer | 0.117088 | 90.4 | 4.86381e-11 | OK |
+| PennyLane | 0.083513 | 405.6 | N/A | OK |
+| Cirq quimb | 0.040404 | 278.6 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_bonds_16_8) — Brick4 at 16 qubits and maximum bond 8**
+
+| Framework | Time (s) | RAM (MiB) | TVD | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.015421 | 56.3 | 7.99819e-16 | OK |
+| Qiskit Aer | 0.118846 | 90.9 | 4.86381e-11 | OK |
+| PennyLane | 0.08711 | 406 | N/A | OK |
+| Cirq quimb | 0.057603 | 278.9 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_bonds_16_64) — Brick4 at 16 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | TVD | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.015597 | 55.7 | 7.99819e-16 | OK |
+| Qiskit Aer | 0.120473 | 90.4 | 4.86381e-11 | OK |
+| PennyLane | 0.089649 | 405.9 | N/A | OK |
+| Cirq quimb | 0.103294 | 276.6 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+### Bond sweep at 200 qubits (5 tables)
+
+**Table (mps_bonds_200_8) — Brick12 at 200 qubits and maximum bond 8**
+
+| Framework | Time (s) | RAM (MiB) | Discarded weight | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.030895 | 52.2 | 0.241805 | OK |
+| Qiskit Aer | 0.167375 | 83 | N/A | OK |
+| PennyLane | 3.21919 | 439.2 | N/A | OK |
+| Cirq quimb | 3.70493 | 285.6 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_bonds_200_16) — Brick12 at 200 qubits and maximum bond 16**
+
+| Framework | Time (s) | RAM (MiB) | Discarded weight | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.08271 | 57.1 | 0.933032 | OK |
+| Qiskit Aer | 0.332962 | 86.5 | N/A | OK |
+| PennyLane | 3.35149 | 442.9 | N/A | OK |
+| Cirq quimb | 4.96813 | 289.3 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_bonds_200_32) — Brick12 at 200 qubits and maximum bond 32**
+
+| Framework | Time (s) | RAM (MiB) | Discarded weight | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.253603 | 68.7 | 0.500085 | OK |
+| Qiskit Aer | 0.571216 | 91 | N/A | OK |
+| PennyLane | 5.71271 | 454.4 | N/A | OK |
+| Cirq quimb | 7.91128 | 299.4 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_bonds_200_64) — Brick12 at 200 qubits and maximum bond 64**
+
+| Framework | Time (s) | RAM (MiB) | Discarded weight | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.445186 | 104.8 | 6.65024e-14 | OK |
+| Qiskit Aer | 0.646639 | 91.1 | N/A | OK |
+| PennyLane | 26.5579 | 500.3 | N/A | OK |
+| Cirq quimb | 14.8467 | 376.7 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+**Table (mps_bonds_200_128) — Brick12 at 200 qubits and maximum bond 128**
+
+| Framework | Time (s) | RAM (MiB) | Discarded weight | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.441834 | 104.9 | 6.65024e-14 | OK |
+| Qiskit Aer | 0.853833 | 90.5 | N/A | OK |
+| PennyLane | N/A | N/A | N/A | OB |
+| Cirq quimb | 17.6958 | 374.6 | N/A | OK |
+| Qulacs | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. A single correlation does not establish full-state equality.*
+
+### Dynamic measurement conditions (8 tables)
+
+**Table (mps_mcm_teleport_12) — Ordinary teleportation at 12 qubits**
+
+| Framework | Wall (s) | RAM (MiB) | Shots | Correct | Outcome |
+|---|---|---|---|---|---|
+| SuperFermion | 0.067684 | 45.5 | 500 | Yes | OK |
+| Qiskit Aer | 0.789876 | 76.7 | 500 | Yes | OK |
+| PennyLane | 6.30442 | 334.2 | 500 | Yes | OK |
+| Cirq quimb | 3.08847 | 202.5 | 500 | Yes | OK |
+| Qulacs | N/A | N/A | 500 | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. Target-bit checks cover only the tested inputs.*
+
+**Table (mps_mcm_teleport_24) — Ordinary teleportation at 24 qubits**
+
+| Framework | Wall (s) | RAM (MiB) | Shots | Correct | Outcome |
+|---|---|---|---|---|---|
+| SuperFermion | N/A | N/A | 500 | N/A | OB |
+| Qiskit Aer | N/A | N/A | 500 | N/A | OB |
+| PennyLane | N/A | N/A | 500 | N/A | OB |
+| Cirq quimb | N/A | N/A | 500 | N/A | OB |
+| Qulacs | N/A | N/A | 500 | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. Target-bit checks cover only the tested inputs.*
+
+**Table (mps_mcm_mbqc_17) — Measurement based wire at 17 qubits**
+
+| Framework | Wall (s) | RAM (MiB) | Shots | Correct | Outcome |
+|---|---|---|---|---|---|
+| SuperFermion | 2.01472 | 52.8 | 200 | Yes | OK |
+| Qiskit Aer | 12.3303 | 84.6 | 200 | Yes | OK |
+| PennyLane | 69.0253 | 342.5 | 200 | Yes | OK |
+| Cirq quimb | 4.10458 | 208.6 | 200 | Yes | OK |
+| Qulacs | N/A | N/A | 200 | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. Target-bit checks cover only the tested inputs.*
+
+**Table (mps_mcm_repcode_12) — Repetition code at 12 qubits**
+
+| Framework | Wall (s) | RAM (MiB) | Shots | Correct | Outcome |
+|---|---|---|---|---|---|
+| SuperFermion | 0.076387 | 47.5 | 200/pattern | Yes | OK |
+| Qiskit Aer | 0.894468 | 77.5 | 200/pattern | Yes | OK |
+| PennyLane | 6.53749 | 334.5 | 200/pattern | Yes | OK |
+| Cirq quimb | 5.3529 | 202.7 | 200/pattern | Yes | OK |
+| Qulacs | N/A | N/A | 200/pattern | N/A | NO |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. Target-bit checks cover only the tested inputs. Four error patterns are replayed with 200 shots per pattern (800 total per completed row).*
+
+**Table (mps_mcm_mps_teleport_12) — Native MPS teleportation at 12 qubits**
+
+| Framework | Wall (s) | RAM (MiB) | Shots | Correct | Outcome |
+|---|---|---|---|---|---|
+| SuperFermion | 0.00698 | 38.4 | 100 | Yes | OK |
+| Qiskit Aer | 0.037715 | 76.7 | 100 | Yes | OK |
+| PennyLane | N/A | N/A | N/A | N/A | NT |
+| Cirq quimb | N/A | N/A | N/A | N/A | NT |
+| Qulacs | N/A | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. Target-bit checks cover only the tested inputs.*
+
+**Table (mps_mcm_mps_teleport_30) — Native MPS teleportation at 30 qubits**
+
+| Framework | Wall (s) | RAM (MiB) | Shots | Correct | Outcome |
+|---|---|---|---|---|---|
+| SuperFermion | 0.09374 | 40.5 | 1000 | Yes | OK |
+| Qiskit Aer | 0.225771 | 77.1 | 1000 | Yes | OK |
+| PennyLane | N/A | N/A | N/A | N/A | NT |
+| Cirq quimb | N/A | N/A | N/A | N/A | NT |
+| Qulacs | N/A | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. Target-bit checks cover only the tested inputs.*
+
+**Table (mps_mcm_mps_teleport_60) — Native MPS teleportation at 60 qubits**
+
+| Framework | Wall (s) | RAM (MiB) | Shots | Correct | Outcome |
+|---|---|---|---|---|---|
+| SuperFermion | 0.236671 | 38.8 | 1000 | Yes | OK |
+| Qiskit Aer | 0.368817 | 90.4 | 1000 | Yes | OK |
+| PennyLane | N/A | N/A | N/A | N/A | NT |
+| Cirq quimb | N/A | N/A | N/A | N/A | NT |
+| Qulacs | N/A | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. Target-bit checks cover only the tested inputs.*
+
+**Table (mps_mcm_mps_teleport_120) — Native MPS teleportation at 120 qubits**
+
+| Framework | Wall (s) | RAM (MiB) | Shots | Correct | Outcome |
+|---|---|---|---|---|---|
+| SuperFermion | 0.317963 | 46 | 1000 | Yes | OK |
+| Qiskit Aer | 1.01508 | 79.6 | 1000 | Yes | OK |
+| PennyLane | N/A | N/A | N/A | N/A | NT |
+| Cirq quimb | N/A | N/A | N/A | N/A | NT |
+| Qulacs | N/A | N/A | N/A | N/A | NT |
+
+*Note: Time is recorded adapter execution in seconds; RAM is process peak RSS in MiB. OK: completed; OB: budget limit; E: adapter error; NO: not offered; NT: no recorded job. N/A is unrecorded, never zero. Target-bit checks cover only the tested inputs.*
+
+### Stabilizer sampling (6 tables)
+
+**Table (modes_stab_ghz_64) — GHZ sampling at 64 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 0.225525 | 0.065425 | N/A | OK |
+| Stim | 0.42625 | 0.3435 | N/A | OK |
+| Qiskit Aer | 224.86 | 232.911 | 249.169 | OK |
+| PennyLane | 16.311 | 11.986 | N/A | OK |
+| Cirq | 27694.1 | 25525.7 | N/A | OK |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_stab_ghz_256) — GHZ sampling at 256 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 1.2739 | 0.203625 | N/A | OK |
+| Stim | 2.23025 | 2.05825 | N/A | OK |
+| Qiskit Aer | 4661.02 | 4817.3 | 4808.93 | OK |
+| PennyLane | 52.7585 | 52.024 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_stab_brick_64) — Brickwork sampling at 64 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 2.02715 | 0.522775 | N/A | OK |
+| Stim | 0.3666 | 0.23665 | N/A | OK |
+| Qiskit Aer | 294.473 | 270.567 | 318.788 | OK |
+| PennyLane | 55.5716 | 54.2614 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Budget |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_stab_brick_256) — Brickwork sampling at 256 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 9.04725 | 2.00845 | N/A | OK |
+| Stim | 2.64795 | 2.1142 | N/A | OK |
+| Qiskit Aer | 3625.6 | 3419.34 | 3309.93 | OK |
+| PennyLane | 381.935 | 237.748 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_stab_randcliff_256) — Random Clifford sampling at 256 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 11.4707 | 1.51153 | N/A | OK |
+| Stim | 3.6537 | 2.1122 | N/A | OK |
+| Qiskit Aer | 7534.08 | 7432.47 | 7261.06 | OK |
+| PennyLane | 180.892 | 125.289 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_stab_randcliff_1024) — Random Clifford sampling at 1,024 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 210.049 | 3.98597 | N/A | OK |
+| Stim | 54.9199 | 10.5591 | N/A | OK |
+| Qiskit Aer | N/A | N/A | N/A | Capped |
+| PennyLane | 746.521 | 661.044 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+### Large Clifford sampling (5 tables)
+
+**Table (modes_cliff_ghz_1024) — GHZ sampling at 1,024 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 8.67817 | 0.8224 | N/A | OK |
+| Stim | 13.8272 | 10.7512 | N/A | OK |
+| Qiskit Aer | N/A | N/A | N/A | Capped |
+| PennyLane | 355.95 | 345.806 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_cliff_ghz_4096) — GHZ sampling at 4,096 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 116.224 | 2.65258 | N/A | OK |
+| Stim | 149.574 | 76.5296 | N/A | OK |
+| Qiskit Aer | N/A | N/A | N/A | Capped |
+| PennyLane | 3524.18 | 3181.03 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_cliff_brick_1024) — Brickwork sampling at 1,024 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 119.211 | 4.6761 | N/A | OK |
+| Stim | 20.3697 | 14.3595 | N/A | OK |
+| Qiskit Aer | N/A | N/A | N/A | Capped |
+| PennyLane | 1189.89 | 1267.28 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_cliff_brick_4096) — Brickwork sampling at 4,096 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 2106.46 | 17.2773 | N/A | OK |
+| Stim | 231.232 | 93.3314 | N/A | OK |
+| Qiskit Aer | N/A | N/A | N/A | Capped |
+| PennyLane | 7230.9 | 6917.17 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+**Table (modes_cliff_randcliff_4096) — Random Clifford sampling at 4,096 qubits**
+
+| Framework | Cold (ms) | Warm (ms) | Extra reuse (ms) | Outcome |
+|---|---|---|---|---|
+| SuperFermion | 9396.83 | 14.0754 | N/A | OK |
+| Stim | 4413.22 | 94.0489 | N/A | OK |
+| Qiskit Aer | N/A | N/A | N/A | Capped |
+| PennyLane | 9546.97 | 9599.09 | N/A | OK |
+| Cirq | N/A | N/A | N/A | Capped |
+
+*Note: 2,000 shots per recorded window. Timings are means of two window medians; cold and warm contracts vary by adapter. Extra reuse is the separately recorded Aer simulator-reuse observation. Capped and budget rows have no assigned time. RAM was not measured.*
+
+### Adjoint gradients (10 tables)
+
+**Table (modes_adj_n6_L1) — Adjoint gradient at 6 qubits and 1 layer**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 0.0184 | 0.04255 | 4.44089e-16 |
+| Qulacs | 0.0739 | N/A | Reference |
+
+*Note: P = 12 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n8_L1) — Adjoint gradient at 8 qubits and 1 layer**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 0.04165 | 0.0563 | 4.44089e-16 |
+| Qulacs | 0.2203 | N/A | Reference |
+
+*Note: P = 16 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n10_L1) — Adjoint gradient at 10 qubits and 1 layer**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 0.25205 | 0.20635 | 3.88578e-16 |
+| Qulacs | 0.31955 | N/A | Reference |
+
+*Note: P = 20 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n12_L1) — Adjoint gradient at 12 qubits and 1 layer**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 0.6909 | 0.69245 | 1.50535e-16 |
+| Qulacs | 181.673 | N/A | Reference |
+
+*Note: P = 24 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n14_L1) — Adjoint gradient at 14 qubits and 1 layer**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 5.30115 | 3.6993 | 2.498e-16 |
+| Qulacs | 102.818 | N/A | Reference |
+
+*Note: P = 28 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n16_L1) — Adjoint gradient at 16 qubits and 1 layer**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 19.8242 | 15.8798 | 2.77556e-16 |
+| Qulacs | 23.1683 | N/A | Reference |
+
+*Note: P = 32 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n18_L1) — Adjoint gradient at 18 qubits and 1 layer**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 191.298 | 63.9346 | 1.29063e-15 |
+| Qulacs | 244.965 | N/A | Reference |
+
+*Note: P = 36 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n20_L1) — Adjoint gradient at 20 qubits and 1 layer**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 923.797 | 363.894 | 2.81719e-15 |
+| Qulacs | 1264.01 | N/A | Reference |
+
+*Note: P = 40 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n8_L2) — Adjoint gradient at 8 qubits and 2 layers**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 0.0855 | 0.164 | 1.66533e-16 |
+| Qulacs | 0.2176 | N/A | Reference |
+
+*Note: P = 32 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+**Table (modes_adj_n8_L4) — Adjoint gradient at 8 qubits and 4 layers**
+
+| Framework | Gradient (ms) | Separate compile (ms) | Maximum gradient difference |
+|---|---|---|---|
+| SuperFermion | 0.1485 | 0.08495 | 1.39916e-16 |
+| Qulacs | 0.36975 | N/A | Reference |
+
+*Note: P = 64 parameters; observable is the full Z product. SuperFermion uses a compiled handle; construction is outside gradient timing. Qulacs timing includes parameter setters, state preparation, execution and backpropagation. The parity field is the saved component-wise maximum from the retained second comparison window. RAM was not measured.*
+
+### Density matrix evaluation (3 tables)
+
+**Table (modes_dm_n8) — Density matrix evaluation at 8 qubits**
+
+| Framework | Time (ms) | Trace deviation | Purity deviation | Diagonal check |
+|---|---|---|---|---|
+| SuperFermion | 28.424 | 5.77316e-15 | 1.11022e-16 | Pass |
+| Qiskit Aer | 49.2193 | 1.59872e-14 | 4.28546e-14 | Pass |
+
+*Note: Noiseless depth-eight brickwork. SuperFermion is the native dense-core density-matrix engine, not the held-out density-matrix planner mode. Aer compares diagonals after rounding to eight decimals; the saved SuperFermion flag comes from its native worker. Trace and purity do not establish complete density-matrix equality. The flagged 10-qubit comparison is unranked. RAM was not measured. The separately recorded SuperFermion statevector anchor is 0.5535 ms and has a different output contract.*
+
+**Table (modes_dm_n10) — Density matrix evaluation at 10 qubits**
+
+| Framework | Time (ms) | Trace deviation | Purity deviation | Diagonal check |
+|---|---|---|---|---|
+| SuperFermion | 815.937 | 3.55271e-15 | 1.11022e-16 | Pass |
+| Qiskit Aer | 659.079 | 1.9984e-14 | 1.15463e-14 | Flagged |
+
+*Note: Noiseless depth-eight brickwork. SuperFermion is the native dense-core density-matrix engine, not the held-out density-matrix planner mode. Aer compares diagonals after rounding to eight decimals; the saved SuperFermion flag comes from its native worker. Trace and purity do not establish complete density-matrix equality. The flagged 10-qubit comparison is unranked. RAM was not measured. The separately recorded SuperFermion statevector anchor is 1.45895 ms and has a different output contract.*
+
+**Table (modes_dm_n12) — Density matrix evaluation at 12 qubits**
+
+| Framework | Time (ms) | Trace deviation | Purity deviation | Diagonal check |
+|---|---|---|---|---|
+| SuperFermion | 14239.7 | 5.32907e-15 | 1.11022e-16 | Pass |
+| Qiskit Aer | 9192.79 | 2.44249e-14 | 3.55271e-15 | Pass |
+
+*Note: Noiseless depth-eight brickwork. SuperFermion is the native dense-core density-matrix engine, not the held-out density-matrix planner mode. Aer compares diagonals after rounding to eight decimals; the saved SuperFermion flag comes from its native worker. Trace and purity do not establish complete density-matrix equality. The flagged 10-qubit comparison is unranked. RAM was not measured. The separately recorded SuperFermion statevector anchor is 2.7277 ms and has a different output contract.*
+
+The tables above are the same 132 table sources shipped in the LaTeX package and
+mirrored in the [Markdown edition](/downloads/SuperFermion_TechRxiv_Paper.md).
+
+## Figures (42)
+
+
+<img src="/benchmarks/paper/execution_path.png" alt="Conceptual organization of prepared circuit execution and its two output contracts. This schematic describes the software design; the saved measurements do not " style={{maxWidth: "100%"}} />
+
+**Figure (execution_path).** Conceptual organization of prepared circuit execution and its two output contracts. This schematic describes the software design; the saved measurements do not isolate each component's contribution.
+
+<img src="/benchmarks/paper/modes_regimes.png" alt="Representations associated with the reported execution paths. Stabilizer and Clifford mode labels share one tableau engine; the adjoint handle uses a different " style={{maxWidth: "100%"}} />
+
+**Figure (modes_regimes).** Representations associated with the reported execution paths. Stabilizer and Clifford mode labels share one tableau engine; the adjoint handle uses a different statevector path. MPS mechanisms are described in the methods report and are not benchmarked by the new mode suite. The density-matrix observations exercise a separate native-core path.
+
+<img src="/benchmarks/paper/overall_compute_ram.png" alt="Six included simulator configurations evaluated on the same 252 conditions. Compute totals sum the reported primary stage and exclude startup, imports and retri" style={{maxWidth: "100%"}} />
+
+**Figure (overall_compute_ram).** Six included simulator configurations evaluated on the same 252 conditions. Compute totals sum the reported primary stage and exclude startup, imports and retries. Memory is the median whole-worker peak RSS. Cirq f32 is a mixed-precision comparison.
+
+<img src="/benchmarks/paper/heatmap_qulacs.png" alt="Qulacs/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Qulac" style={{maxWidth: "100%"}} />
+
+**Figure (heatmap_qulacs).** Qulacs/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Qulacs. Cells pool matching datasets, maps and output tracks. All five heatmaps share the 0.5 to 512 logarithmic scale. Unplanned VQC/VQR cells retain their status. These are workload-total ratios, not medians of individual speedups.
+
+<img src="/benchmarks/paper/heatmap_qiskit.png" alt="Qiskit/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Qiski" style={{maxWidth: "100%"}} />
+
+**Figure (heatmap_qiskit).** Qiskit/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Qiskit. Cells pool matching datasets, maps and output tracks. All five heatmaps share the 0.5 to 512 logarithmic scale. Unplanned VQC/VQR cells retain their status. These are workload-total ratios, not medians of individual speedups.
+
+<img src="/benchmarks/paper/heatmap_pennylane.png" alt="PennyLane/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Pe" style={{maxWidth: "100%"}} />
+
+**Figure (heatmap_pennylane).** PennyLane/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor PennyLane. Cells pool matching datasets, maps and output tracks. All five heatmaps share the 0.5 to 512 logarithmic scale. Unplanned VQC/VQR cells retain their status. These are workload-total ratios, not medians of individual speedups.
+
+<img src="/benchmarks/paper/heatmap_cirq.png" alt="Cirq f32/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Cir" style={{maxWidth: "100%"}} />
+
+**Figure (heatmap_cirq).** Cirq f32/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Cirq f32. Cells pool matching datasets, maps and output tracks. All five heatmaps share the 0.5 to 512 logarithmic scale. Unplanned VQC/VQR cells retain their status. These are workload-total ratios, not medians of individual speedups.
+
+<img src="/benchmarks/paper/heatmap_cirq_f64.png" alt="Cirq f64/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Cir" style={{maxWidth: "100%"}} />
+
+**Figure (heatmap_cirq_f64).** Cirq f64/SuperFermion ratios of summed primary compute time for matching task and qubit cohorts. Values above one favor SuperFermion; values below one favor Cirq f64. Cells pool matching datasets, maps and output tracks. All five heatmaps share the 0.5 to 512 logarithmic scale. Unplanned VQC/VQR cells retain their status. These are workload-total ratios, not medians of individual speedups.
+
+<img src="/benchmarks/paper/analytical_angle_control.png" alt="Breast-cancer angle-map QSVM observations. The analytical control evaluates the separable kernel formula and is kept outside general-simulator rankings. At 20 q" style={{maxWidth: "100%"}} />
+
+**Figure (analytical_angle_control).** Breast-cancer angle-map QSVM observations. The analytical control evaluates the separable kernel formula and is kept outside general-simulator rankings. At 20 qubits it takes 64.2 ms, versus 212.6 s for SuperFermion and 218.2 s for Qulacs. Memory includes work outside the kernel stage.
+
+<img src="/benchmarks/paper/statebank_and_worker_memory.png" alt="Theoretical dense-state storage, attributed exported-bank medians and reconstructed QSVM worker medians measure different objects. The 512 MiB cap limits the ex" style={{maxWidth: "100%"}} />
+
+**Figure (statebank_and_worker_memory).** Theoretical dense-state storage, attributed exported-bank medians and reconstructed QSVM worker medians measure different objects. The 512 MiB cap limits the exported bank; it does not cap total RSS or remove exponential dense-state storage.
+
+<img src="/benchmarks/paper/mps_job_status.png" alt="Outcomes after retry deduplication and selection of the included MPS configurations: 182 jobs, comprising 141 OK, 12 budget, three error and 26 not-offered resu" style={{maxWidth: "100%"}} />
+
+**Figure (mps_job_status).** Outcomes after retry deduplication and selection of the included MPS configurations: 182 jobs, comprising 141 OK, 12 budget, three error and 26 not-offered results. Coverage differs across adapters. Counts describe the planned interface, not general framework success or speed.
+
+<img src="/benchmarks/paper/mps_mcm_time_ram.png" alt="Dynamic replay and process memory from the replacement archive. TP uses 500 shots; Wire 17 uses 200; Rep 12 tests four patterns with 200 shots each. Native MPS " style={{maxWidth: "100%"}} />
+
+**Figure (mps_mcm_time_ram).** Dynamic replay and process memory from the replacement archive. TP uses 500 shots; Wire 17 uses 200; Rep 12 tests four patterns with 200 shots each. Native MPS teleportation uses 100 shots at 12 qubits and 1,000 at 30, 60 and 120. Counts match within each case. Successful target-bit checks pass for the tested inputs. The common 24-qubit budget boundary has no assigned runtime.
+
+<img src="/benchmarks/paper/mps_dynamic_scaling.png" alt="Native MPS teleportation with matched shots within each qubit count: 100 shots at 12 qubits and 1,000 at 30, 60 and 120. Curves connect tested conditions and do" style={{maxWidth: "100%"}} />
+
+**Figure (mps_dynamic_scaling).** Native MPS teleportation with matched shots within each qubit count: 100 shots at 12 qubits and 1,000 at 30, 60 and 120. Curves connect tested conditions and do not isolate qubit scaling from the shot-count change. One timed replay is recorded per condition; both paths pass the target-bit check.
+
+<img src="/benchmarks/paper/modes_tableau_heatmaps.png" alt="Recorded comparator-to-SuperFermion time ratios for 2,000 shots. Values above one favor SuperFermion; k means one thousand. Both panels use one logarithmic colo" style={{maxWidth: "100%"}} />
+
+**Figure (modes_tableau_heatmaps).** Recorded comparator-to-SuperFermion time ratios for 2,000 shots. Values above one favor SuperFermion; k means one thousand. Both panels use one logarithmic color scale and include every reviewed condition. Gray cells distinguish capped jobs and the recorded budget outcome. Ratios compare the saved output and preparation contracts, with unequal concurrency settings; they are not significance tests.
+
+<img src="/benchmarks/paper/modes_tableau_times.png" alt="Cold and prepared warm sampling times for all five included tableau-framework configurations. Discrete conditions use unconnected markers. Missing capped or bud" style={{maxWidth: "100%"}} />
+
+**Figure (modes_tableau_times).** Cold and prepared warm sampling times for all five included tableau-framework configurations. Discrete conditions use unconnected markers. Missing capped or budget measurements have no plotted time. Cold compilation boundaries and warm output contracts are adapter-specific, as defined in the protocol.
+
+<img src="/benchmarks/paper/modes_adjoint_scaling.png" alt="Prepared gradient timings and separately recorded SuperFermion handle-compilation cost. The one-layer grid spans 6 to 20 qubits; the eight-qubit grid has 16, 32" style={{maxWidth: "100%"}} />
+
+**Figure (modes_adjoint_scaling).** Prepared gradient timings and separately recorded SuperFermion handle-compilation cost. The one-layer grid spans 6 to 20 qubits; the eight-qubit grid has 16, 32 and 64 parameters. Curves connect tested conditions only. Qulacs includes per-call state preparation and backpropagation; SuperFermion construction is outside gradient timing.
+
+<img src="/benchmarks/paper/modes_adjoint_ratios.png" alt="Each left-panel ratio is a saved Qulacs gradient time divided by the SuperFermion prepared-handle time. The right panel is a calculation, not a cold-run measure" style={{maxWidth: "100%"}} />
+
+**Figure (modes_adjoint_ratios).** Each left-panel ratio is a saved Qulacs gradient time divided by the SuperFermion prepared-handle time. The right panel is a calculation, not a cold-run measurement: it is the smallest integer K for which C + K g &lt; K q, using the recorded SF compile cost C and per-call times g and q. Qulacs setup cost is not added because it was not measured separately.
+
+<img src="/benchmarks/paper/modes_density_matrix.png" alt="Recorded density-matrix times for noiseless depth-eight circuits. The hollow Aer marker and gray ratio marker identify its 10-qubit diagonal-check flag; that po" style={{maxWidth: "100%"}} />
+
+**Figure (modes_density_matrix).** Recorded density-matrix times for noiseless depth-eight circuits. The hollow Aer marker and gray ratio marker identify its 10-qubit diagonal-check flag; that point is not used as a validated performance ranking. At 8 and 12 qubits both saved diagonal flags pass. These are dense-core observations, not a result for the held-out density-matrix planner mode.
+
+<img src="/benchmarks/paper/scaling_qsvm.png" alt="Compute-time and whole-worker memory scaling for QSVM. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Cu" style={{maxWidth: "100%"}} />
+
+**Figure (scaling_qsvm).** Compute-time and whole-worker memory scaling for QSVM. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred.
+
+<img src="/benchmarks/paper/scaling_qkrr.png" alt="Compute-time and whole-worker memory scaling for QKRR. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Cu" style={{maxWidth: "100%"}} />
+
+**Figure (scaling_qkrr).** Compute-time and whole-worker memory scaling for QKRR. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred.
+
+<img src="/benchmarks/paper/scaling_qkpca.png" alt="Compute-time and whole-worker memory scaling for QKPCA. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. C" style={{maxWidth: "100%"}} />
+
+**Figure (scaling_qkpca).** Compute-time and whole-worker memory scaling for QKPCA. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred.
+
+<img src="/benchmarks/paper/scaling_vqc.png" alt="Compute-time and whole-worker memory scaling for VQC. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Cur" style={{maxWidth: "100%"}} />
+
+**Figure (scaling_vqc).** Compute-time and whole-worker memory scaling for VQC. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred. Training uses five updates at 4, 8 and 12 qubits.
+
+<img src="/benchmarks/paper/scaling_vqr.png" alt="Compute-time and whole-worker memory scaling for VQR. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Cur" style={{maxWidth: "100%"}} />
+
+**Figure (scaling_vqr).** Compute-time and whole-worker memory scaling for VQR. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred. Training uses five updates at 4, 8 and 12 qubits.
+
+<img src="/benchmarks/paper/scaling_qaoa_fs.png" alt="Compute-time and whole-worker memory scaling for QAOA FS. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate." style={{maxWidth: "100%"}} />
+
+**Figure (scaling_qaoa_fs).** Compute-time and whole-worker memory scaling for QAOA FS. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred.
+
+<img src="/benchmarks/paper/scaling_maxcut.png" alt="Compute-time and whole-worker memory scaling for MaxCut. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. " style={{maxWidth: "100%"}} />
+
+**Figure (scaling_maxcut).** Compute-time and whole-worker memory scaling for MaxCut. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred.
+
+<img src="/benchmarks/paper/scaling_vqe.png" alt="Compute-time and whole-worker memory scaling for VQE. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Cur" style={{maxWidth: "100%"}} />
+
+**Figure (scaling_vqe).** Compute-time and whole-worker memory scaling for VQE. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred.
+
+<img src="/benchmarks/paper/scaling_gradient.png" alt="Compute-time and whole-worker memory scaling for Gradient. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate" style={{maxWidth: "100%"}} />
+
+**Figure (scaling_gradient).** Compute-time and whole-worker memory scaling for Gradient. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred.
+
+<img src="/benchmarks/paper/scaling_circuit.png" alt="Compute-time and whole-worker memory scaling for Circuit. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate." style={{maxWidth: "100%"}} />
+
+**Figure (scaling_circuit).** Compute-time and whole-worker memory scaling for Circuit. Points summarize matched dataset or circuit cohorts; feature maps or output contracts remain separate. Curves connect measured sizes. One fresh-process repetition is available per condition, so no confidence bands are inferred. Open downward triangles denote cohort medians rounded to zero at the 0.05 ms display bound.
+
+<img src="/benchmarks/paper/classical_controls.png" alt="Classical estimators over five classification or two regression datasets. The nominal qubit axis identifies paired study settings; these estimators allocate no " style={{maxWidth: "100%"}} />
+
+**Figure (classical_controls).** Classical estimators over five classification or two regression datasets. The nominal qubit axis identifies paired study settings; these estimators allocate no quantum qubits. Time and RAM do not measure predictive accuracy.
+
+<img src="/benchmarks/paper/mps_validation_time_ram.png" alt="Dense and MPS correctness-anchor costs. Successful dense-reference rows without recorded timing remain missing from time panels, while their measured RSS is ret" style={{maxWidth: "100%"}} />
+
+**Figure (mps_validation_time_ram).** Dense and MPS correctness-anchor costs. Successful dense-reference rows without recorded timing remain missing from time panels, while their measured RSS is retained. These paths have different validation and extraction contracts and are not ranked as equivalent simulation outputs.
+
+<img src="/benchmarks/paper/mps_ghz_time_ram.png" alt="Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outc" style={{maxWidth: "100%"}} />
+
+**Figure (mps_ghz_time_ram).** Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outcomes remain missing. Sampling time is excluded from the execution metric but can contribute to recorded RSS. Output and validation contracts vary across adapters.
+
+<img src="/benchmarks/paper/mps_brick4_time_ram.png" alt="Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outc" style={{maxWidth: "100%"}} />
+
+**Figure (mps_brick4_time_ram).** Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outcomes remain missing. Sampling time is excluded from the execution metric but can contribute to recorded RSS. Output and validation contracts vary across adapters.
+
+<img src="/benchmarks/paper/mps_stress_time_ram.png" alt="Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outc" style={{maxWidth: "100%"}} />
+
+**Figure (mps_stress_time_ram).** Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outcomes remain missing. Sampling time is excluded from the execution metric but can contribute to recorded RSS. Output and validation contracts vary across adapters.
+
+<img src="/benchmarks/paper/mps_qft_time_ram.png" alt="Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outc" style={{maxWidth: "100%"}} />
+
+**Figure (mps_qft_time_ram).** Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outcomes remain missing. Sampling time is excluded from the execution metric but can contribute to recorded RSS. Output and validation contracts vary across adapters.
+
+<img src="/benchmarks/paper/mps_bonds16_time_ram.png" alt="Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outc" style={{maxWidth: "100%"}} />
+
+**Figure (mps_bonds16_time_ram).** Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outcomes remain missing. Sampling time is excluded from the execution metric but can contribute to recorded RSS. Output and validation contracts vary across adapters.
+
+<img src="/benchmarks/paper/mps_bonds200_time_ram.png" alt="Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outc" style={{maxWidth: "100%"}} />
+
+**Figure (mps_bonds200_time_ram).** Recorded adapter time and process peak RSS for matching circuit conditions. Only successful observations are plotted; absent, not-offered, error and budget outcomes remain missing. Sampling time is excluded from the execution metric but can contribute to recorded RSS. Output and validation contracts vary across adapters.
+
+<img src="/benchmarks/paper/mps_truncation_quality.png" alt="TVD at 16 qubits compares full output probabilities with a dense reference. At 200 qubits, discarded weight is an engine diagnostic with no dense reference in t" style={{maxWidth: "100%"}} />
+
+**Figure (mps_truncation_quality).** TVD at 16 qubits compares full output probabilities with a dense reference. At 200 qubits, discarded weight is an engine diagnostic with no dense reference in this sweep. Missing fields are not zero. The non-monotonic low-bond SuperFermion sequence is retained.
+
+<img src="/benchmarks/paper/matched_qulacs.png" alt="Matched Qulacs and SuperFermion observations. The logarithmic time panel retains 238 of 252 pairs; 14 displayed-zero pairs are omitted. All 252 memory pairs are" style={{maxWidth: "100%"}} />
+
+**Figure (matched_qulacs).** Matched Qulacs and SuperFermion observations. The logarithmic time panel retains 238 of 252 pairs; 14 displayed-zero pairs are omitted. All 252 memory pairs are shown. Points above the equality lines favor SuperFermion. Markers distinguish output contracts. RSS is whole-worker memory; there is one fresh-process repetition per condition.
+
+<img src="/benchmarks/paper/matched_qiskit.png" alt="Matched Qiskit and SuperFermion observations. The logarithmic time panel retains 242 of 252 pairs; 10 displayed-zero pairs are omitted. All 252 memory pairs are" style={{maxWidth: "100%"}} />
+
+**Figure (matched_qiskit).** Matched Qiskit and SuperFermion observations. The logarithmic time panel retains 242 of 252 pairs; 10 displayed-zero pairs are omitted. All 252 memory pairs are shown. Points above the equality lines favor SuperFermion. Markers distinguish output contracts. RSS is whole-worker memory; there is one fresh-process repetition per condition.
+
+<img src="/benchmarks/paper/matched_pennylane.png" alt="Matched PennyLane and SuperFermion observations. The logarithmic time panel retains 242 of 252 pairs; 10 displayed-zero pairs are omitted. All 252 memory pairs " style={{maxWidth: "100%"}} />
+
+**Figure (matched_pennylane).** Matched PennyLane and SuperFermion observations. The logarithmic time panel retains 242 of 252 pairs; 10 displayed-zero pairs are omitted. All 252 memory pairs are shown. Points above the equality lines favor SuperFermion. Markers distinguish output contracts. RSS is whole-worker memory; there is one fresh-process repetition per condition.
+
+<img src="/benchmarks/paper/matched_cirq.png" alt="Matched Cirq f32 and SuperFermion observations. The logarithmic time panel retains 242 of 252 pairs; 10 displayed-zero pairs are omitted. All 252 memory pairs a" style={{maxWidth: "100%"}} />
+
+**Figure (matched_cirq).** Matched Cirq f32 and SuperFermion observations. The logarithmic time panel retains 242 of 252 pairs; 10 displayed-zero pairs are omitted. All 252 memory pairs are shown. Points above the equality lines favor SuperFermion. Markers distinguish output contracts. RSS is whole-worker memory; there is one fresh-process repetition per condition.
+
+<img src="/benchmarks/paper/matched_cirq_f64.png" alt="Matched Cirq f64 and SuperFermion observations. The logarithmic time panel retains 242 of 252 pairs; 10 displayed-zero pairs are omitted. All 252 memory pairs a" style={{maxWidth: "100%"}} />
+
+**Figure (matched_cirq_f64).** Matched Cirq f64 and SuperFermion observations. The logarithmic time panel retains 242 of 252 pairs; 10 displayed-zero pairs are omitted. All 252 memory pairs are shown. Points above the equality lines favor SuperFermion. Markers distinguish output contracts. RSS is whole-worker memory; there is one fresh-process repetition per condition.
+
+## Downloads
+
+- [Markdown edition](/downloads/SuperFermion_TechRxiv_Paper.md) — the complete manuscript as compact Markdown (tables, figure links, equations, references); figure links resolve inside the LaTeX package's `figures/` directory.
+- [LaTeX source package](/downloads/SuperFermion_TechRxiv_LaTeX.zip) — `main.tex`, 132 table sources, 42 figure triplets, bibliography and build scripts.
+
+<Callout type="warn">
+The compiled 107-page PDF is not bundled in the shipped LaTeX archive. To obtain the PDF,
+compile the package with pdfLaTeX (`pdflatex → bibtex → pdflatex ×2`) or upload it to
+Overleaf and select `main.tex`. The Markdown edition mirrors every table, caption and
+equation of that PDF.
+</Callout>

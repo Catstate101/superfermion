@@ -7,7 +7,7 @@ description: "High-performance quantum computing with a Python API and Rust simu
 pip install superfermion
 ```
 
-Superfermion is a high-performance quantum computing framework. A fluent Python API for everything you write, a Rust simulation core for everything the computer runs. **3–5x faster** than Qiskit Aer, **21–33x for MPS**, up to **800x for adjoint gradients** vs PennyLane.
+Superfermion is a high-performance quantum computing framework. A fluent Python API for everything you write, a Rust simulation core for everything the computer runs. **3–5x faster** than Qiskit Aer, **23–33x for MPS**, and **1.9–43x** on adjoint gradients against PennyLane's `qml.grad` (20 down to 4 qubits).
 
 ## Choose your path
 
@@ -34,7 +34,10 @@ Superfermion is a high-performance quantum computing framework. A fluent Python 
     Every class, method, and parameter. Cross-referenced from source.
   </Card>
   <Card title="I want to see benchmarks" href="/docs/reference/performance">
-    MPS 33x vs Qiskit Aer. Adjoint gradient 800x vs PennyLane.
+    MPS 23–33x vs Qiskit Aer, a statevector crossover vs Qulacs, and adjoint gradients checked three ways.
+  </Card>
+  <Card title="I want to know why it's fast" href="/docs/reference/execution-engine">
+    The instruction plan, the math of each rewrite, the Rust kernels, and the memory budget.
   </Card>
 </Cards>
 
