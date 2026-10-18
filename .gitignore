@@ -64,6 +64,10 @@ __pycache__/
 *.png
 *.jpg
 
+# Documentation figures are published assets, not generated data
+!website/public/benchmarks/paper/*.png
+!website/public/benchmarks/laptop/*.png
+
 # OS files
 .DS_Store
 Thumbs.db

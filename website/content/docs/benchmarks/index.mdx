@@ -57,9 +57,12 @@ its exact desktop job, and every execution-mode value must be identical to the l
 
 ## Downloads
 
-- [Desktop grid](/docs/benchmarks/desktop#downloads) — the TechRxiv paper edition; the raw
-grid tables ship in `Superfermion_requested_grid_Expanded_Results.zip` alongside the
-`modifications/` patch and the generator notebook, whose base commit, patch SHA-256 and
-thread count match `results/manifest.json` in the same archive.
+- [Desktop grid](/docs/benchmarks/desktop#downloads) — the TechRxiv paper edition. The
+campaign's generator notebook, 214 figures and 45 CSV/JSON tables ship in
+[`Superfermion_requested_grid_Expanded_Results_web.zip`](/downloads/Superfermion_requested_grid_Expanded_Results_web.zip)
+with the `modifications/` patch; the notebook's base commit, patch SHA-256 and thread count
+match `results/manifest.json` in the same archive. The complete 43.8 MiB archive exceeds the
+25 MiB per-file hosting limit, so this edition omits only `results/data/` (`.npz` inputs) and
+`results/raw/` (per-job records); every included member is byte-identical to the full archive.
 - [Laptop suite and results archives](/docs/benchmarks/laptop#downloads).
 - [Paper archive](/docs/benchmarks/techrxiv#downloads) — Markdown edition and LaTeX source.
