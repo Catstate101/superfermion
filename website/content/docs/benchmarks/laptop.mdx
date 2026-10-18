@@ -10,6 +10,7 @@ description: "Execution-mode suite on laptop-l5lb07gu: stabilizer sampling, larg
 | Host | `laptop-l5lb07gu` |
 | Generated | 2026-10-12T17:43:15 |
 | Binary | `l1_bench.exe`, md5 `c0c9679b215e` |
+| SuperFermion release | 0.1.15 label — sections measured 2026-10-12, not re-run after the 2026-10-16 tag |
 | Config hash | `3b88281923` |
 | Protocol | shots = 2000, reps = 7, depth = 8, ABBA order per rung |
 | Seeds | layer 11, Clifford 7, adjoint 7 |
@@ -132,3 +133,19 @@ RAYON; competitor lanes run shipped defaults.
 
 - [Suite archive](/downloads/sfmodes_bench_suite_laptop-l5lb07gu.zip) — executed notebook, generator and pack scripts.
 - [Results archive](/downloads/sfmodes_bench_results_laptop-l5lb07gu.zip) — raw JSONL, section CSVs, summary JSON, figures and report, plus `SF_MODES_Benchmark.ipynb`, the executed notebook that ran the four sections and emitted every one of those files.
+
+### Notebooks in these archives
+
+Both notebooks open with the same release-label cell: **0.1.15** is the release label for
+the SuperFermion lanes, and the sections were produced on 2026-10-12 and were not re-run
+after the 2026-10-16 tag. They drive the prebuilt `l1_bench` binary in the table above
+rather than the shipped Python package, so no `superfermion.__version__` is read in the
+timed lanes. The archives record no commit for that binary, so bit-identity with the
+released revision is not established.
+
+- `SF_MODES_Benchmark.ipynb` — results archive, 465,273 bytes, 22 cells. The executed
+  notebook that ran the four sections and emitted the JSONL, section CSVs, summary,
+  figures and report in that archive.
+- `_sfmodes_bench.ipynb` — suite archive, 454,293 bytes, 22 cells. The same notebook
+  (identical cell sources and execution counts) at its earlier save point, retaining 105
+  of the 174 output objects.

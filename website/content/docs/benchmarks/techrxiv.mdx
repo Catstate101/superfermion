@@ -1982,3 +1982,22 @@ compile the package with pdfLaTeX (`pdflatex → bibtex → pdflatex ×2`) or up
 Overleaf and select `main.tex`. The Markdown edition mirrors every table, caption and
 equation of that PDF.
 </Callout>
+
+### Notebooks in the LaTeX package
+
+The package carries the two benchmark notebooks it was built from, twice over: loose
+under `source_modes/` and `source_mps/`, and again inside the nested modes-suite and
+MPS-results archives. Every copy opens with the same release-label cell naming **0.1.15**
+as the release label, and each pair is byte-identical.
+
+- `source_modes/suite/_sfmodes_bench.ipynb` — execution-modes suite, 454,293 bytes, 22
+  cells. The label cell records that the sections were produced on 2026-10-12 and were not
+  re-run after the 2026-10-16 tag, that they drive a prebuilt `l1_bench` binary (md5
+  `c0c9679b215e`) rather than the shipped Python package, and that the archive records no
+  commit for that binary, so bit-identity with the released revision is not established.
+- `source_mps/MPS_MCM_Benchmark_7Framework.ipynb` — MPS/MCM seven-framework suite, 835,021
+  bytes, 15 cells. The label cell records that the rows were produced on 2026-10-07, that
+  all three SuperFermion lanes report `superfermion.__version__ == "0.1.14"` because the
+  bump landed after the run, and identifies the builds by extension md5 (`f576d0eb…` for
+  `sf_optimized` and `6c63fc91…` for `sf_wheel` and `sf_source`); the published 0.1.15
+  wheel adds the `sf.prepare()` / `PreparedCircuit` surface, which postdates the run.
