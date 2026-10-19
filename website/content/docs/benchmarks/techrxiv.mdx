@@ -33,9 +33,9 @@ Efficient quantum simulation requires execution paths that match circuit structu
 
 | Study | Corpus | Archive |
 |---|---|---|
-| Statevector | Six configurations × 252 matched conditions = 1,512 simulator records + 140 controls | [Desktop grid](/docs/benchmarks/desktop) |
+| Statevector | Six configurations × 252 matched conditions = 1,512 simulator records + 140 controls | [Grid archive](/downloads/Superfermion_requested_grid_Expanded_Results_web.zip) |
 | MPS and dynamic circuits | 182 selected unique jobs, 141 successful | `source_mps/` in the LaTeX package |
-| Execution modes | 24 conditions, 81 selected observations | [Laptop suite](/docs/benchmarks/laptop) |
+| Execution modes | 24 conditions, 81 selected observations | [Modes suite](/downloads/sfmodes_bench_suite_laptop-l5lb07gu.zip) |
 
 The three studies retain their own timing, output, precision and correctness contracts; the
 paper introduces no cross-study compute total. Every desktop record and every mode
@@ -1982,6 +1982,28 @@ compile the package with pdfLaTeX (`pdflatex → bibtex → pdflatex ×2`) or up
 Overleaf and select `main.tex`. The Markdown edition mirrors every table, caption and
 equation of that PDF.
 </Callout>
+
+### Benchmark archives
+
+The site hosts one notebook and one archive set per study.
+
+| Study | Machine | Downloads |
+|---|---|---|
+| Full grid, 4–24 qubits | Desktop, 16 threads | [notebook](/downloads/Superfermion_Full_Grid_24Q_VQC_VQR_5Steps_RAM_Time_v8.1_desktop_mt16_t20min.ipynb) · [notebook, figures and tables](/downloads/Superfermion_requested_grid_Expanded_Results_web.zip) |
+| MPS and dynamic circuits | Laptop `laptop-l5lb07gu` | [results](/downloads/mps_mcm_bench8_results_laptop-l5lb07gu.zip) · [suite](/downloads/mps_bench8_suite.zip) |
+| sf-cat | Laptop `laptop-l5lb07gu` | [results](/downloads/sfcat_bench_results_laptop-l5lb07gu.zip) · [suite](/downloads/sfcat_bench_suite_laptop-l5lb07gu.zip) |
+| Execution modes | Laptop `laptop-l5lb07gu` | [results](/downloads/sfmodes_bench_results_laptop-l5lb07gu.zip) · [suite](/downloads/sfmodes_bench_suite_laptop-l5lb07gu.zip) |
+
+The standalone grid notebook is 368,046 bytes and 86 cells, byte-identical to the copy inside
+the bundle. The 20.8 MiB bundle is a web edition of the 43.8 MiB campaign archive: it keeps
+the notebook, all 214 figures and the 45 CSV/JSON tables, and omits only `results/data/`
+(`.npz` inputs) and `results/raw/` (per-job records). `README_WEB_EDITION.md` inside the zip
+records the full archive's SHA-256 and the exact omissions.
+
+The MPS/MCM results archive carries `MPS_MCM_Benchmark_7Framework.ipynb` with its release-label
+cell. The two sf-cat archives were packed before that label cell was added, so
+`_sfcat_bench.ipynb` (10 cells in the suite archive) carries none; its run identity is recorded
+in `run_summary.json` and `README_RESULTS.txt` instead.
 
 ### Notebooks in the LaTeX package
 

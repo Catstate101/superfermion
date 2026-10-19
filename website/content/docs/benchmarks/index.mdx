@@ -1,19 +1,24 @@
 ---
 title: "Benchmark evidence archive"
-description: "Every SuperFermion benchmark run - desktop grid, laptop execution modes and the TechRxiv paper - with raw data, figures and a row-by-row consistency check."
+description: "Every SuperFermion benchmark run - the desktop grid, the laptop MPS/MCM, sf-cat and execution-mode suites, and the TechRxiv paper - with raw data, figures and a row-by-row consistency check."
 ---
 
 Every benchmark run behind the SuperFermion TechRxiv paper is archived here with its raw
 evidence, the machine it ran on, and a row-by-row check that the paper's numbers still
 match that evidence.
 
-## The three evidence bundles
+## The evidence bundles
 
-| Bundle | Machine | Scope | Evidence |
+| Bundle | Machine | Scope | Download |
 |---|---|---|---|
-| [Desktop grid](/docs/benchmarks/desktop) | Desktop, 16 threads | TechRxiv paper edition; the 2,156-job campaign behind it has 392 condition records from 4 to 20 qubits, one SuperFermion 0.1.15 lane plus 5 external comparators and classical/analytical controls | `Superfermion_requested_grid_Expanded_Results.zip` |
-| [Laptop execution modes](/docs/benchmarks/laptop) | Laptop `laptop-l5lb07gu` | 24 conditions: stabilizer, large Clifford, adjoint gradient and density-matrix suites | `sfmodes_bench_suite_laptop-l5lb07gu.zip` |
-| [TechRxiv paper](/docs/benchmarks/techrxiv) | Integrated study | 132 tables, 42 figures, 17 equations, 21 references, 107 pages | `SuperFermion_TechRxiv_LaTeX.zip` |
+| Full grid | Desktop, 16 threads | The 2,156-job campaign behind the paper edition: 392 condition records from 4 to 20 qubits, one SuperFermion 0.1.15 lane plus 5 external comparators and classical/analytical controls | [notebook, figures and tables](/downloads/Superfermion_requested_grid_Expanded_Results_web.zip) |
+| MPS and dynamic circuits | Laptop `laptop-l5lb07gu` | Seven frameworks, MPS from 50 to 1,000 qubits and mid-circuit measurement | [results](/downloads/mps_mcm_bench8_results_laptop-l5lb07gu.zip) · [suite](/downloads/mps_bench8_suite.zip) |
+| sf-cat | Laptop `laptop-l5lb07gu` | Cold and warm sampling with a 64-qubit GHZ boundary probe | [results](/downloads/sfcat_bench_results_laptop-l5lb07gu.zip) · [suite](/downloads/sfcat_bench_suite_laptop-l5lb07gu.zip) |
+| Execution modes | Laptop `laptop-l5lb07gu` | 24 conditions: stabilizer, large Clifford, adjoint gradient and density-matrix suites | [results](/downloads/sfmodes_bench_results_laptop-l5lb07gu.zip) · [suite](/downloads/sfmodes_bench_suite_laptop-l5lb07gu.zip) |
+| TechRxiv paper | Integrated study | 132 tables, 42 figures, 17 equations, 21 references, 107 pages | [Markdown](/downloads/SuperFermion_TechRxiv_Paper.md) · [LaTeX](/downloads/SuperFermion_TechRxiv_LaTeX.zip) |
+
+Every notebook and archive is documented, with the provenance recorded for each run, on the
+[Tech archive page](/docs/benchmarks/techrxiv#downloads).
 
 ## Does the paper match the raw runs?
 
@@ -57,12 +62,9 @@ its exact desktop job, and every execution-mode value must be identical to the l
 
 ## Downloads
 
-- [Desktop grid](/docs/benchmarks/desktop#downloads) — the TechRxiv paper edition. The
-campaign's generator notebook, 214 figures and 45 CSV/JSON tables ship in
-[`Superfermion_requested_grid_Expanded_Results_web.zip`](/downloads/Superfermion_requested_grid_Expanded_Results_web.zip)
-with the `modifications/` patch; the notebook's base commit, patch SHA-256 and thread count
-match `results/manifest.json` in the same archive. The complete 43.8 MiB archive exceeds the
-25 MiB per-file hosting limit, so this edition omits only `results/data/` (`.npz` inputs) and
-`results/raw/` (per-job records); every included member is byte-identical to the full archive.
-- [Laptop suite and results archives](/docs/benchmarks/laptop#downloads).
-- [Paper archive](/docs/benchmarks/techrxiv#downloads) — Markdown edition and LaTeX source.
+- [Tech archive page](/docs/benchmarks/techrxiv#downloads) — every notebook and archive in the
+  table above, with the provenance recorded for each study.
+- [Consistency report](/downloads/benchmark_consistency_report.json) — the 15 checks above in
+  machine-readable form.
+- [Paper archive](/downloads/SuperFermion_TechRxiv_LaTeX.zip) — LaTeX source;
+  [Markdown edition](/downloads/SuperFermion_TechRxiv_Paper.md).
