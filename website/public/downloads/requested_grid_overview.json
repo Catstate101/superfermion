@@ -1,0 +1,47 @@
+{
+  "profile": "requested_grid",
+  "expected_jobs": 2156,
+  "completed_jobs": 2156,
+  "successful_jobs": 2156,
+  "failed_jobs": 0,
+  "dataset_names": [
+    "breast_cancer",
+    "iris",
+    "wine",
+    "digits_01",
+    "moons",
+    "diabetes",
+    "friedman1"
+  ],
+  "simulator_lanes": [
+    "superfermion_wheel",
+    "superfermion_source_baseline",
+    "superfermion_optimized",
+    "qiskit",
+    "pennylane",
+    "cirq",
+    "cirq_f64",
+    "qulacs"
+  ],
+  "complete_process_groups": 252,
+  "measured_conditions": 252,
+  "modified_fastest_all": 139,
+  "modified_fastest_f64": 140,
+  "source_over_modified_median": 1.8286235827076198,
+  "source_over_modified_min": 0.8475538710577802,
+  "source_over_modified_max": 152.17390647177413,
+  "qulacs_over_modified_median": 1.0489042808277111,
+  "fresh_process_repetitions": 1,
+  "split_seeds": [
+    42
+  ],
+  "limitations": [
+    "CPU ideal statevector experiments only; no GPU, noise or hardware results",
+    "Runtime IQR is descriptive; validation profile is not a publication-quality statistical study",
+    "Small held-out splits and short optimizer budgets do not establish quantum ML advantage",
+    "Process memory includes imports/preparation/warmup, not statevector-only memory"
+  ],
+  "attempted_complete": true,
+  "pending_jobs": 0,
+  "complete": true
+}

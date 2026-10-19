@@ -67,10 +67,10 @@ All SuperFermion numbers on this page are 0.1.15. The campaign ran on the
 `superfermion==0.1.15` wheel is a separate compilation, extension SHA-256
 `2D040118…`. Before either was used the two were audited against each other:
 identical public surface, and three independent batch paths agree to
-`4.7e-16` on identical inputs. (The lane tree's `__version__` string reads
-`0.1.14` because the version bump landed after the optimisation work; the code
-and extension are the 0.1.15 release. The only API difference between the 0.1.15
-and 0.1.14 wheels is `sf.prepare()` and `PreparedCircuit`.)
+`4.7e-16` on identical inputs. The lane tree carries the 0.1.15 release code;
+its `__version__` string predates the version bump, and the only API difference
+between the 0.1.15 wheel and the previous one is `sf.prepare()` and
+`PreparedCircuit`.
 
 Why the curve has this shape is explained on
 [Why SuperFermion Is Fast](/docs/reference/execution-engine): the planner only
@@ -397,10 +397,10 @@ forms, the `sf.cat` modes, and the memory accounting — is on
 
 This page summarizes headline results. The complete run-by-run evidence — the
 2,156-job desktop grid archive, the 24-condition laptop execution-mode suite, and
-every table, figure and equation of the TechRxiv paper — is published with raw
+every table, figure and equation of the draft paper — is published with raw
 data, provenance and a row-by-row consistency check:
 
-- [Tech archive](/docs/benchmarks/techrxiv#downloads) — the TechRxiv paper edition with every study's notebook and archive, plus the row-by-row consistency check
+- [Draft paper](/docs/benchmarks/draft-paper#downloads) — the draft paper edition with every study's notebook and archive, plus the row-by-row consistency check
 
 See the [archive overview](/docs/benchmarks) for the verification table showing that the
 paper's numbers match the raw archives.

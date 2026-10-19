@@ -318,7 +318,7 @@ from superfermion.compiler import (
 )
 ```
 
-See the **[Compiler Guide](/docs/compiler)** for detailed pass documentation.
+See the **[Compiler Guide](/docs/guides/compiler)** for detailed pass documentation.
 
 ---
 
@@ -562,7 +562,7 @@ print(rep.syndrome_map())        # [[0, 1], [1, 2], [2, 3], [3, 4]] (check -> da
 circuit = rep.build(rounds=3)    # 3 repeated syndrome-extraction rounds
 ```
 
-See the **[QEC Guide](/docs/qec)** for all 10 codes and 4 decoders.
+See the **[QEC Guide](/docs/guides/qec)** for all 10 codes and 4 decoders.
 
 ---
 
@@ -587,7 +587,7 @@ qubit_op = fop.jordan_wigner(n_qubits=2)
 print(f"JW terms: {len(qubit_op.terms)}")
 ```
 
-See the **[Chemistry Guide](/docs/chemistry)** for full details.
+See the **[Chemistry Guide](/docs/guides/chemistry)** for full details.
 
 ---
 
@@ -721,7 +721,7 @@ result = sf.run(qc, device=ibm("ibm_brisbane"), shots=8192)
 | `device=cs("ibm:brisbane")` | User's IBM token (stored on Catstate) | Via platform |
 | `device=cs("best")` | Catstate's accounts | Via platform |
 
-See the **[QPU Providers Guide](/docs/providers)** for detailed setup instructions for each provider.
+See the **[QPU Providers Guide](/docs/guides/providers)** for detailed setup instructions for each provider.
 
 ---
 
@@ -744,7 +744,7 @@ from superfermion.nn.tf_layer import TFQuantumLayer
 # layer = TorchQuantumLayer(circuit, obs, feature_names=["x0"])
 ```
 
-See the **[ML Integration Guide](/docs/ml-integration)** for complete examples with all three frameworks.
+See the **[ML Integration Guide](/docs/guides/ml-frameworks)** for complete examples with all three frameworks.
 
 ---
 
