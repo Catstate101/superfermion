@@ -29,8 +29,18 @@ export async function generateMetadata(props: { params: Promise<{ slug?: string[
   const params = await props.params;
   const page = source.getPage(params.slug);
   if (!page) notFound();
+
+  // Section landing pages are titled "Overview" so the sidebar does not repeat
+  // the folder label; prefix the section to keep the document title unique.
+  const slug = params.slug ?? [];
+  const section = slug[slug.length - 1];
+  const title =
+    page.data.title === "Overview" && section
+      ? `${section[0].toUpperCase()}${section.slice(1)} overview`
+      : page.data.title;
+
   return {
-    title: page.data.title,
+    title,
     description: page.data.description,
   };
 }
