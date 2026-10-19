@@ -2008,6 +2008,63 @@ cell. The two sf-cat archives were packed before that label cell was added, so
 `_sfcat_bench.ipynb` (10 cells in the suite archive) carries none; its run identity is recorded
 in `run_summary.json` and `README_RESULTS.txt` instead.
 
+### The sf-cat backend, on its own
+
+The cat backend (`crates/sf-cat`) is the opt-in compile-once core: it plans a circuit once and
+samples from the plan. `stab` and `cliff` compile to the same Pauli-frame tableau, so the modes
+study measures one pipeline in two qubit ranges. The MPS/MCM suite has no cat lane — its seven
+lanes are `sf_optimized`, `sf_wheel`, `sf_source`, Aer, PennyLane, Cirq and Qulacs — and neither
+archive holds a cat MPS row. `crates/sf-cat/src/router.rs` names an `Mps` representation as its
+last-resort selection, but nothing behind that selection was run here.
+
+The three tables below lift the cat rows out of the two archives. `cat cold` is a fresh plan,
+build and sample; `build`, `plan`, `pack` and `counts` are recorded components and do not add up
+to it exactly. Stim is a single full call, and PennyLane and Aer are first-call timings. The CSVs
+also carry warm PennyLane and Aer numbers, but the cat archives record no warm column, so none are
+set against cat here. Aer stops at 256 qubits and Cirq at 64, recorded as `not_run_capped` rather
+than as zero.
+
+**Stabilizer rung, modes study** — `sfmodes_bench_stab.csv`, 2,000 shots
+
+| circuit | n | gates | cat cold | build | plan | pack | counts | stim | PennyLane | Aer |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ghz | 64 | — | 0.2255 | 0.1012 | 0.06573 | 0.04478 | 0.06543 | 0.4263 | 16.31 | 224.9 |
+| ghz | 256 | — | 1.274 | 0.8487 | 0.212 | 0.0744 | 0.2036 | 2.23 | 52.76 | 4,661 |
+| brick | 64 | 1,271 | 2.027 | 1.047 | 0.5117 | 0.05165 | 0.5228 | 0.3666 | 55.57 | 294.5 |
+| brick | 256 | 5,106 | 9.047 | 5.156 | 2.454 | 0.1534 | 2.008 | 2.648 | 381.9 | 3,626 |
+| randcliff | 256 | 3,120 | 11.47 | 3.475 | 6.344 | 0.1487 | 1.512 | 3.654 | 180.9 | 7,534 |
+| randcliff | 1,024 | 12,300 | 210 | 45.3 | 159.8 | 0.3408 | 3.986 | 54.92 | 746.5 | — |
+
+**Clifford rung, modes study** — `sfmodes_bench_cliff.csv`, 2,000 shots
+
+| circuit | n | gates | cat cold | build | plan | pack | counts | stim | PennyLane | Aer |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ghz | 1,024 | — | 8.678 | 6.113 | 1.727 | 0.2789 | 0.8224 | 13.83 | 355.9 | — |
+| ghz | 4,096 | — | 116.2 | 92.65 | 19.66 | 0.4806 | 2.653 | 149.6 | 3,524 | — |
+| brick | 1,024 | 20,523 | 119.2 | 95.63 | 16.73 | 0.3642 | 4.676 | 20.37 | 1,190 | — |
+| brick | 4,096 | 81,951 | 2,106 | 1,854 | 230.8 | 1.31 | 17.28 | 231.2 | 7,231 | — |
+| randcliff | 4,096 | 49,327 | 9,397 | 966.1 | 8,021 | 1.577 | 14.08 | 4,413 | 9,547 | — |
+
+**Dedicated sf-cat sweep** — `sfcat_bench_rows.csv`, 2,000 shots, seven repetitions, depth 8
+
+| circuit | n | gates | cat cold | build | plan | pack | counts | stim | PennyLane | Aer |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ghz | 64 | — | 0.2422 | 0.1094 | 0.076 | 0.04133 | 0.06077 | 0.5551 | 17.24 | 279 |
+| ghz | 256 | — | 2.358 | 1.551 | 0.5548 | 0.1153 | 0.3244 | 3.187 | 69.88 | 7,032 |
+| ghz | 1,024 | — | 14.37 | 10.08 | 3.177 | 0.3877 | 1.216 | 15.75 | 415.3 | — |
+| ghz | 4,096 | — | 158.6 | 128.7 | 24.79 | 0.5917 | 3.417 | 172.3 | 4,342 | — |
+| brick | 64 | 1,271 | 3.163 | 1.678 | 0.5521 | 0.0639 | 0.6072 | 0.3259 | 70.86 | 352.7 |
+| brick | 256 | 5,106 | 20.86 | 12.52 | 5.764 | 0.3511 | 3.105 | 3.928 | 261.8 | 4,333 |
+| brick | 1,024 | 20,523 | 192.6 | 159.8 | 26.6 | 0.724 | 6.996 | 24.32 | 1,616 | — |
+| brick | 4,096 | 81,951 | 2,354 | 2,096 | 217.5 | 1.841 | 18.18 | 206 | 7,642 | — |
+
+Across these nineteen rows cat is faster than Stim on all eight GHZ rows and slower on all eleven
+brick and random-Clifford rows; at brick-4,096 that is 2,354 ms against 206 ms. Most of the cold
+time is build at GHZ-4,096 (92.65 of 116.2 ms) and planning at random-Clifford-4,096 (8,021 of
+9,397 ms). The sweep's own `report.md` flags GHZ-64 as budget-boundary data: a probe window in
+the same round measured 0.414 ms for cat against 0.399 ms for Stim, so the 64-qubit margin is not
+stable.
+
 ### Notebooks in the LaTeX package
 
 The package carries the two benchmark notebooks it was built from, in five places: loose
