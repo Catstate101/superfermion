@@ -1994,11 +1994,14 @@ The site hosts one notebook and one archive set per study.
 | sf-cat | Laptop `laptop-l5lb07gu` | [results](/downloads/sfcat_bench_results_laptop-l5lb07gu.zip) · [suite](/downloads/sfcat_bench_suite_laptop-l5lb07gu.zip) |
 | Execution modes | Laptop `laptop-l5lb07gu` | [results](/downloads/sfmodes_bench_results_laptop-l5lb07gu.zip) · [suite](/downloads/sfmodes_bench_suite_laptop-l5lb07gu.zip) |
 
-The standalone grid notebook is 368,046 bytes and 86 cells, byte-identical to the copy inside
-the bundle. The 20.8 MiB bundle is a web edition of the 43.8 MiB campaign archive: it keeps
-the notebook, all 214 figures and the 45 CSV/JSON tables, and omits only `results/data/`
-(`.npz` inputs) and `results/raw/` (per-job records). `README_WEB_EDITION.md` inside the zip
-records the full archive's SHA-256 and the exact omissions.
+The standalone grid notebook is 86 cells and holds the same JSON as the copy inside the
+bundle; the only difference is line endings. Git normalises the repository copy to LF, so the
+download is 362,254 bytes while the member inside the zip is 368,046 bytes with CRLF.
+
+The 20.8 MiB bundle is a web edition of the 43.8 MiB campaign archive: it keeps the notebook,
+all 214 figures and the 45 CSV/JSON tables, and omits only `results/data/` (`.npz` inputs) and
+`results/raw/` (per-job records). `README_WEB_EDITION.md` inside the zip records the full
+archive's SHA-256 and the exact omissions.
 
 The MPS/MCM results archive carries `MPS_MCM_Benchmark_7Framework.ipynb` with its release-label
 cell. The two sf-cat archives were packed before that label cell was added, so
