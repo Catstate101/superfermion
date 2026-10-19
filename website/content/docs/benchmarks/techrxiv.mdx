@@ -2015,55 +2015,98 @@ samples from the plan. `stab` and `cliff` compile to the same Pauli-frame tablea
 study measures one pipeline in two qubit ranges. The MPS/MCM suite has no cat lane — its seven
 lanes are `sf_optimized`, `sf_wheel`, `sf_source`, Aer, PennyLane, Cirq and Qulacs — and neither
 archive holds a cat MPS row. `crates/sf-cat/src/router.rs` names an `Mps` representation as its
-last-resort selection, but nothing behind that selection was run here.
+last-resort selection, but the router is a cost model only: `available_in_cat()` is true solely
+for the dense statevector variant, and `Mode` in `plan.rs` has no MPS member, so no cat MPS row
+exists or could be produced by this binary.
 
-The three tables below lift the cat rows out of the two archives. `cat cold` is a fresh plan,
-build and sample; `build`, `plan`, `pack` and `counts` are recorded components and do not add up
-to it exactly. Stim is a single full call, and PennyLane and Aer are first-call timings. The CSVs
-also carry warm PennyLane and Aer numbers, but the cat archives record no warm column, so none are
-set against cat here. Aer stops at 256 qubits and Cirq at 64, recorded as `not_run_capped` rather
-than as zero.
+The four cat timers that `crates/sf-cat/examples/l1_bench.rs` records are:
 
-**Stabilizer rung, modes study** — `sfmodes_bench_stab.csv`, 2,000 shots
+- `build` — `FrameTableau::from_gate_list`: turn the gate list into the Pauli-frame tableau.
+- `plan` — `build_plan`: the per-qubit sampling plan, where each qubit is either a fresh random
+  variable or an XOR of earlier variables plus a phase.
+- `pack` — `sample_packed` on the prepared tableau: samples as packed `u64` words, the raw-array
+  output class.
+- `counts` — `sample` on the prepared tableau: sample and aggregate into a counts map, the output
+  class the product returns.
 
-| circuit | n | gates | cat cold | build | plan | pack | counts | stim | PennyLane | Aer |
-|---|---|---|---|---|---|---|---|---|---|---|
-| ghz | 64 | — | 0.2255 | 0.1012 | 0.06573 | 0.04478 | 0.06543 | 0.4263 | 16.31 | 224.9 |
-| ghz | 256 | — | 1.274 | 0.8487 | 0.212 | 0.0744 | 0.2036 | 2.23 | 52.76 | 4,661 |
-| brick | 64 | 1,271 | 2.027 | 1.047 | 0.5117 | 0.05165 | 0.5228 | 0.3666 | 55.57 | 294.5 |
-| brick | 256 | 5,106 | 9.047 | 5.156 | 2.454 | 0.1534 | 2.008 | 2.648 | 381.9 | 3,626 |
-| randcliff | 256 | 3,120 | 11.47 | 3.475 | 6.344 | 0.1487 | 1.512 | 3.654 | 180.9 | 7,534 |
-| randcliff | 1,024 | 12,300 | 210 | 45.3 | 159.8 | 0.3408 | 3.986 | 54.92 | 746.5 | — |
+`cat cold` is build plus plan plus the first sample. `pack` and `counts` run after the plan already
+exists, so they are warm numbers that differ only by output class, and `counts` is the warm figure
+the sweep's verdict ranks. That is why the four pieces do not add up to the cold total.
 
-**Clifford rung, modes study** — `sfmodes_bench_cliff.csv`, 2,000 shots
+**Cold: stabilizer rung, modes study** — `sfmodes_bench_stab.csv`, 2,000 shots
 
-| circuit | n | gates | cat cold | build | plan | pack | counts | stim | PennyLane | Aer |
-|---|---|---|---|---|---|---|---|---|---|---|
-| ghz | 1,024 | — | 8.678 | 6.113 | 1.727 | 0.2789 | 0.8224 | 13.83 | 355.9 | — |
-| ghz | 4,096 | — | 116.2 | 92.65 | 19.66 | 0.4806 | 2.653 | 149.6 | 3,524 | — |
-| brick | 1,024 | 20,523 | 119.2 | 95.63 | 16.73 | 0.3642 | 4.676 | 20.37 | 1,190 | — |
-| brick | 4,096 | 81,951 | 2,106 | 1,854 | 230.8 | 1.31 | 17.28 | 231.2 | 7,231 | — |
-| randcliff | 4,096 | 49,327 | 9,397 | 966.1 | 8,021 | 1.577 | 14.08 | 4,413 | 9,547 | — |
+| circuit | n | gates | cat cold | build | plan | stim cold | PennyLane cold | Aer cold |
+|---|---|---|---|---|---|---|---|---|
+| ghz | 64 | — | 0.2255 | 0.1012 | 0.06573 | 0.4263 | 16.31 | 224.9 |
+| ghz | 256 | — | 1.274 | 0.8487 | 0.212 | 2.23 | 52.76 | 4,661 |
+| brick | 64 | 1,271 | 2.027 | 1.047 | 0.5117 | 0.3666 | 55.57 | 294.5 |
+| brick | 256 | 5,106 | 9.047 | 5.156 | 2.454 | 2.648 | 381.9 | 3,626 |
+| randcliff | 256 | 3,120 | 11.47 | 3.475 | 6.344 | 3.654 | 180.9 | 7,534 |
+| randcliff | 1,024 | 12,300 | 210 | 45.3 | 159.8 | 54.92 | 746.5 | — |
 
-**Dedicated sf-cat sweep** — `sfcat_bench_rows.csv`, 2,000 shots, seven repetitions, depth 8
+**Cold: Clifford rung, modes study** — `sfmodes_bench_cliff.csv`, 2,000 shots
 
-| circuit | n | gates | cat cold | build | plan | pack | counts | stim | PennyLane | Aer |
-|---|---|---|---|---|---|---|---|---|---|---|
-| ghz | 64 | — | 0.2422 | 0.1094 | 0.076 | 0.04133 | 0.06077 | 0.5551 | 17.24 | 279 |
-| ghz | 256 | — | 2.358 | 1.551 | 0.5548 | 0.1153 | 0.3244 | 3.187 | 69.88 | 7,032 |
-| ghz | 1,024 | — | 14.37 | 10.08 | 3.177 | 0.3877 | 1.216 | 15.75 | 415.3 | — |
-| ghz | 4,096 | — | 158.6 | 128.7 | 24.79 | 0.5917 | 3.417 | 172.3 | 4,342 | — |
-| brick | 64 | 1,271 | 3.163 | 1.678 | 0.5521 | 0.0639 | 0.6072 | 0.3259 | 70.86 | 352.7 |
-| brick | 256 | 5,106 | 20.86 | 12.52 | 5.764 | 0.3511 | 3.105 | 3.928 | 261.8 | 4,333 |
-| brick | 1,024 | 20,523 | 192.6 | 159.8 | 26.6 | 0.724 | 6.996 | 24.32 | 1,616 | — |
-| brick | 4,096 | 81,951 | 2,354 | 2,096 | 217.5 | 1.841 | 18.18 | 206 | 7,642 | — |
+| circuit | n | gates | cat cold | build | plan | stim cold | PennyLane cold | Aer cold |
+|---|---|---|---|---|---|---|---|---|
+| ghz | 1,024 | — | 8.678 | 6.113 | 1.727 | 13.83 | 355.9 | — |
+| ghz | 4,096 | — | 116.2 | 92.65 | 19.66 | 149.6 | 3,524 | — |
+| brick | 1,024 | 20,523 | 119.2 | 95.63 | 16.73 | 20.37 | 1,190 | — |
+| brick | 4,096 | 81,951 | 2,106 | 1,854 | 230.8 | 231.2 | 7,231 | — |
+| randcliff | 4,096 | 49,327 | 9,397 | 966.1 | 8,021 | 4,413 | 9,547 | — |
 
-Across these nineteen rows cat is faster than Stim on all eight GHZ rows and slower on all eleven
-brick and random-Clifford rows; at brick-4,096 that is 2,354 ms against 206 ms. Most of the cold
-time is build at GHZ-4,096 (92.65 of 116.2 ms) and planning at random-Clifford-4,096 (8,021 of
-9,397 ms). The sweep's own `report.md` flags GHZ-64 as budget-boundary data: a probe window in
-the same round measured 0.414 ms for cat against 0.399 ms for Stim, so the 64-qubit margin is not
-stable.
+**Cold: dedicated sf-cat sweep** — `sfcat_bench_rows.csv`, 2,000 shots, seven repetitions, depth 8
+
+| circuit | n | gates | cat cold | build | plan | stim cold | PennyLane cold | Aer cold |
+|---|---|---|---|---|---|---|---|---|
+| ghz | 64 | — | 0.2422 | 0.1094 | 0.076 | 0.5551 | 17.24 | 279 |
+| ghz | 256 | — | 2.358 | 1.551 | 0.5548 | 3.187 | 69.88 | 7,032 |
+| ghz | 1,024 | — | 14.37 | 10.08 | 3.177 | 15.75 | 415.3 | — |
+| ghz | 4,096 | — | 158.6 | 128.7 | 24.79 | 172.3 | 4,342 | — |
+| brick | 64 | 1,271 | 3.163 | 1.678 | 0.5521 | 0.3259 | 70.86 | 352.7 |
+| brick | 256 | 5,106 | 20.86 | 12.52 | 5.764 | 3.928 | 261.8 | 4,333 |
+| brick | 1,024 | 20,523 | 192.6 | 159.8 | 26.6 | 24.32 | 1,616 | — |
+| brick | 4,096 | 81,951 | 2,354 | 2,096 | 217.5 | 206 | 7,642 | — |
+
+**Warm sampling, all three runs** — `cat_pack_ms` and `cat_counts_ms`, against the warm columns of
+the same CSVs
+
+| run | circuit | n | cat warm (packed) | cat warm (counts) | sf-ir warm | stim warm | PennyLane warm | Aer warm |
+|---|---|---|---|---|---|---|---|---|
+| stab | ghz | 64 | 0.04478 | 0.06543 | 0.1865 | 0.3435 | 11.99 | 232.9 |
+| stab | ghz | 256 | 0.0744 | 0.2036 | 0.3565 | 2.058 | 52.02 | 4,817 |
+| stab | brick | 64 | 0.05165 | 0.5228 | 0.8207 | 0.2366 | 54.26 | 270.6 |
+| stab | brick | 256 | 0.1534 | 2.008 | 1.475 | 2.114 | 237.7 | 3,419 |
+| stab | randcliff | 256 | 0.1487 | 1.512 | 1.564 | 2.112 | 125.3 | 7,432 |
+| stab | randcliff | 1,024 | 0.3408 | 3.986 | 4.639 | 10.56 | 661 | — |
+| cliff | ghz | 1,024 | 0.2789 | 0.8224 | 1.135 | 10.75 | 345.8 | — |
+| cliff | ghz | 4,096 | 0.4806 | 2.653 | 4.951 | 76.53 | 3,181 | — |
+| cliff | brick | 1,024 | 0.3642 | 4.676 | 4.734 | 14.36 | 1,267 | — |
+| cliff | brick | 4,096 | 1.31 | 17.28 | 18.61 | 93.33 | 6,917 | — |
+| cliff | randcliff | 4,096 | 1.577 | 14.08 | 16.29 | 94.05 | 9,599 | — |
+| sweep | ghz | 64 | 0.04133 | 0.06077 | 0.1587 | 0.3109 | 15.45 | 282.3 |
+| sweep | ghz | 256 | 0.1153 | 0.3244 | 0.6326 | 3.073 | 64.95 | 7,083 |
+| sweep | ghz | 1,024 | 0.3877 | 1.216 | 1.946 | 12.93 | 413.5 | — |
+| sweep | ghz | 4,096 | 0.5917 | 3.417 | 7.496 | 85.23 | 4,792 | — |
+| sweep | brick | 64 | 0.0639 | 0.6072 | 1.178 | 0.2439 | 67.69 | 335.9 |
+| sweep | brick | 256 | 0.3511 | 3.105 | 3.241 | 3.489 | 254.1 | 4,313 |
+| sweep | brick | 1,024 | 0.724 | 6.996 | 6.601 | 17.1 | 1,604 | — |
+| sweep | brick | 4,096 | 1.841 | 18.18 | 23.03 | 93.83 | 7,636 | — |
+
+Across the cold rows cat is faster than Stim on all eight GHZ rows and slower on all eleven brick
+and random-Clifford rows; at brick-4,096 that is 2,354 ms against 206 ms. Most of the cold time is
+build at GHZ-4,096 (92.65 of 116.2 ms) and planning at random-Clifford-4,096 (8,021 of 9,397 ms).
+Once the plan exists, the counts map beats Stim's warm sampler on 17 of the 19 rows; the two
+losses are brick-64 in both runs (0.5228 against 0.2366 ms in the modes run, 0.6072 against
+0.2439 ms in the sweep). Packing raw words is cheaper than the counts map at every size, for
+example 0.5917 against 3.417 ms at GHZ-4,096.
+
+Stim's cold column is `compile_sampler` plus one `sample`, and its warm column is sampler reuse.
+PennyLane cold builds a fresh device and QNode while warm re-runs that QNode; Aer cold adds a
+fresh simulator and `measure_all` per repetition. Their cold numbers therefore include setup the
+cat row does not pay. Aer stops at 256 qubits and Cirq at 64, recorded as `not_run_capped` rather
+than as zero; the single Cirq row, GHZ-64, took 27.69 s. The sweep's own `report.md` flags GHZ-64
+as budget-boundary data: a probe window in the same round measured 0.414 ms for cat against
+0.399 ms for Stim, so the 64-qubit cold margin is not stable.
 
 ### Notebooks in the LaTeX package
 
