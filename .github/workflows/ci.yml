@@ -31,7 +31,22 @@ jobs:
           components: clippy, rustfmt
       - run: cargo check --all-targets --manifest-path crates/sf-ir/Cargo.toml
       - run: cargo fmt --check --all
-      - run: cargo clippy --workspace -- -D warnings
+      - name: cargo clippy
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --workspace -- -D warnings > "$RUNNER_TEMP/clippy.log" 2>&1
+          status=$?
+          cat "$RUNNER_TEMP/clippy.log"
+          if [ "$status" -ne 0 ]; then
+            # Job logs need a GitHub login; check annotations do not, so put the
+            # first diagnostics on the check run itself.
+            grep -m 6 -E '^(error|warning)' "$RUNNER_TEMP/clippy.log" |
+              while IFS= read -r line; do
+                echo "::error title=clippy::${line:0:900}"
+              done
+          fi
+          exit "$status"
       - run: cargo test --workspace
 
   # ── Python checks ────────────────────────────────────────
