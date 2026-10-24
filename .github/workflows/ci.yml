@@ -22,7 +22,13 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      # The runner images preinstall stable without clippy (Ubuntu 26.04 ships
+      # cargo/rustc/rustfmt only), so rustup treats the toolchain as present and
+      # `cargo clippy` dies with "no such command". Ask for the components
+      # explicitly; rustup adds them to the preinstalled toolchain.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - run: cargo check --all-targets --manifest-path crates/sf-ir/Cargo.toml
       - run: cargo fmt --check --all
       - run: cargo clippy --workspace -- -D warnings
