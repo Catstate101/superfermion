@@ -1,6 +1,6 @@
 ---
 title: "Why SuperFermion Is Fast"
-description: "Execution-engine deep dive for SuperFermion 0.1.15: the statevector IR, the instruction-plan math, the Rust kernels, and the sf.prepare / sf.cat handles that remove per-call cost."
+description: "Execution-engine deep dive for SuperFermion 0.1.16: the statevector IR, the instruction-plan math, the Rust kernels, and the sf.prepare / sf.cat handles that remove per-call cost."
 ---
 
 This page is the mechanism-level answer to "why is it faster". It is not a
@@ -12,6 +12,13 @@ because it measured slower.
 
 Everything below is grounded in the 0.1.15 source: `crates/sf-ir`,
 `crates/sf-cat`, `crates/sf-compiler`, and `crates/sf-bindings`.
+
+**Release note (0.1.16).** 0.1.16 changes no Rust code — the `crates/` tree is
+identical to 0.1.15 — so the mechanism on this page, and the command transcripts
+that quote 0.1.15, describe the 0.1.16 wheel as well. What 0.1.16 adds lives on
+the Python side: the D1–D4/D10 fix layer now ships inside the package, and
+`sf.cat` / `sf.prepare` refuse a circuit whose opaque unitary spans more than
+three qubits instead of failing inside the binding.
 
 ## The four cost terms
 

@@ -72,6 +72,9 @@ its `__version__` string predates the version bump, and the only API difference
 between the 0.1.15 wheel and the previous one is `sf.prepare()` and
 `PreparedCircuit`.
 
+0.1.16 rebuilds the same Rust sources, so these numbers still describe the
+shipped kernel; they were not re-measured for the release.
+
 Why the curve has this shape is explained on
 [Why SuperFermion Is Fast](/docs/reference/execution-engine): the planner only
 enables fusion and run merging at `2^20` amplitudes (n=20) and above, because

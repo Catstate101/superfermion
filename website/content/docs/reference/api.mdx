@@ -54,6 +54,12 @@ print(qc.draw())       # ASCII diagram
 | Custom | `unitary(matrix, *qubits)` |
 | Special | `measure(q)`, `measure_all()`, `barrier(*qubits)`, `reset(q)` |
 
+`unitary(matrix, *qubits)` is stored as a single opaque gate. Up to three
+qubits it runs on every method. Above three qubits `to_ir()` returns a
+compatibility DAG that applies the matrix on `method="statevector"` only; the
+MPS, density-matrix and stabilizer paths raise a directed `ValueError` rather
+than dropping the gate.
+
 ### Circuit Properties
 
 | Property | Type | Description |
@@ -270,6 +276,13 @@ print(stab.sample(1000, seed=7))               # little-endian counts
 ```
 
 Modes: `statevector` → `.simulate(values)`; `adjoint` → `.run_gradient(pauli, theta)` returns one `d⟨P⟩/dθ` per parameter (Pauli string `"IXYZ…"`, character `i` acts on qubit `i`); `stabilizer` / `clifford` → `.sample(shots, seed=…)`. The handle also exposes `.n_qubits` and `.parameter_names`. `density_matrix` is not implemented and raises `ValueError` at construction rather than returning wrong numbers; a build that does not export `CatCircuit` makes `sf.cat()` raise a clear `ImportError`.
+
+One circuit shape is refused: if an opaque `unitary()` spans more than three
+qubits, `Circuit.to_ir()` returns the compatibility DAG described under
+[Available Gates](#available-gates), and `sf.cat()` / `sf.prepare()` raise
+`ValueError` naming the API instead of leaking a binding error. Execute those
+circuits with `sf.run(..., method="statevector")`, or decompose the matrix into
+gates of at most three qubits before compiling a handle.
 
 ---
 
