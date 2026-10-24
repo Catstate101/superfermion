@@ -40,10 +40,15 @@ jobs:
           cat "$RUNNER_TEMP/clippy.log"
           if [ "$status" -ne 0 ]; then
             # Job logs need a GitHub login; check annotations do not, so put the
-            # first diagnostics on the check run itself.
-            grep -m 6 -E '^(error|warning)' "$RUNNER_TEMP/clippy.log" |
-              while IFS= read -r line; do
-                echo "::error title=clippy::${line:0:900}"
+            # first diagnostics on the check run itself. cargo writes ANSI colour
+            # (CARGO_TERM_COLOR=always), so strip it before matching.
+            sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$RUNNER_TEMP/clippy.log" \
+              > "$RUNNER_TEMP/clippy.clean"
+            {
+              grep -m 4 -E 'error(\[|:)|^warning' "$RUNNER_TEMP/clippy.clean" || true
+              tail -n 4 "$RUNNER_TEMP/clippy.clean"
+            } | awk '!seen[$0]++' | while IFS= read -r line; do
+                [ -n "$line" ] && echo "::error title=clippy::${line:0:900}"
               done
           fi
           exit "$status"
