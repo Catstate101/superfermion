@@ -22,6 +22,13 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      # pyo3 0.23 supports CPython up to 3.13, and ubuntu-latest now mixes in
+      # Ubuntu 26.04 runners whose python3 is 3.14, so the pyo3-ffi build script
+      # aborts before any crate is checked. Build against a pinned interpreter,
+      # the same way the python matrix does, and point pyo3 at it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       # The runner images preinstall stable without clippy (Ubuntu 26.04 ships
       # cargo/rustc/rustfmt only), so rustup treats the toolchain as present and
       # `cargo clippy` dies with "no such command". Ask for the components
@@ -33,6 +40,8 @@ jobs:
       - run: cargo fmt --check --all
       - name: cargo clippy
         shell: bash
+        env:
+          PYO3_PYTHON: python
         run: |
           set +e
           cargo clippy --workspace -- -D warnings > "$RUNNER_TEMP/clippy.log" 2>&1
@@ -53,6 +62,8 @@ jobs:
           fi
           exit "$status"
       - run: cargo test --workspace
+        env:
+          PYO3_PYTHON: python
 
   # ── Python checks ────────────────────────────────────────
   python:
