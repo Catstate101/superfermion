@@ -2,6 +2,50 @@
 
 All notable changes to the Superfermion framework.
 
+## [0.1.16] — 2026-10-24
+
+### Fixed
+- **Grover string convention** — `GroverOracle`/`grover_search` now treat
+  marked strings and `top_bitstring` as counts keys (q0 last), so
+  non-palindromic marks round-trip; the sampled branch traces out Toffoli
+  ancillas.
+- **QAOA cut metadata** — `QAOA._cut_value` now reverses the counts key before
+  indexing the edge list, fixing `metadata["max_cut_value"]` on asymmetric
+  graphs (a 4-node star reports 3, not 1).
+- **Opaque unitaries above three qubits (D1)** — `Circuit.to_ir()` returns a
+  compatibility DAG for circuits that contain a `unitary()` on more than three
+  qubits; the statevector path applies the matrix instead of silently dropping
+  it, and the MPS / density-matrix / stabilizer paths raise a directed error.
+- **UNITARY matrices in serialization (D2)** — `to_json` / `from_json` and the
+  `.sfc` format carry a `matrix` field next to `params`, including the
+  `use_rust_storage=True` path; a `UNITARY` record without a matrix is rejected
+  instead of reloading into a circuit that cannot execute.
+- **Readout noise on pure-state methods (D3)** — readout-only `NoiseModel`s
+  are applied to sampled counts on `statevector` and `mps` as well as
+  `density_matrix`; gate noise still warns on the pure-state paths.
+- **Stabilizer `shots=0` probabilities (D4)** — returns the exact `|c|^2`
+  table (statevector fallback, capped at 20 qubits) instead of `{}`.
+- **MPS output order after long-range gates (D10)** — `MPSState.to_statevector`
+  and `sf.run(method="mps")` report qubit order; the physical-site view stays
+  available as `to_statevector_sites`.
+- **`sf.cat` / `sf.prepare` on the D1 compatibility path** — a circuit whose
+  opaque unitary spans more than three qubits now raises a directed
+  `ValueError` naming the API, instead of the PyO3 `TypeError` about
+  `QuantumDAG` that the proxy produced.
+- **Version string in the D1 fallback error** — the >3-qubit unitary error on
+  the MPS, density-matrix and stabilizer paths named 0.1.15 unconditionally;
+  it now reports the version of the package that raised it.
+
+### Tests
+- Regression coverage for both conventions in `tests/domain/test_grover.py`
+  and `tests/domain/test_qaoa_minimize.py`.
+- 26 regression tests in `tests/unit/test_v015_d1_d10_fixes.py` cover D1-D4 and
+  D10, including the `use_rust_storage` serialization path; the stabilizer
+  expectation in `tests/domain/test_sup_regression.py` was updated to the
+  corrected D4 behaviour.
+- 8 tests in `tests/unit/test_v016_cat_prepare_guard.py` pin the cat/prepare
+  guard and the paths it must not disturb.
+
 ## [0.1.0] — 2026-08-10
 
 ### Added

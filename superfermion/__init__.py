@@ -30,7 +30,7 @@ Application modules (importable but not promoted to ``sf.*``):
     superfermion.viz          — circuit visualization
 """
 
-__version__ = "0.1.15"
+__version__ = "0.1.16"
 
 # ── Core imports (only numpy required) ────────────────────────────────
 from superfermion.circuit import Circuit
@@ -118,6 +118,11 @@ from superfermion.mitigation import ClassicalShadow, classical_shadow, shadow_ex
 
 # cat backend: compile-once execution handle (statevector wired first).
 from superfermion.cat import cat
+
+# Additive 0.1.15 compatibility shims (MPS output order; >3-qubit
+# statevector fallback proxy).  Importing the module installs the MPS
+# wrapper; no compiled-core symbol is replaced.
+import superfermion._fixes as _fixes  # noqa: F401,E402
 
 
 __all__ = [

@@ -414,11 +414,17 @@ class TestProbabilitiesPopulated:
             assert abs(sv[int(k, 2)]) ** 2 > 1e-12, f"key {k} has zero amplitude"
 
     def test_stabilizer_path(self):
-        """(f) stabilizer shots>0 from counts; shots=0 stays empty (no counts)."""
+        """(f) stabilizer shots>0 from counts; shots=0 stays empty (no counts).
+
+        D4 fix: shots=0 now exposes the exact |c|² table (read from a
+        statevector pass) instead of an empty dict, which was
+        indistinguishable from "no outcomes".
+        """
         r = sf.run(self._C3, method="stabilizer", shots=1000, seed=7)
         assert r.probabilities == {k: v / 1000 for k, v in r.counts.items()}
         r = sf.run(self._C3, method="stabilizer", shots=0, seed=7)
-        assert r.probabilities == {}
+        assert r.counts == {}
+        assert r.probabilities == pytest.approx({"000": 0.5, "111": 0.5})
 
     def test_get_probabilities_unchanged(self):
         """(f) get_probabilities() semantics preserved."""

@@ -485,6 +485,70 @@ class NoiseModel:
                 noisy[new_bs] = noisy.get(new_bs, 0) + 1
         return noisy
 
+    def apply_to_counts_fast(
+        self, counts: Dict[str, int], rng=None
+    ) -> Dict[str, int]:
+        """Vectorized readout-error sampling for binary count keys.
+
+        Mathematically identical to :meth:`apply_to_counts` (each measured
+        bit flips independently with probability ``p``), but samples all
+        shots of a key at once with NumPy.  Falls back to the scalar loop
+        for keys wider than 63 bits, where the packed-integer mapping is not
+        available.
+        """
+        p = self.readout_error or self._readout_p
+        if p <= 0:
+            return counts
+        if rng is None:
+            rng = np.random.default_rng(42)
+        elif not isinstance(rng, np.random.Generator):
+            rng = np.random.default_rng(int(np.asarray(rng).flat[0]))
+
+        noisy: Dict[str, int] = {}
+        for bs, count in counts.items():
+            count = int(count)
+            n_bits = len(bs)
+            if count <= 0:
+                continue
+            if n_bits == 0 or n_bits > 63:
+                for _ in range(count):
+                    bits = list(bs)
+                    for i in range(len(bits)):
+                        if rng.random() < p:
+                            bits[i] = '1' if bits[i] == '0' else '0'
+                    new_bs = ''.join(bits)
+                    noisy[new_bs] = noisy.get(new_bs, 0) + 1
+                continue
+
+            bits = np.frombuffer(bs.encode("ascii"), dtype=np.uint8) - 48
+            if bits.size != n_bits:
+                # Non-binary key: preserve the scalar behavior instead of
+                # silently packing an unexpected representation.
+                for _ in range(count):
+                    chars = list(bs)
+                    for i in range(len(chars)):
+                        if rng.random() < p:
+                            chars[i] = '1' if chars[i] == '0' else '0'
+                    new_bs = ''.join(chars)
+                    noisy[new_bs] = noisy.get(new_bs, 0) + 1
+                continue
+
+            weights = np.left_shift(
+                np.uint64(1), np.arange(n_bits - 1, -1, -1, dtype=np.uint64)
+            )
+            chunk = max(1, 1_000_000 // n_bits)
+            remaining = count
+            while remaining > 0:
+                block = min(chunk, remaining)
+                flips = rng.random((block, n_bits)) < p
+                packed = (bits ^ flips).astype(np.uint64) @ weights
+                values, occurrences = np.unique(packed, return_counts=True)
+                for value, occurrences_i in zip(values, occurrences):
+                    key = format(int(value), f"0{n_bits}b")
+                    noisy[key] = noisy.get(key, 0) + int(occurrences_i)
+                remaining -= block
+        return noisy
+
     @property
     def has_targeted_2q(self) -> bool:
         """True when any 2-qubit channel carries an explicit ``qubits=`` pair.

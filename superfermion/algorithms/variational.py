@@ -363,9 +363,14 @@ class QAOA:
             },
         )
 
+    # ``bitstring`` follows the counts-key convention: character i is
+    # qubit n-1-i, as in Result.counts and metadata["best_bitstring"].
     def _cut_value(self, bitstring: str) -> float:
         """Compute cut value for a given bitstring assignment."""
         assignment = [int(b) for b in bitstring]
+        # Counts keys are q0-last; reverse so assignment[i] is qubit i's bit
+        # before the edge loop below indexes it by qubit number.
+        assignment = assignment[::-1]
         cut = 0.0
         for i, j, w in self.edges:
             if assignment[i] != assignment[j]:

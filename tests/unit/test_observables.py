@@ -77,6 +77,90 @@ class TestExpval:
         assert expval(sv, ham) == pytest.approx(1.0)
 
 
+def _dense_expval(state, pauli):
+    """Independent ground truth: contract the state with a dense Pauli matrix.
+
+    SuperFermion amplitude arrays are little-endian (qubit q is bit q of the
+    index), while the observable strings are written qubit 0 first, so the
+    string is contracted last-qubit-first here.
+    """
+    mats = {
+        "I": np.eye(2, dtype=np.complex128),
+        "X": np.array([[0, 1], [1, 0]], dtype=np.complex128),
+        "Y": np.array([[0, -1j], [1j, 0]], dtype=np.complex128),
+        "Z": np.array([[1, 0], [0, -1]], dtype=np.complex128),
+    }
+    op = np.array([[1.0]], dtype=np.complex128)
+    for ch in reversed(pauli):
+        op = np.kron(op, mats[ch])
+    return float(np.real(np.vdot(state, op @ state)))
+
+
+def _su2_result(n, theta):
+    """Run one SU(2) layer (RY, RZ, ring of CX) with fixed angles."""
+    import superfermion as sf
+
+    circ = sf.Circuit(n)
+    for q in range(n):
+        circ = circ.ry(sf.param(f"ry_{q}"), q)
+        circ = circ.rz(sf.param(f"rz_{q}"), q)
+    for q in range(n):
+        circ = circ.cx(q, (q + 1) % n)
+    values = {f"ry_{q}": theta[q] for q in range(n)}
+    values.update({f"rz_{q}": theta[n + q] for q in range(n)})
+    return sf.run(circ.bind(values), device="cpu", shots=0)
+
+
+class TestRunResultExpectation:
+    """RunResult.expectation(obs): the native path used in the benchmark tables."""
+
+    THETA = (0.3, 1.1, -0.8, 0.7, -0.4, 2.0)
+
+    @pytest.fixture(scope="class")
+    def result(self):
+        return _su2_result(3, self.THETA)
+
+    def test_statevector_is_little_endian(self):
+        """x(0) must land at index 1, x(2) at index 4 (qubit q is bit q)."""
+        for q, idx in ((0, 1), (2, 4)):
+            import superfermion as sf
+
+            sv = np.asarray(
+                sf.run(sf.Circuit(3).x(q), device="cpu", shots=0).statevector,
+                dtype=np.complex128,
+            ).ravel()
+            assert int(np.argmax(np.abs(sv))) == idx
+
+    def test_pauli_string_matches_dense(self, result):
+        sv = np.asarray(result.statevector, dtype=np.complex128).ravel()
+        assert result.expectation("ZII") == pytest.approx(
+            _dense_expval(sv, "ZII"), abs=1e-12
+        )
+        assert result.expectation("IIZ") == pytest.approx(
+            _dense_expval(sv, "IIZ"), abs=1e-12
+        )
+
+    def test_dict_matches_dense(self, result):
+        sv = np.asarray(result.statevector, dtype=np.complex128).ravel()
+        terms = {"ZII": 1.0, "IXI": -0.5, "IIZ": 0.25, "XXX": 0.75}
+        expected = sum(c * _dense_expval(sv, p) for p, c in terms.items())
+        assert result.expectation(terms) == pytest.approx(expected, abs=1e-12)
+
+    def test_sparse_pauli_op_matches_dense(self, result):
+        sv = np.asarray(result.statevector, dtype=np.complex128).ravel()
+        terms = {"ZII": 1.0, "IIZ": 1.0, "XIX": 1.0}
+        op = SparsePauliOp.from_dict(terms)
+        expected = sum(c * _dense_expval(sv, p) for p, c in terms.items())
+        assert result.expectation(op) == pytest.approx(expected, abs=1e-12)
+
+    def test_matches_numpy_roundtrip(self, result):
+        """The native handle and Observable.expectation(statevector) agree."""
+        op = SparsePauliOp.from_dict({"ZII": 1.0, "IIZ": 1.0, "XIX": 0.3})
+        native = result.expectation(op)
+        roundtrip = op.expectation(result.statevector)
+        assert native == pytest.approx(roundtrip, abs=1e-12)
+
+
 class TestMpsExpval:
     def test_ghz_zz_exact(self):
         import superfermion as sf

@@ -26,7 +26,11 @@ class PreparedCircuit:
     def __init__(self, circuit: Circuit) -> None:
         from superfermion._sf_core import PreparedCircuit as NativePreparedCircuit
 
-        self._native = NativePreparedCircuit(circuit.to_ir())
+        from superfermion._fixes import reject_compat_dag
+
+        dag = circuit.to_ir()
+        reject_compat_dag(dag, "sf.prepare")
+        self._native = NativePreparedCircuit(dag)
 
     @property
     def n_qubits(self) -> int:

@@ -58,7 +58,13 @@ def cat(circuit_or_dag: Any, mode: str = "statevector") -> Any:
             "The 'cat' backend is not present in this build of _sf_core. "
             "Rebuild the extension (maturin) to enable it."
         )
-    return _CatCircuit(_to_dag(circuit_or_dag), mode)
+    # A >3-qubit opaque unitary makes to_ir() return the D1 compatibility
+    # proxy, which the PyO3 constructor cannot accept; refuse it by name.
+    from superfermion._fixes import reject_compat_dag
+
+    dag = _to_dag(circuit_or_dag)
+    reject_compat_dag(dag, "sf.cat")
+    return _CatCircuit(dag, mode)
 
 
 __all__ = ["cat", "CatCircuit"]

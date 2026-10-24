@@ -17,10 +17,21 @@ import numpy as np
 from superfermion.circuit import Circuit
 from superfermion.devices import DeviceCapabilities
 from superfermion.results import LazyDict, RunResult
+from superfermion._fixes import (
+    PermutedMPSState,
+    mps_routing_permutation,
+    remap_counts,
+    unpermute_statevector,
+)
 
 # Above this qubit count the exact |c|² probability table costs more to
 # build than typical runs save by reading it — defer it until first use.
 _EAGER_PROBS_MAX_QUBITS = 12
+
+# The stabilizer tableau cannot enumerate the full probability table.  At
+# shots=0 the Python wrapper falls back to an exact statevector read; above
+# this register size that fallback is larger than the table is useful.
+_STAB_PROBS_MAX_QUBITS = 20
 
 # MPS runs warn when the discarded-weight fraction exceeds this threshold
 # (override with SF_MPS_WARN_WEIGHT); SF_MPS_STRICT=1 turns it into an error.
@@ -59,6 +70,78 @@ def _check_mps_truncation(state: Any, bond_dim: int) -> None:
     if os.environ.get("SF_MPS_STRICT") == "1":
         raise RuntimeError(msg)
     warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+def _noise_has_gate_terms(noise_model: Any) -> bool:
+    """True when a NoiseModel carries gate/channel terms (not readout-only)."""
+    if noise_model is None:
+        return False
+    return bool(
+        getattr(noise_model, "single_qubit_channels", None)
+        or getattr(noise_model, "two_qubit_channels", None)
+        or getattr(noise_model, "_1q_kraus", None)
+        or getattr(noise_model, "_2q_kraus", None)
+        or getattr(noise_model, "has_targeted_2q", False)
+    )
+
+
+def _readout_probability(noise_model: Any) -> float:
+    if noise_model is None:
+        return 0.0
+    return float(
+        getattr(noise_model, "readout_error", 0.0)
+        or getattr(noise_model, "_readout_p", 0.0)
+        or 0.0
+    )
+
+
+def _readout_only(noise_model: Any) -> bool:
+    return _readout_probability(noise_model) > 0 and not _noise_has_gate_terms(
+        noise_model
+    )
+
+
+def _apply_readout_to_counts(
+    counts: Dict[str, int], noise_model: Any, seed: Any
+) -> Dict[str, int]:
+    """Apply a readout-only model to sampled counts on pure-state paths."""
+    if not counts or not _readout_only(noise_model):
+        return counts
+    try:
+        seed_int = int(seed)
+    except (TypeError, ValueError):
+        seed_int = 42
+    rng = np.random.default_rng((seed_int ^ 0x5EED) & 0xFFFFFFFF)
+    fast = getattr(noise_model, "apply_to_counts_fast", None)
+    if fast is not None:
+        return fast(counts, rng=rng)
+    return noise_model.apply_to_counts(counts, rng=rng)
+
+
+def _mps_perm_for_sampling(dag: Any, circuit: Circuit, bond_dim: int):
+    """Return the lazy-SWAP site map (None when routing is identity).
+
+    The map is replicated from the gate records (mirroring the Rust
+    ``apply_gate_lazy_routed``), so sampling labels can be corrected without
+    a second MPS evolution.  It is cached on the circuit and invalidated
+    whenever the gate list changes.
+    """
+    cache_key = ("sf_mps_perm", int(bond_dim))
+    cache_get = getattr(circuit, "_engine_cache_get", None)
+    cache_put = getattr(circuit, "_engine_cache_put", None)
+    perm = cache_get(cache_key) if cache_get is not None else None
+    if perm is None:
+        try:
+            records = dag.to_gate_records()
+        except Exception:
+            return None
+        perm = mps_routing_permutation(records, int(circuit.n_qubits))
+        if cache_put is not None:
+            cache_put(cache_key, perm)
+    perm = list(perm)
+    if perm == list(range(int(circuit.n_qubits))):
+        return None
+    return perm
 
 
 def _lsb_to_msb(sv: np.ndarray, n_qubits: int) -> np.ndarray:
@@ -354,11 +437,13 @@ class RustDevice:
             noise_model is not None
             and getattr(noise_model, "has_noise", False)
             and self._method != "density_matrix"
+            and _noise_has_gate_terms(noise_model)
         ):
             warnings.warn(
-                f"noise_model is ignored by method='{self._method}': gate and "
-                "readout noise are only applied on the density-matrix path. "
-                "Use method='density_matrix' for noisy simulations.",
+                f"gate noise in noise_model is ignored by method='{self._method}': "
+                "channels are only applied on the density-matrix path. Readout "
+                "error is applied after sampling on every method. Use "
+                "method='density_matrix' for gate-noise simulations.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -430,6 +515,9 @@ class RustDevice:
             counts = dag.simulate_dynamic_mps(shots, seed, bond_dim)
         else:
             counts = dag.simulate_dynamic(shots, seed)
+        counts = _apply_readout_to_counts(
+            counts, kwargs.get("noise_model", None), seed
+        )
         probabilities = {k: v / shots for k, v in counts.items()}
         return RunResult(
             counts=counts,
@@ -458,6 +546,9 @@ class RustDevice:
         if shots > 0 and self._hardware == "cpu" and not return_statevector:
             dag = self._prepare_dag(circuit)
             counts = dag.simulate_and_sample(shots, seed)
+            counts = _apply_readout_to_counts(
+                counts, kwargs.get("noise_model", None), seed
+            )
             return RunResult(
                 counts=counts,
                 probabilities={k: v / shots for k, v in counts.items()},
@@ -485,6 +576,9 @@ class RustDevice:
 
         if shots > 0:
             counts = state.sample(shots, seed)
+            counts = _apply_readout_to_counts(
+                counts, kwargs.get("noise_model", None), seed
+            )
         else:
             counts = {}
 
@@ -538,8 +632,18 @@ class RustDevice:
         state = dag.simulate_to_state("mps", "cpu", bond_dim)
         _check_mps_truncation(state, bond_dim)
 
+        # D10: lazy-SWAP routing keeps qubits at their new physical sites, so
+        # State.sample / State.numpy report site order.  Remap once here and
+        # expose a handle whose readout methods use qubit order.
+        mps_perm = _mps_perm_for_sampling(dag, circuit, bond_dim)
+        if mps_perm is not None:
+            state = PermutedMPSState(state, mps_perm)
+
         if shots > 0:
             counts = state.sample(shots, seed)
+            counts = _apply_readout_to_counts(
+                counts, kwargs.get("noise_model", None), seed
+            )
         else:
             counts = {}
 
@@ -557,9 +661,14 @@ class RustDevice:
                 # (sparse-prefix for area-law states, GEMM sweep otherwise)
                 # instead of re-contracting the canonical handle. Same
                 # amplitudes up to floating-point reassociation (~1e-15).
+                # ``MPSState.to_statevector`` is wrapped by superfermion._fixes
+                # to return qubit order even when the routing map is not the
+                # identity.
                 sv = np.asarray(dag.evolve_mps(bond_dim).to_statevector())
             except Exception:
                 try:
+                    # ``PermutedMPSState.numpy`` unpermutes; a bare State
+                    # handle (identity routing) is already in qubit order.
                     sv = state.numpy()
                 except Exception:
                     pass
@@ -610,6 +719,7 @@ class RustDevice:
                 "method": "mps",
                 "bond_dim": bond_dim,
                 "densified": sv is not None,
+                **({"mps_perm": mps_perm} if mps_perm is not None else {}),
             },
         )
 
@@ -763,14 +873,50 @@ class RustDevice:
             # The Rust tableau sampler emits the shared little-endian keys
             # directly (qubit q = bit q of int(key, 2)), matching
             # statevector / MPS / density-matrix reads; no re-keying needed.
+            counts = _apply_readout_to_counts(
+                counts, kwargs.get("noise_model", None), seed
+            )
             # Probabilities are a derived view of counts — defer the dict
             # (as the statevector / MPS paths do) until first read.
             probabilities: Any = LazyDict(
                 lambda: {k: v / shots for k, v in counts.items()}
             )
+            probability_path = "sampled-counts"
         else:
             counts = {}
             probabilities = {}
+            # D4: the stabilizer tableau cannot enumerate |c|², and the old
+            # empty dict was indistinguishable from "no outcomes".  Read the
+            # exact table from a statevector pass (Clifford circuits are
+            # cheap there up to the cap) and keep the tableau as the handle.
+            if circuit.n_qubits > _STAB_PROBS_MAX_QUBITS:
+                raise ValueError(
+                    "method='stabilizer' with shots=0 needs the full "
+                    f"probability table, which is a 2^n vector; capped at "
+                    f"{_STAB_PROBS_MAX_QUBITS} qubits "
+                    f"(got {circuit.n_qubits}). Use shots>0 to sample "
+                    "without building the table, or method='mps'."
+                )
+            nq = circuit.n_qubits
+            fallback_state = circuit.to_ir().simulate_to_state(
+                "statevector", "cpu"
+            )
+            amplitudes = np.asarray(fallback_state.numpy(), dtype=np.complex128)
+
+            def _stab_probabilities() -> Dict[str, float]:
+                probs = np.abs(amplitudes) ** 2
+                return {
+                    format(i, f"0{nq}b"): float(p)
+                    for i, p in enumerate(probs)
+                    if p > 1e-15
+                }
+
+            probabilities = (
+                _stab_probabilities()
+                if nq <= _EAGER_PROBS_MAX_QUBITS
+                else LazyDict(_stab_probabilities)
+            )
+            probability_path = "statevector-fallback"
 
         return RunResult(
             counts=counts,
@@ -783,6 +929,7 @@ class RustDevice:
                 "backend": "rust-cpu",
                 "method": "stabilizer",
                 "n_qubits": circuit.n_qubits,
+                "probability_path": probability_path,
             },
         )
 
@@ -800,7 +947,11 @@ class RustDevice:
             from superfermion.backends.turbo import fuse_all_gates, decompose_for_rust
             decomposed = Circuit(circuit.n_qubits)
             decomposed._gates = decompose_for_rust(circuit._gates)
+            if getattr(circuit, "_has_large_unitary", False):
+                decomposed._has_large_unitary = True
             fused = fuse_all_gates(decomposed)
+            if getattr(circuit, "_has_large_unitary", False):
+                fused._has_large_unitary = True
             return fused.to_ir()
         else:
             return circuit.to_ir()

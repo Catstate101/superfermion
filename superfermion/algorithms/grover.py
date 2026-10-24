@@ -59,6 +59,11 @@ class GroverOracle:
 def _apply_oracle(circuit: sf.Circuit, marked: List[str], data_qubits: int):
     """Phase-flip the marked states using multi-controlled Z gates."""
     n = data_qubits
+    # Counts keys are q0-last: character i is qubit n-1-i (see Result.counts).
+    # Flip each mark once here so the per-qubit X loop below addresses qubit i
+    # with character n-1-i, and the round trip closes for non-palindromic
+    # strings such as "0111" (index 7), not only for "101".
+    marked = [s[::-1] for s in marked]
     for bitstring in marked:
         if len(bitstring) != n:
             raise ValueError(f"Bitstring '{bitstring}' length ≠ n_qubits={n}")
@@ -218,6 +223,16 @@ def grover_search(
         top_bitstring = max(result.counts, key=result.counts.get)
         total = sum(result.counts.values())
         top_prob = result.counts[top_bitstring] / total
+        # The raw key includes the max(0, n-2) Toffoli ancillas (qubits
+        # n..total-1).  In a q0-last key those are the leading characters.
+        # The statevector branch marginalizes them; aggregate on the n data
+        # bits here so both branches return the same n-character label.
+        data_counts: Dict[str, int] = {}
+        for key, count in result.counts.items():
+            data_key = key[-n:]
+            data_counts[data_key] = data_counts.get(data_key, 0) + count
+        top_bitstring = max(data_counts, key=data_counts.get)
+        top_prob = data_counts[top_bitstring] / total
         return {
             "top_bitstring": top_bitstring,
             "probability": top_prob,

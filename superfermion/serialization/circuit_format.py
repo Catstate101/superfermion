@@ -131,6 +131,11 @@ def load_circuit(path: str) -> Any:
 def _circuit_to_dict(circuit: Any) -> Dict[str, Any]:
     """Convert a Circuit to a serializable dictionary."""
     from superfermion.parameters import SymbolicParameter
+    from superfermion._fixes import matrix_to_json
+
+    ensure_gates = getattr(circuit, "_ensure_gates", None)
+    if ensure_gates is not None:
+        ensure_gates()
 
     gates = []
     for gate in circuit._gates:
@@ -138,6 +143,8 @@ def _circuit_to_dict(circuit: Any) -> Dict[str, Any]:
             "name": gate.name,
             "qubits": gate.qubits,
         }
+        if getattr(gate, "matrix", None) is not None:
+            g["matrix"] = matrix_to_json(gate.matrix)
         if gate.params:
             g["params"] = []
             for p in gate.params:
@@ -170,11 +177,25 @@ def _dict_to_circuit(data: Dict[str, Any]) -> Any:
     """Reconstruct a Circuit from a dictionary."""
     from superfermion.circuit import Circuit
     from superfermion.parameters import param as make_param
+    from superfermion._fixes import matrix_from_json
 
     cd = data["circuit"]
     circuit = Circuit(cd["n_qubits"], cd.get("n_cbits"), cd.get("name"))
 
     for g in cd["gates"]:
+        if "matrix" in g:
+            if str(g["name"]).upper() != "UNITARY":
+                raise ValueError(
+                    f"Gate {g['name']!r} carries a 'matrix' field; only "
+                    "UNITARY records may store an opaque matrix"
+                )
+            circuit.unitary(matrix_from_json(g["matrix"]), g["qubits"])
+            continue
+        if str(g["name"]).upper() == "UNITARY":
+            raise ValueError(
+                "UNITARY gate record has no 'matrix' field; the serialized "
+                "circuit cannot be reconstructed"
+            )
         params = []
         for p in g.get("params", []):
             if isinstance(p, dict):

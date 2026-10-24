@@ -68,6 +68,87 @@ class TestFiniteDiffVsAdjoint:
             assert abs(fd_grad[name] - adj_val) < 1e-2
 
 
+class TestSU2LayerGrid:
+    """Adjoint vs parameter-shift vs finite difference on SU(2) grids.
+
+    Two cases above check a bare RY and a two-qubit pair. These sweep qubit
+    count and depth together: RY + RZ on every qubit per layer, ring CX
+    between layers, so ``2 * n * layers`` parameters, and a ring TFIM
+    observable. Adjoint must equal the exact shift rule at every point and
+    track central differences to their truncation error.
+    """
+
+    GRID = [(2, 1), (2, 2), (3, 1), (3, 2), (4, 1), (4, 2), (4, 4),
+            (6, 1), (6, 2), (8, 1), (8, 2), (10, 1), (10, 2), (12, 1)]
+
+    @staticmethod
+    def _circuit(n, layers):
+        c = sf.Circuit(n)
+        names = []
+        k = 0
+        for layer in range(layers):
+            for q in range(n):
+                c = c.ry(sf.param(f"ry_{k}"), q)
+                names.append(f"ry_{k}")
+                k += 1
+                c = c.rz(sf.param(f"rz_{k}"), q)
+                names.append(f"rz_{k}")
+                k += 1
+            if layer < layers - 1:
+                for q in range(n):
+                    c = c.cx(q, (q + 1) % n)
+        return c, names
+
+    @staticmethod
+    def _observable(n):
+        terms = {}
+        for i in range(n):
+            z = ["I"] * n
+            z[i] = "Z"
+            terms["".join(z)] = 1.0
+            x = ["I"] * n
+            x[i] = "X"
+            x[(i + 1) % n] = "X"
+            terms["".join(x)] = 1.0
+        return SparsePauliOp.from_dict(terms)
+
+    @pytest.mark.parametrize("n,layers", GRID)
+    def test_adjoint_matches_parameter_shift(self, n, layers):
+        circuit, names = self._circuit(n, layers)
+        obs = self._observable(n)
+        vals = np.linspace(-1.1, 1.3, len(names))
+
+        g_adj = adjoint.adjoint_grad_vector(circuit, obs, names, vals)
+        g_ps = parameter_shift.parameter_shift_grad_vector(circuit, obs, names, vals)
+
+        assert g_adj.shape == (2 * n * layers,)
+        np.testing.assert_allclose(g_adj, g_ps, atol=1e-10, rtol=0)
+
+    @pytest.mark.parametrize("n,layers", GRID)
+    def test_adjoint_matches_finite_difference(self, n, layers):
+        circuit, names = self._circuit(n, layers)
+        obs = self._observable(n)
+        vals = np.linspace(-1.1, 1.3, len(names))
+        g_adj = adjoint.adjoint_grad_vector(circuit, obs, names, vals)
+
+        eps = 1e-5
+        for idx in (0, len(names) // 2, len(names) - 1):
+            shifted = []
+            for sign in (1.0, -1.0):
+                v = vals.copy()
+                v[idx] += sign * eps
+                bound = circuit.bind(dict(zip(names, v)))
+                sv = np.asarray(
+                    sf.run(bound, device="cpu", shots=0).statevector,
+                    dtype=np.complex128,
+                ).ravel()
+                shifted.append(float(np.real(obs.expectation(sv))))
+            fd = (shifted[0] - shifted[1]) / (2 * eps)
+            assert abs(fd - g_adj[idx]) < 1e-6, (
+                f"n={n} layers={layers} param {names[idx]}: fd={fd} adj={g_adj[idx]}"
+            )
+
+
 class TestSPSA:
     def test_spsa_approximates_gradient(self):
         theta = sf.param("theta")

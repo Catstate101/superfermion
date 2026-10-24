@@ -118,6 +118,14 @@ class Circuit:
         # Classical condition (cbit, value) waiting for the next gate
         # (set by ``c_if``, consumed by the next ``_add_gate`` call).
         self._pending_condition: Optional[tuple[int, int]] = None
+        # Set when an opaque unitary spans more than three qubits.  The
+        # 0.1.15 Rust statevector kernel applies only arities 1-3; to_ir()
+        # returns a compatibility proxy for these circuits (see _fixes.py).
+        self._has_large_unitary = False
+        # Matrices for opaque unitaries held in the Rust ``GateSequence``.
+        # ``to_gate_records()`` reports name/qubits/params only, so the
+        # matrix is mirrored here (keyed by gate index) for serialization.
+        self._rust_unitary_matrices: dict[int, Any] = {}
         # Compiled-engine artifact caches (e.g. the Rust stabilizer state
         # built by ``to_ir()`` → ``simulate_to_state``).  ``_engine_cache_ver``
         # increments on every gate mutation; entries record the revision they
@@ -290,6 +298,8 @@ class Circuit:
             self, for chaining.
         """
         self._ensure_gates()
+        if any(g.matrix is not None and len(g.qubits) > 3 for g in gates):
+            self._has_large_unitary = True
         for g in gates:
             g.name = g.name.upper()
             if self._pending_condition is not None:
@@ -645,6 +655,8 @@ class Circuit:
             raise ValueError("Matrix is not unitary (U @ U^dagger != I)")
 
         self._validate_qubits(qubits, "UNITARY")
+        if k > 3:
+            self._has_large_unitary = True
 
         if self._pending_condition is not None:
             raise ValueError(
@@ -656,6 +668,9 @@ class Circuit:
 
         if self._use_rust and self._gates_rust is not None:
             self._gates_rust.add_unitary(qubits, matrix)
+            self._rust_unitary_matrices[
+                int(self._gates_rust.gate_count()) - 1
+            ] = np.asarray(matrix, dtype=complex)
         else:
             self._gates.append(GateRecord(
                 name="UNITARY",
@@ -815,7 +830,11 @@ class Circuit:
         """Convert the circuit to the high-performance Rust IR (QuantumDAG)."""
         # Fast path: Rust-native GateSequence → DAG conversion (zero Python heap)
         if self._use_rust and self._gates_rust is not None:
-            return self._gates_rust.to_dag()
+            dag = self._gates_rust.to_dag()
+            if getattr(self, "_has_large_unitary", False):
+                from superfermion._fixes import LargeUnitaryDAG
+                return LargeUnitaryDAG(dag, int(self.n_qubits))
+            return dag
 
         from superfermion._sf_core import QuantumDAG
         self._ensure_gates()
@@ -836,6 +855,9 @@ class Circuit:
                     )
                 else:
                     dag.add_gate(str(gate.name), [int(q) for q in gate.qubits], params)
+        if getattr(self, "_has_large_unitary", False):
+            from superfermion._fixes import LargeUnitaryDAG
+            return LargeUnitaryDAG(dag, int(self.n_qubits))
         return dag
 
     def to_unitary(self) -> np.ndarray:
@@ -854,6 +876,7 @@ class Circuit:
     def to_json(self) -> str:
         """Serialize the circuit to a JSON string."""
         import json
+        from superfermion._fixes import matrix_to_json
         self._ensure_gates()
         data = {
             "n_qubits": self.n_qubits,
@@ -862,7 +885,8 @@ class Circuit:
                 {
                     "name": g.name,
                     "qubits": g.qubits,
-                    "params": [float(p) if not isinstance(p, SymbolicParameter) else p.name for p in g.params]
+                    "params": [float(p) if not isinstance(p, SymbolicParameter) else p.name for p in g.params],
+                    **({"matrix": matrix_to_json(g.matrix)} if g.matrix is not None else {}),
                 }
                 for g in self._gates
             ],
@@ -871,6 +895,13 @@ class Circuit:
                 "gate_count": self.gate_count
             }
         }
+        # ``_ensure_gates`` above rebuilds ``_gates`` in Rust order, so the
+        # mirrored indices line up with the emitted gate list.
+        for index, matrix in getattr(self, "_rust_unitary_matrices", {}).items():
+            if 0 <= index < len(data["gates"]):
+                data["gates"][index].setdefault(
+                    "matrix", matrix_to_json(matrix)
+                )
         return json.dumps(data, indent=2)
 
 
@@ -878,16 +909,34 @@ class Circuit:
     def from_json(cls, json_str: str) -> Circuit:
         """Load a circuit from a JSON string."""
         import json
+        from superfermion._fixes import matrix_from_json
         data = json.loads(json_str)
         circuit = cls(data["n_qubits"], data["n_cbits"])
-        
+
         for g_data in data["gates"]:
-            circuit._add_gate(
-                name=g_data["name"],
-                qubits=g_data["qubits"],
-                params=g_data["params"]
-            )
-            
+            gate_name = str(g_data["name"]).upper()
+            if "matrix" in g_data:
+                if gate_name != "UNITARY":
+                    raise ValueError(
+                        f"Gate {gate_name!r} carries a 'matrix' field; only "
+                        "UNITARY records may store an opaque matrix"
+                    )
+                circuit.unitary(
+                    matrix_from_json(g_data["matrix"]), g_data["qubits"]
+                )
+            elif gate_name == "UNITARY":
+                raise ValueError(
+                    "UNITARY gate record has no 'matrix' field; the serialized "
+                    "circuit cannot be reconstructed. Re-export it with "
+                    "Circuit.to_json() from a version that stores the matrix."
+                )
+            else:
+                circuit._add_gate(
+                    name=g_data["name"],
+                    qubits=g_data["qubits"],
+                    params=g_data["params"]
+                )
+
         return circuit
 
     def __repr__(self) -> str:
