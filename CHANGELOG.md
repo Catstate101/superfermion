@@ -2,6 +2,25 @@
 
 All notable changes to the Superfermion framework.
 
+## [0.1.17] — 2026-10-25
+
+### Fixed
+- **Source installs of 0.1.16** — the sdist shipped without `crates/sf-gpu`, a
+  crate reachable only through the optional `gpu` path dependency, while
+  `crates/sf-ir/Cargo.toml` still pointed at it. Every `pip install` from source
+  died in `failed to load manifest for dependency sf-gpu`. The crate is now in
+  the sdist, and a packaging check fails CI if any workspace member, path
+  dependency or `include_str!` asset is missing from the artifact.
+
+### Changed
+- **PyO3 and numpy 0.23 → 0.30** — adds CPython 3.14/3.15 support; requires
+  Rust 1.85+.
+- **Stable-ABI wheels** — one `cp310-abi3` wheel per platform replaces the
+  per-interpreter matrix. A single binary installs on CPython 3.10 and later,
+  including interpreters released after the wheel was built.
+- **Wheel coverage** — Linux x86_64/aarch64 (glibc 2.17+ and musl 1.2), macOS
+  universal2, Windows amd64/arm64.
+
 ## [0.1.16] — 2026-10-24
 
 ### Fixed

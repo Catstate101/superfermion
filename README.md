@@ -9,8 +9,8 @@ Rust simulation core. Statevector, MPS, stabilizer, and density matrix
 simulation methods with native adjoint differentiation, quantum error
 correction, and multi-framework interop.
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Rust 1.75+](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://rust-lang.org)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://rust-lang.org)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ---
@@ -47,24 +47,37 @@ with a Rust acceleration core (Rayon multithreading + in-place statevector).
 ## Installation
 
 ```bash
-git clone https://github.com/Catstate101/superfermion.git
-cd superfermion
-pip install -e .
-
-# Build the Rust extension (required for simulation)
-pip install maturin
-cd crates/sf-bindings && maturin develop --release && cd ../..
-
-# Copy the built extension into the package
-# Linux:
-cp target/release/lib_sf_core.so superfermion/_sf_core.so
-# macOS:
-# cp target/release/lib_sf_core.dylib superfermion/_sf_core.so
-# Windows:
-# cp target/release/_sf_core.dll superfermion/_sf_core.pyd
+pip install superfermion
 ```
 
-Requirements: Python 3.10–3.13, Rust 1.75+, ~3 GB free disk for the Rust build.
+Wheels are built once against the CPython stable ABI and tagged `cp310-abi3`,
+so a single binary per platform installs on CPython 3.10 and every later
+release, including versions published after the wheel was built:
+
+| Platform | Architectures | Wheel |
+| --- | --- | --- |
+| Linux (glibc 2.17+) | x86_64, aarch64 | manylinux_2_17 |
+| Linux (musl / Alpine) | x86_64, aarch64 | musllinux_1_2 |
+| macOS | universal2 (Intel + Apple Silicon) | macosx |
+| Windows | amd64, arm64 | win_amd64, win_arm64 |
+
+Anything not covered by a wheel — PyPy, 32-bit targets, other architectures,
+and free-threaded builds (3.14t, 3.15t) — is built from the source distribution
+by `pip`, which needs Rust 1.85+ and ~3 GB of free disk. Free-threaded
+interpreters get a version-specific extension instead of a limited-API one;
+prebuilt free-threaded wheels are not published yet.
+
+### From source (development)
+
+```bash
+git clone https://github.com/Catstate101/superfermion.git
+cd superfermion
+pip install maturin
+maturin develop --release        # builds crates/sf-bindings into the source tree
+pip install -e ".[dev]"
+```
+
+Requirements: Python 3.10+, Rust 1.85+, ~3 GB free disk for the Rust build.
 
 Optional dependency groups:
 ```bash
