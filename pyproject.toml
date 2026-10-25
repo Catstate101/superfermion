@@ -6,11 +6,19 @@ build-backend = "maturin"
 manifest-path = "crates/sf-bindings/Cargo.toml"
 module-name = "superfermion._sf_core"
 python-source = "."
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
+# sf-ir declares sf-gpu as an optional path dependency behind the non-default
+# `gpu` feature. Maturin only walks the enabled dependency graph, so the crate
+# was silently dropped from the sdist while sf-ir/Cargo.toml kept referencing
+# ../sf-gpu — every `pip install` from sdist died in cargo manifest loading.
+# Ship the crate sources in the sdist (wheels do not need them).
+include = [
+    { path = "crates/sf-gpu/**/*", format = "sdist" },
+]
 
 [project]
 name = "superfermion"
-version = "0.1.16"
+version = "0.1.17"
 description = "High-performance quantum computing framework with a Python API and Rust simulation core"
 readme = "README.md"
 license = "Apache-2.0"
@@ -33,6 +41,8 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Scientific/Engineering :: Physics",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -114,8 +124,17 @@ target-version = "py310"
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.cibuildwheel]
-# Skip musllinux and 32-bit builds — we only target glibc (manylinux), macOS, and Windows
-skip = ["*-musllinux_*", "*-manylinux_i686", "*-win32"]
+# The extension is built against the CPython stable ABI (pyo3/abi3-py310), so one
+# cp310-abi3 wheel per platform runs on every GIL-enabled CPython >= 3.10 --
+# including 3.15 and interpreters released later. Building any other interpreter
+# would only duplicate that same wheel. Windows/arm64 is the one exception: no
+# CPython 3.10 installer exists there, so that job calls maturin directly with
+# 3.12 and still gets a cp310-abi3 tag.
+build = "cp310-*"
+# 32-bit targets cannot address enough memory for statevector simulation, and
+# nobody runs quantum workloads on them. musllinux (Alpine) and arm64 ARE
+# supported -- see .github/workflows/release.yml.
+skip = ["*-manylinux_i686", "*-win32"]
 
 [tool.mypy]
 python_version = "3.10"

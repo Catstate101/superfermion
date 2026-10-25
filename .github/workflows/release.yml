@@ -11,50 +11,64 @@ on:
         type: boolean
         default: false
 
-jobs:
-  # ---- Build wheels for all platforms and Python versions ----
+# The extension is built against the CPython stable ABI (pyo3 `abi3-py310`),
+# so each platform ships ONE wheel tagged cp310-abi3. That wheel installs and
+# runs on every GIL-enabled CPython >= 3.10, including interpreters released
+# after it was built (3.15 and later). Build with 3.10 so the ABI floor stays
+# 3.10; do not reintroduce per-interpreter wheel jobs.
+env:
+  CIBW_BUILD: "cp310-*"
+  CIBW_BUILD_FRONTEND: "build"
 
-  # Linux: cibuildwheel builds all Python versions inside manylinux_2_28 container
-  build-linux-wheels:
-    name: Build Linux wheels (py3.10–3.13, manylinux_2_28)
+jobs:
+  # ---- Verify metadata before anything is built ----
+  validate:
+    name: Validate release metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - name: Validate tag matches pyproject version
-        if: github.event_name == 'push'
+      - name: Tag, pyproject and Cargo versions must agree
         shell: bash
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
-          PY_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          echo "Tag version: $VERSION"
-          echo "Package version: $PY_VERSION"
-          if [ "$VERSION" != "$PY_VERSION" ]; then
-            echo "Tag version ($VERSION) does not match pyproject.toml version ($PY_VERSION)"
-            exit 1
-          fi
+          python - <<'PY'
+          import os, tomllib
 
-      - name: Build wheels via cibuildwheel
-        uses: pypa/cibuildwheel@v2.22
-        env:
-          CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          CIBW_BUILD_FRONTEND: build
-          CIBW_BEFORE_ALL: |
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
+          pyproject = tomllib.load(open("pyproject.toml", "rb"))
+          cargo = tomllib.load(open("Cargo.toml", "rb"))
+          py_version = pyproject["project"]["version"]
+          cargo_version = cargo["workspace"]["package"]["version"]
+          features = pyproject["tool"]["maturin"]["features"]
 
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
+          assert py_version == cargo_version, (py_version, cargo_version)
+          assert any(f.startswith("pyo3/abi3-py") for f in features), features
+
+          requires_python = pyproject["project"]["requires-python"]
+          assert "<" not in requires_python, (
+              f"requires-python {requires_python!r} has an upper bound, which keeps "
+              "the wheel out of interpreters released after it was built"
+          )
+
+          tag = os.environ.get("GITHUB_REF_NAME", "")
+          if tag.startswith("v"):
+              assert tag[1:] == py_version, (tag, py_version)
+          print("versions and abi3 feature OK:", py_version)
+          PY
+
+  # ---- Source distribution: complete, self-contained, metadata-resolvable ----
+  sdist:
+    name: Build and verify sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v6
         with:
-          name: wheels-linux
-          path: wheelhouse/
+          python-version: '3.12'
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -62,92 +76,224 @@ jobs:
           command: sdist
           args: --out dist
 
-      - name: Upload sdist
-        uses: actions/upload-artifact@v4
+      - name: Sdist must be self-contained (crates, path deps, include assets)
+        run: python scripts/check_sdist.py dist
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: wheels-sdist
+          name: sdist
           path: dist/
 
-  # macOS & Windows: maturin-action, one matrix entry per Python version
-  build-platform-wheels:
-    name: Build ${{ matrix.os }} wheel (py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+  # ---- Prove the sdist builds end to end on the oldest and newest Python ----
+  test-sdist:
+    name: Install from sdist (py${{ matrix.python-version }})
+    needs: sdist
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest and newest supported interpreter: the ends of the range the
+        # abi3 wheel claims to cover, built the slow way.
+        python-version: ["3.10", "3.15"]
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: pip install from sdist
+        run: python -m pip install dist/*.tar.gz
+
+      - name: Import and smoke test
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          python -c "import superfermion as sf; c=sf.Circuit(6).h(0).cx(0,1).cx(1,2); r=sf.run(c, device='cpu', shots=0); assert len(r.statevector) == 64; print('sdist OK on', __import__('sys').version.split()[0])"
+
+  # ---- Wheels: one abi3 build per platform/arch ----
+  build-linux:
+    name: Linux wheels (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            python-version: '3.10'
-            maturin-args: --release --out dist --target universal2-apple-darwin
-          - os: macos-latest
-            python-version: '3.11'
-            maturin-args: --release --out dist --target universal2-apple-darwin
-          - os: macos-latest
-            python-version: '3.12'
-            maturin-args: --release --out dist --target universal2-apple-darwin
-          - os: macos-latest
-            python-version: '3.13'
-            maturin-args: --release --out dist --target universal2-apple-darwin
-          - os: windows-latest
-            python-version: '3.10'
-            maturin-args: --release --out dist
-          - os: windows-latest
-            python-version: '3.11'
-            maturin-args: --release --out dist
-          - os: windows-latest
-            python-version: '3.12'
-            maturin-args: --release --out dist
-          - os: windows-latest
-            python-version: '3.13'
-            maturin-args: --release --out dist
-
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: pypa/cibuildwheel@v4.3.4
+        env:
+          CIBW_ARCHS_LINUX: ${{ matrix.arch }}
+          # glibc 2.17 floor (CentOS 7+, Ubuntu 18.04+) and musl for Alpine.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_17
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_17
+          CIBW_MUSLLINUX_X86_64_IMAGE: musllinux_1_2
+          CIBW_MUSLLINUX_AARCH64_IMAGE: musllinux_1_2
+          CIBW_BEFORE_ALL_LINUX: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_TEST_REQUIRES: numpy
+          CIBW_TEST_COMMAND: python -c "import superfermion as sf; c=sf.Circuit(4).h(0).cx(0,1); r=sf.run(c,device='cpu',shots=0); assert len(r.statevector)==16; print('wheel OK')"
+
+      - name: Assert this arch shipped one stable-ABI wheel per libc
+        run: python3 scripts/check_wheels.py wheelhouse
+
+      - uses: actions/upload-artifact@v4
         with:
-          python-version: ${{ matrix.python-version }}
+          name: wheels-linux-${{ matrix.arch }}
+          path: wheelhouse/
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+  build-macos:
+    name: macOS wheels (universal2)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Build Rust extension wheel
-        uses: PyO3/maturin-action@v1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: ${{ matrix.maturin-args }}
+          args: --release --out dist --target universal2-apple-darwin
 
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
+      - name: Assert the wheel tag
+        run: python scripts/check_wheels.py dist
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: wheels-macos
           path: dist/
 
-  # ---- Test built wheel before publish ----
-  test-wheel:
-    name: Test wheel
-    needs: [build-linux-wheels, build-platform-wheels]
+  build-windows:
+    name: Windows wheels (amd64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+
+      - name: Assert the wheel tag
+        run: python scripts/check_wheels.py dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-amd64
+          path: dist/
+
+  build-windows-arm64:
+    name: Windows wheels (arm64)
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python 3.10 has no official Windows/arm64 installer; maturin still
+      # tags the wheel cp310-abi3 because the abi3 floor comes from pyo3.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: 'arm64'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - run: python -m pip install maturin
+      - run: maturin build --release --out dist
+
+      - name: Assert the wheel tag
+        run: python scripts/check_wheels.py dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-arm64
+          path: dist/
+
+  # ---- The wheel must install on every Python version we claim to support ----
+  test-abi3:
+    name: abi3 install (py${{ matrix.python-version }} on ${{ matrix.os }})
+    needs: [build-linux, build-macos, build-windows, build-windows-arm64]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+        include:
+          - os: windows-11-arm
+            python-version: "3.12"
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Install wheel only (no sdist fallback allowed)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy
+          python -m pip install --no-index --only-binary=:all: --find-links dist superfermion
+
+      - name: Import and smoke test from outside the checkout
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          python -c "import superfermion as sf; c=sf.Circuit(6).h(0).cx(0,1).cx(1,2); r=sf.run(c,device='cpu',shots=0); assert len(r.statevector)==64; print('abi3 OK', sf.__version__)"
+
+  # ---- Full suite against the shipped wheel on the newest interpreter ----
+  test-wheel-suite:
+    name: Full test suite against abi3 wheel (py3.15)
+    needs: [build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.15'
 
-      - name: Download wheels
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
-          path: dist/
+          path: dist
           merge-multiple: true
 
-      - name: Install wheel and run tests
+      - name: Install wheel and test dependencies
+        shell: bash
         run: |
-          pip install pytest pytest-timeout pytest-benchmark numpy scipy boto3
-          pip install dist/*cp312*manylinux*.whl
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy pytest pytest-timeout pytest-benchmark
+          python -m pip install --no-index --only-binary=:all: --find-links dist superfermion
+
+      - name: Run tests against the installed wheel
+        shell: bash
+        run: |
           # Remove local source so it doesn't shadow the installed package
           rm -rf superfermion/
           python -m pytest tests/ -q --timeout=120 \
@@ -156,12 +302,21 @@ jobs:
             --ignore=tests/integration/test_tracked_experiment.py \
             -k "not (aer or qiskit or pennylane or braket or test_decomposes_swap)"
 
-  # ---- Publish to PyPI ---- 
+  # ---- Publish ----
   publish:
     name: Publish to PyPI
-    needs: [build-linux-wheels, build-platform-wheels, test-wheel]
+    needs:
+      - validate
+      - sdist
+      - test-sdist
+      - build-linux
+      - build-macos
+      - build-windows
+      - build-windows-arm64
+      - test-abi3
+      - test-wheel-suite
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish)
     environment:
       name: pypi
       url: https://pypi.org/p/superfermion
@@ -169,15 +324,26 @@ jobs:
       id-token: write
 
     steps:
-      - name: Download all wheels
+      - uses: actions/checkout@v4
+
+      - name: Download all distribution artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           path: dist/
           merge-multiple: true
 
-      - name: List artifacts
-        run: ls -la dist/
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+
+      - name: Gate the upload set (every platform, one stable-ABI tag, complete sdist)
+        run: |
+          ls -la dist/
+          python scripts/check_wheels.py dist --require-platforms
+          python scripts/check_sdist.py dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

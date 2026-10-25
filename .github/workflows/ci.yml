@@ -22,13 +22,13 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      # pyo3 0.23 supports CPython up to 3.13, and ubuntu-latest now mixes in
-      # Ubuntu 26.04 runners whose python3 is 3.14, so the pyo3-ffi build script
-      # aborts before any crate is checked. Build against a pinned interpreter,
-      # the same way the python matrix does, and point pyo3 at it.
+      # pyo3 needs an interpreter to read headers from. The extension targets the
+      # 3.10 stable ABI (abi3-py310), so which one is only a compile check: use a
+      # recent release so a dependency dropping support for old headers shows up
+      # here instead of in the release build.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       # The runner images preinstall stable without clippy (Ubuntu 26.04 ships
       # cargo/rustc/rustfmt only), so rustup treats the toolchain as present and
       # `cargo clippy` dies with "no such command". Ask for the components
@@ -65,6 +65,59 @@ jobs:
         env:
           PYO3_PYTHON: python
 
+  # ── Distribution artifacts ───────────────────────────────
+  # pip installs the sdist whenever a wheel is missing for the platform, so the
+  # tarball has to be as complete as the wheel. Maturin derives its file list
+  # from the enabled cargo graph and silently drops crates behind optional path
+  # dependencies; 0.1.16 shipped without crates/sf-gpu and every source install
+  # died in manifest loading. Assert completeness on the artifact, every push.
+  sdist:
+    name: sdist is self-contained
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Build sdist
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin sdist --out dist
+      - name: Every crate, path dependency and include asset must be inside
+        run: python scripts/check_sdist.py dist
+
+  wheel:
+    name: Wheel is one stable-ABI artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --release --out dist
+      - name: Tag must be cp310-abi3 (one wheel for 3.10 and later)
+        shell: python
+        run: |
+          import glob
+
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+          name = wheels[0].replace("\\", "/").rsplit("/", 1)[-1]
+          assert "cp310-abi3" in name, name
+          print("wheel tag OK:", name)
+      - name: Install the wheel into a clean environment and import it
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --upgrade pip numpy
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --no-index --only-binary=:all: --find-links dist superfermion
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/venv/bin/python" -c "import superfermion as sf; s=sf.simulate(sf.Circuit(4).h(0).cx(0,1)); assert len(s.numpy())==16"
+
   # ── Python checks ────────────────────────────────────────
   python:
     name: Python ${{ matrix.python-version }} (${{ matrix.os }})
@@ -73,24 +126,23 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # 3.15 is still allowed to be a pre-release; the abi3 wheel does not
+          # care which interpreter builds it, the tests do.
+          allow-prereleases: true
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # Editable install builds the abi3 extension into the source tree, so
+          # the suite below exercises the code in this checkout.
           pip install -e ".[dev]"
-      - name: Build Rust extension
-        shell: bash
-        run: |
-          pip install maturin
-          maturin build --release --out dist
-          pip install dist/*.whl
       - name: Lint (ruff)
-        run: ruff check superfermion/ --select=F --ignore=F401,F821
+        run: ruff check superfermion/ scripts/ --select=F --ignore=F401,F821
       - name: Type check (mypy)
         continue-on-error: true
         run: mypy superfermion/
@@ -101,6 +153,33 @@ jobs:
           python -m pytest tests/ -q --timeout=120 \
             --ignore=tests/domain/test_gradients_full.py \
             -k "not (aer or qiskit or pennylane)"
+
+  # ── Free-threaded CPython ────────────────────────────────
+  # A limited API does not exist for free-threaded builds before 3.15, so no
+  # prebuilt wheel is published for 3.14t/3.15t. pip falls back to the sdist,
+  # pyo3 sees Py_GIL_DISABLED and emits a version-specific cp314t extension
+  # instead of an abi3 one. This lane keeps that fallback honest; once it is
+  # green, adding cp314t-* to CIBW_BUILD in release.yml publishes wheels too.
+  free-threaded:
+    name: Free-threaded CPython 3.14t (from source)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14t"
+          allow-prereleases: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install from source (no wheel exists for this ABI)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+      - name: Import and run outside the checkout
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          python -c "import sys, superfermion as sf; assert sys._is_gil_enabled() is False; s=sf.simulate(sf.Circuit(4).h(0).cx(0,1)); assert len(s.numpy())==16; print('free-threaded OK', sys.version.split()[0])"
 
   # ── Benchmark smoke test ─────────────────────────────────
   benchmarks:
