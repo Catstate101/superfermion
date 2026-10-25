@@ -56,7 +56,7 @@ release, including versions published after the wheel was built:
 
 | Platform | Architectures | Wheel |
 | --- | --- | --- |
-| Linux (glibc 2.17+) | x86_64, aarch64 | manylinux_2_17 |
+| Linux (glibc 2.28+) | x86_64, aarch64 | manylinux_2_28 |
 | Linux (musl / Alpine) | x86_64, aarch64 | musllinux_1_2 |
 | macOS | universal2 (Intel + Apple Silicon) | macosx |
 | Windows | amd64, arm64 | win_amd64, win_arm64 |

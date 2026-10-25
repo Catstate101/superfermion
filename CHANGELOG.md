@@ -23,8 +23,9 @@ All notable changes to the Superfermion framework.
 - **Stable-ABI wheels** — one `cp310-abi3` wheel per platform replaces the
   per-interpreter matrix. A single binary installs on CPython 3.10 and later,
   including interpreters released after the wheel was built.
-- **Wheel coverage** — Linux x86_64/aarch64 (glibc 2.17+ and musl 1.2), macOS
-  universal2, Windows amd64/arm64.
+- **Wheel coverage** — Linux x86_64/aarch64 (glibc 2.28+ and musl 1.2), macOS
+  universal2, Windows amd64/arm64. Hosts older than glibc 2.28 (CentOS 7,
+  Ubuntu 18.04) build from the sdist, which now works.
 
 ## [0.1.16] — 2026-10-24
 
