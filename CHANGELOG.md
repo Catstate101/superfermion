@@ -11,6 +11,11 @@ All notable changes to the Superfermion framework.
   died in `failed to load manifest for dependency sf-gpu`. The crate is now in
   the sdist, and a packaging check fails CI if any workspace member, path
   dependency or `include_str!` asset is missing from the artifact.
+- **`superfermion.__version__`** — the 0.1.17 tree still reported `0.1.16` at
+  runtime, so `pip show` and `sf.__version__` would have disagreed. A check now
+  compares `pyproject.toml`, `Cargo.toml`, `__init__.py` and the release tag,
+  and the wheel smoke test asserts the installed package reports the version
+  its metadata claims.
 
 ### Changed
 - **PyO3 and numpy 0.23 → 0.30** — adds CPython 3.14/3.15 support; requires
