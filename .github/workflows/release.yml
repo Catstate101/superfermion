@@ -140,8 +140,14 @@ jobs:
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_17
           CIBW_MUSLLINUX_X86_64_IMAGE: musllinux_1_2
           CIBW_MUSLLINUX_AARCH64_IMAGE: musllinux_1_2
+          # manylinux images already ship a Rust toolchain; musllinux (Alpine)
+          # may ship neither rustup nor curl, so bootstrap both when needed.
           CIBW_BEFORE_ALL_LINUX: |
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            set -e
+            if ! command -v cargo >/dev/null 2>&1; then
+              command -v curl >/dev/null 2>&1 || apk add --no-cache curl
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            fi
           CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
           CIBW_TEST_REQUIRES: numpy
           CIBW_TEST_COMMAND: python -c "import superfermion as sf; c=sf.Circuit(4).h(0).cx(0,1); r=sf.run(c,device='cpu',shots=0); assert len(r.statevector)==16; print('wheel OK')"
