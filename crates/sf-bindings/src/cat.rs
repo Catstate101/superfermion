@@ -107,7 +107,7 @@ impl PyCatCircuit {
     /// Execute the statevector handle and return a State (GIL released).
     fn simulate(&self, py: Python<'_>, values: HashMap<String, f64>) -> PyResult<PyState> {
         let data = py
-            .allow_threads(|| {
+            .detach(|| {
                 let plan = self.lock_plan()?;
                 plan.execute_statevector(&values)
             })
@@ -136,7 +136,7 @@ impl PyCatCircuit {
                 self.parameter_names.len()
             )));
         }
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut plan = self.lock_plan()?;
             plan.execute_gradient(&theta, &terms)
         })
@@ -152,7 +152,7 @@ impl PyCatCircuit {
         shots: usize,
         seed: Option<u64>,
     ) -> PyResult<HashMap<String, usize>> {
-        py.allow_threads(|| {
+        py.detach(|| {
             let plan = self.lock_plan()?;
             plan.execute_sample(shots, seed)
         })

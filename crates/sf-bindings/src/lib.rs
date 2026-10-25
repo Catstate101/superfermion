@@ -72,7 +72,7 @@ pub struct PyMPSState {
 impl PyMPSState {
     /// Get the MPS tensors as a list of 2D NumPy arrays.
     /// Each tensor has shape (left_bond * 2, right_bond) = (D_L * 2, D_R).
-    fn tensors(&self, py: pyo3::Python) -> pyo3::PyResult<Vec<pyo3::PyObject>> {
+    fn tensors(&self, py: pyo3::Python) -> pyo3::PyResult<Vec<pyo3::Py<pyo3::PyAny>>> {
         use numpy::PyArray1;
         let mut result = Vec::new();
         for tensor in &self.inner.tensors {
@@ -187,7 +187,7 @@ pub struct PyState {
 impl PyState {
     fn expectation(&self, py: Python<'_>, observable: Vec<(Vec<u8>, f64, f64)>) -> PyResult<f64> {
         let terms = Self::parse_observable(&observable);
-        py.allow_threads(|| self.inner.expectation(&terms))
+        py.detach(|| self.inner.expectation(&terms))
             .map_err(|e| method_error(py, e.to_string()))
     }
 
@@ -245,7 +245,7 @@ impl PyState {
     /// Actual vector norm squared; unlike purity, this checks normalization.
     fn norm_squared(&self, py: Python<'_>) -> PyResult<f64> {
         let state = prepared::statevector(self, py)?;
-        Ok(py.allow_threads(|| state.data.iter().map(|z| z.norm_sqr()).sum()))
+        Ok(py.detach(|| state.data.iter().map(|z| z.norm_sqr()).sum()))
     }
 
     /// Mean of Z on every qubit, computed without a NumPy export.
@@ -655,7 +655,7 @@ impl PyQuantumDAG {
         let flat: Vec<num_complex::Complex64> = u.as_slice().to_vec();
         let arr = numpy::PyArray1::from_vec(py, flat);
         let arr2 = arr.reshape([c, r])?.call_method0("transpose")?;
-        Ok(arr2.downcast_into::<numpy::PyArray2<num_complex::Complex64>>()?)
+        Ok(arr2.cast_into::<numpy::PyArray2<num_complex::Complex64>>()?)
     }
 
     /// Run high-performance statevector simulation and return the final statevector.
@@ -2184,7 +2184,7 @@ fn pauli_twirl_circuit(
 ) -> PyResult<Vec<(String, Vec<usize>, Vec<f64>)>> {
     // Get circuit._gates (list of GateRecord)
     let gates = circuit.getattr("_gates")?;
-    let gate_list: &pyo3::Bound<'_, pyo3::types::PyList> = gates.downcast()?;
+    let gate_list: &pyo3::Bound<'_, pyo3::types::PyList> = gates.cast()?;
     let n_gates = gate_list.len();
 
     // Fast extraction: batch-extract all fields into Rust Vecs
@@ -2200,7 +2200,7 @@ fn pauli_twirl_circuit(
 
         // Extract qubits list
         let qubits_attr = gate.getattr("qubits")?;
-        let qubits_list: &pyo3::Bound<'_, pyo3::types::PyList> = qubits_attr.downcast()?;
+        let qubits_list: &pyo3::Bound<'_, pyo3::types::PyList> = qubits_attr.cast()?;
         let qubits: Vec<usize> = qubits_list
             .iter()
             .map(|q| q.extract::<usize>().unwrap_or(0))
@@ -2208,7 +2208,7 @@ fn pauli_twirl_circuit(
 
         // Extract params (optional, may be empty list)
         let params_attr = gate.getattr("params")?;
-        let params_list: &pyo3::Bound<'_, pyo3::types::PyList> = params_attr.downcast()?;
+        let params_list: &pyo3::Bound<'_, pyo3::types::PyList> = params_attr.cast()?;
         let params: Vec<f64> = params_list
             .iter()
             .map(|p| p.extract::<f64>().unwrap_or(0.0))

@@ -62,7 +62,7 @@ impl PyPreparedCircuit {
 
     fn simulate(&self, py: Python<'_>, values: HashMap<String, f64>) -> PyResult<PyState> {
         let data = py
-            .allow_threads(|| self.inner.simulate(&values))
+            .detach(|| self.inner.simulate(&values))
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(PyState::new(Box::new(StatevectorState::new(
             data,
@@ -92,7 +92,7 @@ impl PyPreparedCircuit {
             ));
         }
         let data = py
-            .allow_threads(|| -> Result<Vec<num_complex::Complex64>, String> {
+            .detach(|| -> Result<Vec<num_complex::Complex64>, String> {
                 let mut data = Vec::with_capacity(elements);
                 for parameters in &values {
                     data.extend(self.inner.simulate(parameters)?);
@@ -114,7 +114,7 @@ impl PyPreparedCircuit {
             ));
         }
         let results = py
-            .allow_threads(|| -> Result<Vec<f64>, String> {
+            .detach(|| -> Result<Vec<f64>, String> {
                 let mut results = Vec::with_capacity(values.len());
                 for parameters in &values {
                     let state = StatevectorState::new(
@@ -142,7 +142,7 @@ impl PyPreparedCircuit {
             ));
         }
         let results = py
-            .allow_threads(|| -> Result<Vec<f64>, String> {
+            .detach(|| -> Result<Vec<f64>, String> {
                 let mut results = Vec::with_capacity(values.len());
                 for parameters in &values {
                     let state = StatevectorState::new(
@@ -176,7 +176,7 @@ pub(super) fn statevector<'s>(
 
 pub(super) fn mean_z(state: &PyState, py: Python<'_>) -> PyResult<f64> {
     let state = statevector(state, py)?;
-    py.allow_threads(|| state.mean_z())
+    py.detach(|| state.mean_z())
         .map_err(|e| method_error(py, e.to_string()))
 }
 
@@ -186,6 +186,6 @@ pub(super) fn diagonal(
     py: Python<'_>,
 ) -> PyResult<f64> {
     let state = statevector(state, py)?;
-    py.allow_threads(|| state.diagonal_expectation(&observable.weights))
+    py.detach(|| state.diagonal_expectation(&observable.weights))
         .map_err(|e| method_error(py, e.to_string()))
 }
