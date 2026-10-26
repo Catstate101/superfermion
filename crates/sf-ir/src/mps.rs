@@ -918,6 +918,21 @@ impl MPSState {
     /// ε measured from the dropped row weights exactly like the SVD path.
     /// The pair (blockdiag(Q_0,Q_1)[:, :k], C[:k, :]) reproduces M to
     /// machine precision.
+    ///
+    /// Bond-cap caveat, added after the 0.1.17 prefix-selection defect:
+    /// "exactly representable" is a statement about the rank, not about the
+    /// number of rows.  C has 2·r_q rows, and the pair actually kept is
+    /// (blockdiag(Q_0,Q_1)[:, :k], C[:k, :]) with k = min(last row above
+    /// 1e-12·‖C‖_F, bond_dim) — a prefix.  Whenever 2·r_q > bond_dim that
+    /// prefix is all of C_top and at most the first bond_dim − r_q rows of
+    /// C_bot, so a gate that concentrates the state in the lower block loses
+    /// the live rows while rank(M) still fits the cap.  Measured at
+    /// M = 32×16, bond_dim = 16: rows 0–15 empty, live rows in 16–31, and
+    /// ε = 0.9871 was reported as ordinary truncation.  The norm-ordered
+    /// selection below therefore ranks rows by measured energy, and returns
+    /// None (handing the merge to the SVD path) when ε still exceeds 1e-10.
+    /// Do not reintroduce an unconditional assumption that the prefix is
+    /// sufficient.
     #[allow(clippy::too_many_arguments)]
     fn blockdiag_exact_split(
         t1_a: &DMatrix<Complex64>,
@@ -1045,6 +1060,34 @@ impl MPSState {
         let kept_sq: f64 = row_sq[..k_final].iter().sum();
         let eps = ((frob_sq_full - kept_sq) / frob_sq_full).clamp(0.0, 1.0);
 
+        // ── Additive repair: norm-ordered row selection ──
+        // The prefix selection above is exact only while the live rows of C
+        // form a prefix.  A left-bit-preserving gate can concentrate the
+        // state in the lower block (o1 = 1), and rows [0, k) are then nearly
+        // empty while the cap drops the rows that carry the mass — the
+        // brick12@16 collapse (M = 32x16, eps = 9.871e-1 at k = 16).  The
+        // caller admits this merge only when rank_bound <= bond_dim, i.e.
+        // when it is exactly representable, so any k independent rows
+        // reproduce M.  Rank the rows by measured norm and keep that set
+        // when it retains strictly more mass than the prefix.
+        let mut order: Vec<usize> = (0..2 * r_q).collect();
+        order.sort_by(|&a, &b| {
+            row_sq[b]
+                .partial_cmp(&row_sq[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut k_alt = 0usize;
+        for &i in &order {
+            if k_alt >= bond_dim || row_sq[i] <= row_eps_sq {
+                break;
+            }
+            k_alt += 1;
+        }
+        if k_alt == 0 {
+            k_alt = 1;
+        }
+        let kept_alt: f64 = order[..k_alt].iter().map(|&i| row_sq[i]).sum();
+
         // Stage 5: assemble in the caller's packing — t1 rows (o1,l),
         // t2 rows (o2,j) with column order matching C's rows.
         let q_a_na = faer_to_na(&q_a);
@@ -1169,6 +1212,52 @@ impl MPSState {
                 (__b_tc - __b_tb).as_micros(),
                 (__b_t1 - __b_tc).as_micros(),
             );
+        }
+
+        // ── Additive repair: apply the norm-ordered selection ──
+        // Runs after the debug block so the self-check above always reports
+        // the prefix pair; the returned pair is the better of the two.
+        if kept_alt > kept_sq * (1.0 + 1e-12) {
+            let mut t1_alt = DMatrix::<Complex64>::zeros(2 * d_l1, k_alt);
+            let mut t2_alt = DMatrix::<Complex64>::zeros(2 * k_alt, d_r2);
+            for (j, &src) in order[..k_alt].iter().enumerate() {
+                let (c_h, jj, q_h) = if src < r_q {
+                    (&c_top, src, &q_a_na)
+                } else {
+                    (&c_bot, src - r_q, &q_b_na)
+                };
+                let col_off = if src < r_q { 0 } else { d_l1 };
+                for i in 0..d_l1 {
+                    t1_alt[(col_off + i, j)] = q_h[(i, jj)];
+                }
+                for o2 in 0..2usize {
+                    for rr in 0..d_r2 {
+                        t2_alt[(o2 * k_alt + j, rr)] = c_h.read(jj, o2 * d_r2 + rr);
+                    }
+                }
+            }
+            t1_new = t1_alt;
+            t2_new = t2_alt;
+            if std::env::var_os("SF_MPS_SVD_DEBUG").is_some() {
+                eprintln!(
+                    "[bd-repair] M={}x{} bond={bond_dim} prefix_k={k_final} \
+                     kept_prefix={kept_sq:.6e} alt_k={k_alt} kept_alt={kept_alt:.6e}",
+                    2 * d_l1,
+                    2 * d_r2,
+                );
+            }
+        }
+        // Report the measured deficit of the pair actually returned.
+        let eps = if kept_alt > kept_sq {
+            ((frob_sq_full - kept_alt) / frob_sq_full).clamp(0.0, 1.0)
+        } else {
+            eps
+        };
+        // This branch is entered only for exactly representable merges, so a
+        // material deficit means the row choice is still deficient; hand the
+        // merge to the SVD path rather than return a silently lossy pair.
+        if eps > 1e-10 {
+            return None;
         }
 
         Some((t1_new, t2_new, eps))
@@ -2446,6 +2535,44 @@ mod tests {
 
     fn mps_norm_sq(state: &MPSState) -> f64 {
         state.to_statevector().iter().map(|c| c.norm_sqr()).sum()
+    }
+
+    #[test]
+    fn test_blockdiag_repair_keeps_live_rows_below_the_prefix() {
+        // The block-diagonal split keeps a prefix of C's rows; when the
+        // populated block is the lower one (o1 = 1) and the cap equals the
+        // rank bound, that prefix is empty.  The repair must re-select the
+        // live rows instead of reporting a near-total discard.
+        let d_l1 = 4usize;
+        let d_m = 4usize;
+        let d_r2 = 2usize;
+        let bond_dim = 4usize;
+        let one = Complex64::new(1.0, 0.0);
+        let mut t1 = nalgebra::DMatrix::zeros(2 * d_l1, d_m);
+        for i in 0..d_m {
+            t1[(d_l1 + i, i)] = one;
+        }
+        let t2 = nalgebra::DMatrix::from_element(2 * d_m, d_r2, one);
+        let t1_a = t1.rows(0, d_l1).into_owned();
+        let t1_b = t1.rows(d_l1, d_l1).into_owned();
+        let t2_a = t2.rows(0, d_m).into_owned();
+        let t2_b = t2.rows(d_m, d_m).into_owned();
+        let gate = OpType::CNOT.to_matrix();
+        let out = MPSState::blockdiag_exact_split(
+            &t1_a,
+            &t1_b,
+            &t2_a,
+            &t2_b,
+            d_l1,
+            d_m,
+            d_r2,
+            &gate,
+            bond_dim,
+            std::time::Instant::now(),
+        );
+        let (q, _r, eps) = out.expect("exactly representable merge must not fall back");
+        assert_eq!(q.ncols(), bond_dim);
+        assert!(eps < 1e-12, "row selection lost mass: eps={eps}");
     }
 
     #[test]
