@@ -50,6 +50,18 @@ with a Rust acceleration core (Rayon multithreading + in-place statevector).
 pip install superfermion
 ```
 
+Already installed? pip will not move an existing environment on its own, so
+upgrade in place:
+
+```bash
+pip install -U superfermion
+```
+
+From 0.1.20 the package also prints a one-line notice to stderr when a newer
+release is on PyPI. It checks at most once a day, in a background thread, and is
+silent when offline, in CI, or under pytest; disable it with
+`SF_NO_UPDATE_CHECK=1`.
+
 Wheels are built once against the CPython stable ABI and tagged `cp310-abi3`,
 so a single binary per platform installs on CPython 3.10 and every later
 release, including versions published after the wheel was built:

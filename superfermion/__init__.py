@@ -30,7 +30,7 @@ Application modules (importable but not promoted to ``sf.*``):
     superfermion.viz          — circuit visualization
 """
 
-__version__ = "0.1.19"
+__version__ = "0.1.20"
 
 # ── Core imports (only numpy required) ────────────────────────────────
 from superfermion.circuit import Circuit
@@ -144,3 +144,14 @@ __all__ = [
     # Version
     "__version__",
 ]
+
+
+# Announce a newer release on PyPI, if there is one.  Best-effort by design:
+# cached for a day, runs in a daemon thread so import never waits on the
+# network, and silent in CI/pytest or when SF_NO_UPDATE_CHECK is set.
+try:
+    from superfermion.update_check import notify_if_outdated as _notify_if_outdated
+
+    _notify_if_outdated(__version__)
+except Exception:  # a notice must never be able to break an import
+    pass

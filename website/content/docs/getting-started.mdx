@@ -121,6 +121,29 @@ result = sf.run(qc_noisy, method="density_matrix", noise_model=noise, shots=0)
 print(f"purity = {result.metadata['purity']:.4f}")
 ```
 
+## Staying up to date
+
+`pip install superfermion` installs the newest release it can resolve, but pip
+never moves an environment that already holds an older one. To pull an existing
+install forward:
+
+```bash
+pip install -U superfermion
+```
+
+From 0.1.20 onward, importing the package checks PyPI at most once a day and
+prints a single line to stderr when a newer release exists:
+
+```
+[superfermion] 0.1.20 is installed; 0.1.21 is available (pip install -U superfermion)
+```
+
+The check runs in a background thread, so import never waits on the network, and
+it stays silent when offline, inside CI, and under pytest. Switch it off with
+`SF_NO_UPDATE_CHECK=1` (or `NO_UPDATE_NOTIFIER=1`); the answer is cached in
+`%LOCALAPPDATA%\superfermion\update_check.json` on Windows and
+`~/.cache/superfermion/update_check.json` elsewhere.
+
 ## Where next
 
 Now that you've run your first circuit, dive into the guides:
