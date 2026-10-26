@@ -1,0 +1,120 @@
+---
+title: "MPS Truncation Diagnostics"
+description: "What the four truncation numbers mean, why the returned state is not normalised, and how bond_dim compares across engines."
+---
+
+Every two-qubit step in an MPS run can discard weight: the bond cap projects the merged tensor
+onto at most `bond_dim` kept indices. SuperFermion records four numbers about that process and
+returns the surviving state unnormalised. Read together they tell you whether a bond is large
+enough; read separately they are easy to misread.
+
+## The four numbers
+
+| method | definition | range | how to read it |
+|---|---|---|---|
+| `discarded_weight()` | Σε over every two-qubit step | ≥ 0, can exceed 1 | accumulated discard, **not** a fraction of the whole |
+| `max_discarded_weight()` | largest single-step ε | 0 … 1 | the spike detector |
+| `truncation_events()` | steps that discarded above the tolerance | integer | a count, not a severity |
+| `fidelity_lower_bound()` | `clamp(1 − Σε, 0, 1)` | 0 … 1 | valid but loose; `0.0` means only that Σε ≥ 1 |
+
+On a 16-qubit, 12-layer brickwork circuit at bond 16:
+
+```python
+import numpy as np
+import superfermion as sf
+
+ir = qc.to_ir()
+m = ir.evolve_mps(16)
+
+m.discarded_weight()        # 0.329799
+m.max_discarded_weight()    # 0.090469
+m.truncation_events()       # 15
+m.fidelity_lower_bound()    # 0.670201
+```
+
+## The returned state is a survivor, not a normalised state
+
+`to_statevector()` and `mps_todense()` return the state the bond cap left behind. It is not
+renormalised, so its squared norm is the survivor weight:
+
+```python
+psi = np.asarray(m.to_statevector())
+norm2 = float(np.vdot(psi, psi).real)      # 0.828381
+ir.mps_norm_sq(16)                          # 0.828381 — same number
+
+exact = np.asarray(ir.simulate_to_state("statevector").numpy())
+fidelity = abs(np.vdot(exact, psi)) ** 2 / norm2   # 0.832776
+```
+
+Dividing by `norm2` is not optional when comparing against an exact reference. Without it the
+overlap is scaled by the survivor weight and the comparison is meaningless. For this circuit the
+weight actually lost is `1 − 0.828381 = 0.171619`.
+
+## Why Σε can exceed 1
+
+Each ε is measured against that step's own tensor norm, not against the initial state, so the
+per-step fractions do not add up to "the fraction of the state that was lost". The 16-qubit
+brickwork at bond 2 measures `discarded_weight() = 4.8026` while the state still retains part of
+its norm. For the total loss, read `1 − mps_norm_sq(bond)`; Σε is a step counter with weights.
+
+## The bound is valid and loose
+
+Because each step shrinks the norm by `(1 − ε_i)`, the survivor weight telescopes to
+`‖ψ‖² = Π(1 − ε_i)`, which is at least `1 − Σε`. At bond 16 that is `0.670201 ≤ 0.828381`, and
+the measured fidelity `0.832776` sits above both. This is why the method is called a *lower*
+bound: it is conservative, empirical, and not a certified bound. When it prints `0.0`, the only
+conclusion is Σε ≥ 1 — not that the state is orthogonal to the reference.
+
+## bond_dim is not portable across engines
+
+The same gates at the same nominal cap do not produce the same state:
+
+| engine | setting | fidelity at bond 16 |
+|---|---|---:|
+| SuperFermion | `bond_dim=16` | 0.832776 |
+| Qiskit Aer | `matrix_product_state_max_bond_dimension=16` | 0.961090 |
+| PennyLane `default.tensor` | MPS at bond 16 | 0.961425 |
+
+The cap means "keep at most this many bond indices", but which indices are kept, in what order,
+and how the local tensors are factorised differ per engine. Compare each engine against a dense
+reference, not against another engine's bond number.
+
+## Truncation policy
+
+`SF_MPS_TRUNCATION` selects the algorithm:
+
+- unset or `svd` — SVD truncation (default)
+- `qr` or `legacy` — the historical QR position cut
+
+It is read once per process and cached, so it must be set before `import superfermion`; changing
+it in a running interpreter has no effect. The QR path is monotone in the bond but less accurate
+at small caps (`0.652338` against `0.773392` at bond 14 on the circuit above). It exists as a
+fallback for reproducing historical runs, not as a tuning knob.
+
+## Choosing a bond
+
+Raise the bond until fidelity stops moving, and check that it never decreases on the way:
+
+| bond | 14 | 15 | 16 | 20 | 24 | 32 | 48 | 64 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| fidelity | 0.773392 | 0.788872 | 0.832776 | 0.899101 | 0.951217 | 0.989850 | 0.998546 | 1.000000 |
+
+Monotonicity is the check that catches a bad cap without needing the exact state — a larger bond
+must never return a worse state.
+
+## Common mistakes
+
+- **Passing an `IR` to `mps_todense`.** It takes a `Circuit`. For an IR, use
+  `ir.evolve_mps(bond).to_statevector()`; the call now raises a `TypeError` that says so.
+- **Comparing to an exact state without dividing by the survivor norm.** See above.
+- **Reading `discarded_weight() > 1` as a bug.** It is a sum of per-step fractions.
+- **Reading `truncation_events()` as a severity score.** A single catastrophic merge can leave
+  *fewer* events than a benign one, because it removes most of the weight at once.
+
+## Note on 0.1.17
+
+The published 0.1.17 wheel can return a worse state at a larger bond: on this circuit bond 16
+returned `0.003168` against `0.788872` at bond 15, with a single step discarding `0.9871`. The
+cause was a row-prefix selection inside the exact block-diagonal split of the default SVD path;
+it is fixed on `main`, and the numbers on this page come from the fixed build. On 0.1.17, sweep a
+few bonds and check monotonicity before trusting any single cap.

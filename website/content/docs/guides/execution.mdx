@@ -63,6 +63,9 @@ result = sf.run(qc, method="mps", bond_dim=64, shots=1024)
 
 Higher bond dimension = more accuracy, more memory. Start at 64.
 
+The numbers behind "more accuracy" — `discarded_weight`, the survivor norm, and how to check a
+bond is large enough — are in [MPS Truncation Diagnostics](/docs/reference/mps-truncation).
+
 MPS also executes **dynamic (mid-circuit) circuits** with `shots>0`: each
 shot replays the circuit while collapsing the tensor network at every mid
 measure, with `bond_dim` capping the bond (default 64; reported in
