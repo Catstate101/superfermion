@@ -227,9 +227,11 @@ mod tests {
 
     #[test]
     fn test_compile_with_connectivity_constraints() -> Result<(), CompilerError> {
-        let mut backend = BackendSpec::default();
-        backend.n_qubits = 6;
-        backend.connectivity = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)];
+        let backend = BackendSpec {
+            n_qubits: 6,
+            connectivity: vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)],
+            ..Default::default()
+        };
 
         let mut dag = QuantumDAG::new(6, 0);
         dag.add_op(OpType::H, &[0]);
@@ -279,9 +281,11 @@ mod tests {
 
     #[test]
     fn test_compiled_circuit_preserves_qubit_count() -> Result<(), CompilerError> {
-        let mut backend = BackendSpec::default();
-        backend.n_qubits = 5;
-        backend.connectivity = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
+        let backend = BackendSpec {
+            n_qubits: 5,
+            connectivity: vec![(0, 1), (1, 2), (2, 3), (3, 4)],
+            ..Default::default()
+        };
 
         let mut dag = QuantumDAG::new(5, 0);
         dag.add_op(OpType::H, &[0]);

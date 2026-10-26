@@ -7,6 +7,10 @@
 //!
 //! Not part of the library: nothing here is linked into the wheel.
 
+// Index loops are kept explicit on purpose: this harness mirrors the kernel's
+// own addressing so timings stay comparable with the code under test.
+#![allow(clippy::needless_range_loop)]
+
 use num_complex::Complex64;
 use rayon::prelude::*;
 use std::time::Instant;

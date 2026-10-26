@@ -291,7 +291,7 @@ mod tests {
         let code = SurfaceCode::new(3);
         assert_eq!(code.n_data(), 9);
         assert_eq!(code.distance(), 3);
-        assert!(code.stabilizers().len() > 0);
+        assert!(!code.stabilizers().is_empty());
     }
 
     #[test]

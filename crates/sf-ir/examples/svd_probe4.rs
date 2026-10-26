@@ -15,6 +15,14 @@
 //!
 //! Run: cargo run --release -p sf-ir --example svd_probe4
 
+// Scratch probe: index loops mirror the engine's matrix layout, and the
+// `repeat` idiom seeds degenerate columns verbatim.
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::manual_repeat_n,
+    clippy::needless_range_loop
+)]
+
 use faer::linalg::solvers::{Svd, ThinSvd};
 use faer::Mat as FaerMat;
 use num_complex::Complex64;

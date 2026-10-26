@@ -133,8 +133,8 @@ fn main() {
     // U columns (overlap magnitude) — exposes U/sigma order mismatches.
     for k in 0..n {
         let mut best = (0usize, 0.0_f64);
-        for t in 0..n {
-            let ov: Complex64 = (0..n).map(|i| uu.read(i, k).conj() * u[t][i]).sum();
+        for (t, u_row) in u.iter().enumerate().take(n) {
+            let ov: Complex64 = (0..n).map(|i| uu.read(i, k).conj() * u_row[i]).sum();
             if ov.norm() > best.1 {
                 best = (t, ov.norm());
             }

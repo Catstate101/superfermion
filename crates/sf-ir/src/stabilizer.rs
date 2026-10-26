@@ -1299,7 +1299,7 @@ mod tests {
         let counts = tab.sample(200, Some(123));
         // Keys are LE (qubit q = bit q of the integer form); the Bell-like
         // pair on qubits 50,80 must agree in every shot.
-        for (bs, _) in &counts {
+        for bs in counts.keys() {
             let v = u128::from_str_radix(bs, 2).unwrap();
             let b50 = (v >> 50) & 1;
             let b80 = (v >> 80) & 1;

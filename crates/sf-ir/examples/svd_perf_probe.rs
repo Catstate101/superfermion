@@ -5,7 +5,8 @@
 //!   2. the naive per-column build  (the v-side factor construction loop)
 //!   3. faer matmul W = M * V       (all r columns, Rayon)
 //!   4. faer matmul W_k = M * V_k   (only the kept k columns)
-//! so the 3x-vs-aer brick12 gap can be attributed to a specific primitive.
+//!    so the 3x-vs-aer brick12 gap can be attributed to a specific primitive.
+#![allow(clippy::doc_lazy_continuation)]
 use faer::linalg::matmul::matmul as faer_matmul;
 use faer::linalg::solvers::ThinSvd;
 use faer::Mat as FaerMat;
@@ -52,8 +53,8 @@ fn main() {
             let mut w = vec![Complex64::new(0.0, 0.0); nrows];
             for c in 0..ncols {
                 let vc = v.read(c, ci);
-                for i in 0..nrows {
-                    w[i] += m.read(i, c) * vc;
+                for (i, wi) in w.iter_mut().enumerate() {
+                    *wi += m.read(i, c) * vc;
                 }
             }
             black_box(&w);
@@ -65,8 +66,8 @@ fn main() {
             let mut w = vec![Complex64::new(0.0, 0.0); nrows];
             for c in 0..ncols {
                 let vc = v.read(c, ci);
-                for i in 0..nrows {
-                    w[i] += m.read(i, c) * vc;
+                for (i, wi) in w.iter_mut().enumerate() {
+                    *wi += m.read(i, c) * vc;
                 }
             }
             black_box(&w);

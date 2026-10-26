@@ -9,6 +9,10 @@
 //!
 //! Run: cargo run --release -p sf-ir --example svd_probe5
 
+// Scratch probe: index loops mirror the engine's matrix layout, and the
+// `repeat` idiom seeds degenerate columns verbatim.
+#![allow(clippy::manual_repeat_n, clippy::needless_range_loop)]
+
 use faer::linalg::solvers::ThinSvd;
 use faer::Mat as FaerMat;
 use nalgebra::DMatrix;

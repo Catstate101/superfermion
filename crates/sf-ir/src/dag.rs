@@ -4621,7 +4621,7 @@ mod tests {
         for (n, seed) in [(8usize, 1u64), (13, 2), (20, 3)] {
             let cols = compose_cols(n, &random_cnot_pairs(n, 40, seed));
             let tables = build_perm_gather_tables(&cols);
-            assert_eq!(tables.len(), ((n + 7) / 8) * 256, "n={n} table size");
+            assert_eq!(tables.len(), n.div_ceil(8) * 256, "n={n} table size");
             for i in 0..(1usize << n) {
                 let d = perm_dest(&cols, i);
                 assert_eq!(src_from_tables(&tables, d), i, "n={n} i={i}");
@@ -4667,7 +4667,7 @@ mod tests {
             // Rayon-split path: two ranges so the parallel branch runs even
             // on a single-threaded test pool.
             let chunk = ((dim / 2) + 7) & !7usize;
-            let n_ranges = (dim + chunk - 1) / chunk;
+            let n_ranges = dim.div_ceil(chunk);
             (0..n_ranges).into_par_iter().for_each(|c| {
                 let start = c * chunk;
                 let end = (start + chunk).min(dim);

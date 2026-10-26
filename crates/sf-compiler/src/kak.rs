@@ -703,7 +703,7 @@ mod tests {
     fn test_magic_basis_unitary() {
         let m = magic_basis();
         let m_dag = m.adjoint();
-        let prod = &m_dag * &m;
+        let prod = m_dag * m;
         // M†M should be close to identity
         for i in 0..4 {
             for j in 0..4 {

@@ -44,7 +44,7 @@ jobs:
           PYO3_PYTHON: python
         run: |
           set +e
-          cargo clippy --workspace -- -D warnings > "$RUNNER_TEMP/clippy.log" 2>&1
+          cargo clippy --workspace --all-targets -- -D warnings > "$RUNNER_TEMP/clippy.log" 2>&1
           status=$?
           cat "$RUNNER_TEMP/clippy.log"
           if [ "$status" -ne 0 ]; then
