@@ -328,6 +328,11 @@ jobs:
       name: pypi
       url: https://pypi.org/p/superfermion
     permissions:
+      # Job-level permissions replace the defaults rather than adding to them.
+      # Without contents: read the checkout below gets a token that cannot see
+      # a private repository and dies with "repository not found", which is
+      # what blocked the v0.1.18 upload before it reached PyPI.
+      contents: read
       id-token: write
 
     steps:
