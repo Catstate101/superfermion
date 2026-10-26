@@ -134,8 +134,9 @@ impl PyMPSState {
         self.inner.perm.clone()
     }
 
-    /// Accumulated discarded-weight fraction Σε over all 2q-gate QR steps.
-    /// 0.0 = exact evolution; > 0 means the `bond_dim` cap removed real weight.
+    /// Accumulated discarded weight Σε (a sum of per-step fractions) over all
+    /// 2q-gate steps. 0.0 = exact evolution; > 0 means the `bond_dim` cap
+    /// removed real weight.
     ///
     /// This is an accumulated *sum* of per-step fractions, not a fraction of
     /// the whole: it can exceed 1.0 (1.79 was measured at bond 16 before the

@@ -48,3 +48,11 @@ def test_mps_todense_rejects_ir_with_named_error():
     c = sf.Circuit(2).h(0).cnot(0, 1)
     with pytest.raises(TypeError, match="sf.Circuit"):
         mps_todense(c.to_ir())
+
+
+def test_discarded_weight_docstring_leads_with_sum_not_fraction():
+    """The head clause used to read "discarded-weight fraction", which
+    contradicts the body and the measured 1.79 at bond 16."""
+    first = (type(_bell_at_bond_one()[1]).discarded_weight.__doc__ or "").splitlines()[0]
+    assert "sum" in first
+    assert "fraction Σ" not in first
