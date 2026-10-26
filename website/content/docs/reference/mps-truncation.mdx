@@ -116,5 +116,5 @@ must never return a worse state.
 The published 0.1.17 wheel can return a worse state at a larger bond: on this circuit bond 16
 returned `0.003168` against `0.788872` at bond 15, with a single step discarding `0.9871`. The
 cause was a row-prefix selection inside the exact block-diagonal split of the default SVD path;
-it is fixed on `main`, and the numbers on this page come from the fixed build. On 0.1.17, sweep a
-few bonds and check monotonicity before trusting any single cap.
+it is fixed as of 0.1.18, which is what the numbers on this page come from, and 0.1.19 carries
+the same fix. On 0.1.17, sweep a few bonds and check monotonicity before trusting any single cap.
