@@ -268,6 +268,8 @@ def _install_mps_output_fix() -> None:
         return unpermute_statevector(raw, self.perm())
 
     to_statevector._sf_qubit_order = True  # type: ignore[attr-defined]
+    # Keep the Rust docstring (survivor-norm note) visible through the wrapper.
+    to_statevector.__doc__ = getattr(original, "__doc__", None)
     mps_state.to_statevector = to_statevector
 
     # Preserve the pre-fix physical-site view for diagnostics/tests.

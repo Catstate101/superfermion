@@ -116,6 +116,11 @@ impl PyMPSState {
     /// Uses the sparse-prefix fast path for area-law states, GEMM sweep
     /// otherwise. Same amplitudes as `State.numpy()` on the canonical
     /// handle up to floating-point reassociation (~1e-15).
+    ///
+    /// Not renormalised after truncation: the squared norm equals the
+    /// survivor weight (< 1 whenever the bond cap discarded anything, e.g.
+    /// 0.828 at bond 16 on brick12).  Divide by `sum(|psi|^2)` before
+    /// comparing with a normalised reference.
     fn to_statevector<'py>(
         &self,
         py: Python<'py>,
@@ -131,6 +136,12 @@ impl PyMPSState {
 
     /// Accumulated discarded-weight fraction Σε over all 2q-gate QR steps.
     /// 0.0 = exact evolution; > 0 means the `bond_dim` cap removed real weight.
+    ///
+    /// This is an accumulated *sum* of per-step fractions, not a fraction of
+    /// the whole: it can exceed 1.0 (1.79 was measured at bond 16 before the
+    /// prefix-selection repair) and grows with the number of truncating steps.
+    /// "QR" is the historical name — the default path is SVD truncation; the
+    /// QR position cut is the `SF_MPS_TRUNCATION=qr` legacy policy.
     fn discarded_weight(&self) -> f64 {
         self.inner.discarded_weight
     }
@@ -141,11 +152,20 @@ impl PyMPSState {
     }
 
     /// Number of 2q-gate steps that discarded non-negligible weight.
+    ///
+    /// A count of steps, not a severity signal: one catastrophic merge can
+    /// leave fewer events than a benign one because it removes most of the
+    /// weight at once (bond 16: 16 events, max step 0.987; bond 15: 28
+    /// events, max step 0.091, before the prefix-selection repair).
     fn truncation_events(&self) -> usize {
         self.inner.truncation_events
     }
 
     /// Conservative lower bound on the state fidelity: 1 − Σε.
+    ///
+    /// The raw 1 − Σε is clamped to [0, 1], so 0.0 only means Σε ≥ 1; it is
+    /// not evidence that the state is orthogonal to the reference, and it is
+    /// empirical, not a certified bound.
     fn fidelity_lower_bound(&self) -> f64 {
         self.inner.fidelity_lower_bound()
     }
@@ -735,6 +755,10 @@ impl PyQuantumDAG {
 
     /// Diagnostic: MPS-evolve and report the squared norm via the same
     /// boundary contraction. For a unitary evolution this should be 1.
+    ///
+    /// With truncation active this is the survivor weight, not 1: the gate
+    /// sweep is unitary but the bond cap is not norm-preserving (0.828 at
+    /// bond 16 on brick12).  A value below 1 is expected, not an error.
     fn mps_norm_sq(&self, bond_dim: usize) -> f64 {
         let pauli = vec![0u8; self.inner.n_qubits];
         let z = self.inner.simulate_mps_pauli_expval(bond_dim, &pauli);
@@ -742,6 +766,11 @@ impl PyQuantumDAG {
     }
 
     /// Evolve the circuit into an MPS state and return it for reuse.
+    ///
+    /// `bond_dim` is this library's per-bond cap.  It is not numerically
+    /// interchangeable with another framework's cap of the same name: at
+    /// bond 32 SF measured F = 0.990 against 0.999 for Aer/PennyLane on the
+    /// same 16-qubit circuit, so compare the curves, not a single cap.
     fn evolve_mps(&self, bond_dim: usize) -> PyMPSState {
         PyMPSState {
             inner: self.inner.evolve_mps(bond_dim),
