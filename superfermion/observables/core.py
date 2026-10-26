@@ -191,7 +191,16 @@ def mps_todense(circuit, bond_dim: int = 64, params=None) -> "np.ndarray":
 
     Returns:
         Complex statevector as numpy array.
+
+    ``bond_dim`` is SF's per-bond cap and is not numerically comparable to
+    another framework's cap of the same name (equal caps differ in accuracy);
+    compare fidelity-vs-cap curves instead.
     """
+    if not hasattr(circuit, "to_ir"):
+        raise TypeError(
+            f"mps_todense expects an sf.Circuit; got {type(circuit).__name__}. "
+            "To densify an IR, use ir.evolve_mps(bond_dim).to_statevector()."
+        )
     import numpy as _np
 
     if params is not None:
