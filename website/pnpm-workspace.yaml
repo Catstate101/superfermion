@@ -6,6 +6,15 @@ onlyBuiltDependencies:
   - sharp
   - workerd
 allowBuilds:
-  esbuild: set this to true or false
-  sharp: set this to true or false
-  workerd: set this to true or false
+  esbuild: true
+  sharp: true
+  workerd: true
+# Security pins: versions below these are flagged by Dependabot.
+# pnpm 11 reads overrides from this file, not from package.json.
+overrides:
+  nanoid: ^3.3.18
+  postcss: ^8.5.31
+  sharp: ^0.35.5
+  source-map-js: ^1.2.2
+  undici: ^7.30.1
+  zod: ^4.6.7

@@ -810,9 +810,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
  "libc",
  "rand_chacha",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "sf-bindings"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "nalgebra",
  "num-complex",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "sf-cat"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "nalgebra",
  "num-complex",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "sf-compiler"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "indexmap",
  "log",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "sf-gpu"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "approx",
  "cudarc",
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "sf-ir"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "approx",
  "faer",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "sf-pulse"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "log",
  "num-complex",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "sf-qec"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "log",
  "ndarray",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "sf-router"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "indexmap",
  "log",
