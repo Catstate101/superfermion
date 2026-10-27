@@ -241,3 +241,148 @@ class TestControlledUGamma:
             np.asarray(ref.to_ir().to_unitary()),
             atol=1e-12,
         )
+
+
+class TestQASMEndianness:
+    """SF is little-endian pass-through (see TestQiskitEndianness), so the
+    pure-Python from_qasm fallback must NOT reverse qubit labels. This test
+    forces the Python fallback: a >2^53 integer placed in a *comment* trips the
+    _has_bigint pre-scan (skipping the Rust parser) while the parser itself
+    ignores the comment line, so it locks the corrected convention."""
+
+    def test_qasm_python_fallback_roundtrip_preserves_statevector(self):
+        import numpy as np
+
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = sf.Circuit(3)
+        c.h(0)
+        c.cx(0, 1)
+        c.cz(1, 2)
+        c.swap(0, 2)
+        qasm = bridge.to_qasm(c)
+        # comment-only big int -> _has_bigint True -> Rust path skipped,
+        # pure-Python parser used instead.
+        qasm_fb = qasm + "\n// 99999999999999999\n"
+        restored = bridge.from_qasm(qasm_fb)
+        np.testing.assert_allclose(
+            np.asarray(sf.simulate(restored).numpy()),
+            np.asarray(sf.simulate(c).numpy()),
+            atol=1e-9,
+        )
+
+    def test_qasm_rust_path_roundtrip_preserves_statevector(self):
+        """Locks the Rust ``QuantumDAG.from_qasm2`` endianness fix: SF, Qiskit
+        and OpenQASM all use little-endian (q0 = LSB) pass-through, so
+        SF -> to_qasm -> from_qasm via the default (Rust) parser IS an
+        involution for asymmetric circuits. Previously the Rust parser mapped
+        q[i] -> (n-1-i) (big-endian), contradicting to_qasm/from_qiskit; fixed
+        in sf-ir/src/qasm.rs."""
+        import numpy as np
+
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = sf.Circuit(3)
+        c.h(0)
+        c.cx(0, 1)
+        c.swap(0, 2)
+        restored = bridge.from_qasm(bridge.to_qasm(c))
+        np.testing.assert_allclose(
+            np.asarray(sf.simulate(restored).numpy()),
+            np.asarray(sf.simulate(c).numpy()),
+            atol=1e-9,
+        )
+
+
+class TestToQasmDropGuard:
+    """Regression: to_qasm silently `continue`d on gates missing from its
+    map, emitting a circuit with operations dropped. It must raise (like
+    to_qiskit / to_cirq / to_ionq) except for BARRIER, which has no OpenQASM
+    2.0 equivalent."""
+
+    def test_to_qasm_raises_on_unmappable_gate(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = sf.Circuit(2)
+        c.h(0)
+        c.iswap(0, 1)  # ISWAP is not in to_qasm's GATE_MAP
+        with pytest.raises(ValueError, match="OpenQASM"):
+            bridge.to_qasm(c)
+
+    def test_to_qasm_still_omits_barrier(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = sf.Circuit(2)
+        c.h(0)
+        c.barrier()
+        c.cx(0, 1)
+        qasm = bridge.to_qasm(c)
+        assert "barrier" not in qasm.lower()
+        assert "cx q[0], q[1];" in qasm
+
+
+class TestRustStorageExporters:
+    """Regression: to_qiskit called _ensure_gates() but the other exporters
+    iterated circuit._gates directly, so a use_rust_storage circuit exported
+    as *nothing*. These pure-Python exporters must materialize first."""
+
+    def test_to_qasm_includes_rust_stored_gates(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = sf.Circuit(3, use_rust_storage=True)
+        c.h(0)
+        c.cx(0, 1)
+        qasm = bridge.to_qasm(c)
+        assert "h q[0];" in qasm
+        assert "cx q[0], q[1];" in qasm
+
+    def test_to_ionq_includes_rust_stored_gates(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = sf.Circuit(2, use_rust_storage=True)
+        c.h(0)
+        c.cx(0, 1)
+        names = [g["gate"] for g in bridge.to_ionq(c)]
+        assert "h" in names and "cnot" in names
+
+
+class TestCirqUnitaryEndianness:
+    """Lock: cirq.unitary() returns big-endian matrices and circuit.unitary()
+    takes big-endian matrices, so from_cirq/to_cirq pass through with NO bit
+    reversal -- a round-trip must preserve the simulated state."""
+
+    def test_cirq_unitary_roundtrip_preserves_statevector(self):
+        import numpy as np
+
+        try:
+            import cirq
+        except Exception:
+            pytest.skip("cirq not importable in this environment")
+        bridge = pytest.importorskip("superfermion.bridge")
+        u = np.kron(cirq.unitary(cirq.X), cirq.unitary(cirq.H)).astype(complex)
+        c = sf.Circuit(2).x(1)
+        c.unitary(u, [0, 1])
+        back = bridge.from_cirq(bridge.to_cirq(c))
+        np.testing.assert_allclose(
+            np.asarray(sf.simulate(back).numpy()),
+            np.asarray(sf.simulate(c).numpy()),
+            atol=1e-9,
+        )
+
+
+class TestPennyLaneAdditiveOps:
+    """from_pennylane previously raised on CY / PhaseShift / ISWAP; the added
+    PL_MAP entries route them through the same generic path as CNOT."""
+
+    def test_from_pennylane_supports_added_ops(self):
+        try:
+            import pennylane as qml
+        except Exception:
+            pytest.skip("pennylane not importable in this environment")
+        bridge = pytest.importorskip("superfermion.bridge")
+        make_qscript = getattr(qml.tape, "make_qscript", None)
+        if make_qscript is None:
+            pytest.skip("pennylane too old for qml.tape.make_qscript")
+
+        def ansatz():
+            qml.CY(wires=[0, 1])
+            qml.PhaseShift(0.3, wires=0)
+            qml.ISWAP(wires=[0, 1])
+
+        tape = make_qscript(ansatz)()
+        c = bridge.from_pennylane(tape, n_qubits=2)
+        assert c.gate_count == 3
