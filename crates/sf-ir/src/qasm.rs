@@ -5,6 +5,11 @@
 //! gates [rx, ry, rz, cx] plus common single/two-qubit gates.
 //!
 //! Gate-to-OpType mapping mirrors the Python bridge's `QASM_MAP` exactly.
+//!
+//! Endianness: SF, Qiskit and OpenQASM all use the little-endian (q0 = LSB)
+//! qubit order, so a QASM label `q[i]` maps straight to SF qubit `i` with no
+//! reversal. This keeps `to_qasm` -> `from_qasm2` an involution and matches
+//! the pure-Python fallback in `superfermion.bridge`.
 
 use crate::dag::QuantumDAG;
 use crate::ops::{OpType, Parameter};
@@ -69,11 +74,12 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
                 if q_idx >= n {
                     continue;
                 }
-                let qubit = n - 1 - q_idx;
+                // SF/OpenQASM are both little-endian (q0 = LSB): labels pass
+                // through unchanged so this stays consistent with to_qasm.
+                let qubit = q_idx;
                 let cbit = c_part
                     .and_then(parse_first_bracket_index)
                     .filter(|&ci| ci < n)
-                    .map(|ci| n - 1 - ci)
                     .unwrap_or(qubit);
                 dag_ref.add_measure(qubit, cbit);
             }
@@ -92,7 +98,8 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
                 let num_str = &qubits_str[abs_start..bracket_end];
                 if let Ok(idx) = num_str.parse::<usize>() {
                     if idx < n {
-                        qubit_indices.push(n - 1 - idx);
+                        // Little-endian pass-through (q[i] -> SF qubit i).
+                        qubit_indices.push(idx);
                     }
                 }
                 search_from = bracket_end + 1;
@@ -115,8 +122,8 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
             let num_str = &qubits_str[abs_start..bracket_end];
             if let Ok(idx) = num_str.parse::<usize>() {
                 if idx < n {
-                    // Reverse endianness: QASM LSB(0) → SF MSB(n-1)
-                    qubit_indices.push(n - 1 - idx);
+                    // Little-endian pass-through: SF q0 = QASM q[0] = LSB.
+                    qubit_indices.push(idx);
                 }
             }
             search_from = bracket_end + 1;
@@ -412,5 +419,31 @@ swap q[0], q[1];
         let dag = parse_qasm2(qasm).expect("should parse");
         assert_eq!(dag.n_qubits, 3);
         assert!(dag.gate_count() >= 8);
+    }
+
+    #[test]
+    fn test_little_endian_passthrough_not_reversed() {
+        // Regression: q[i] must map to SF qubit i (no n-1-i reversal), so that
+        // to_qasm -> from_qasm2 is an involution, matching the Python bridge.
+        let qasm = r#"OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[3];
+x q[0];
+cx q[0], q[2];
+swap q[1], q[2];
+"#;
+        let dag = parse_qasm2(qasm).expect("should parse");
+        let recs = dag.to_gate_records();
+        // X must act on qubit 0 (never reversed to n-1).
+        assert!(recs
+            .iter()
+            .any(|(n, q, _)| n.to_uppercase() == "X" && q == &[0]));
+        // cx control/target must stay [0, 2], never reversed to [2, 0].
+        assert!(recs
+            .iter()
+            .any(|(n, q, _)| matches!(n.to_uppercase().as_str(), "CX" | "CNOT") && q == &[0, 2]));
+        assert!(recs
+            .iter()
+            .any(|(n, q, _)| n.to_uppercase() == "SWAP" && q == &[1, 2]));
     }
 }
