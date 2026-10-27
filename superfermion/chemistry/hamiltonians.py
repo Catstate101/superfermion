@@ -31,26 +31,21 @@ class FermionicOperator:
 
         H = sum h_ij a^\dagger_i a_j + 0.5 * sum h_ijkl a^\dagger_i a^\dagger_j a_k a_l
         """
-        terms = {}
+        terms: Dict[Tuple[Tuple[int, int], ...], complex] = {}
 
-        # One-body terms
-        ni, nj = h1.shape
-        for i in range(ni):
-            for j in range(nj):
-                if abs(h1[i, j]) > 1e-10:
-                    terms[((i, 1), (j, 0))] = complex(h1[i, j])
+        # One-body terms -- np.argwhere locates the >1e-10 entries in C speed
+        # instead of a full ni*nj Python scan; term construction is unchanged.
+        h1 = np.asarray(h1)
+        for i, j in np.argwhere(np.abs(h1) > 1e-10):
+            terms[((int(i), 1), (int(j), 0))] = complex(h1[i, j])
 
         # Two-body terms
         if h2 is not None:
-            ni, nj, nk, nl = h2.shape
-            for i in range(ni):
-                for j in range(nj):
-                    for k in range(nk):
-                        for l in range(nl):
-                            if abs(h2[i, j, k, l]) > 1e-10:
-                                terms[((i, 1), (j, 1), (l, 0), (k, 0))] = (
-                                    0.5 * complex(h2[i, j, k, l])
-                                )
+            h2 = np.asarray(h2)
+            nz = np.argwhere(np.abs(h2) > 1e-10)
+            vals = h2[nz[:, 0], nz[:, 1], nz[:, 2], nz[:, 3]]
+            for (i, j, k, l), v in zip(nz.tolist(), vals.tolist()):
+                terms[((i, 1), (j, 1), (l, 0), (k, 0))] = 0.5 * complex(v)
 
         return cls(terms)
 

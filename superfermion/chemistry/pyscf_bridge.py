@@ -12,6 +12,26 @@ Usage:
     >>> mol = molecule_from_geometry("H 0 0 0; F 0 0 0.92", basis="sto-3g")
     >>> H = mol.to_hamiltonian(active_space=(2, 2))  # 2 electrons in 2 orbitals
     >>> print(f"{mol.n_qubits}-qubit Hamiltonian ready")
+
+Environment notes
+-----------------
+* PySCF ships NO Windows wheels on PyPI (sdist-only; a source build needs
+  CMake + a C/Fortran toolchain). Run chemistry on Linux/macOS, or inside
+  WSL on Windows (``sudo apt install -y build-essential cmake`` then
+  ``pip install pyscf``), rather than expecting ``pip install pyscf`` to
+  produce a wheel on native Windows.
+* When Qiskit Nature / OpenFermion / PennyLane are installed alongside for
+  cross-checking, keep the stack coherent. The failures seen when mixing
+  pins are ``AttributeError: module 'attrs' has no attribute 'frozen'``
+  (OpenFermion/Cirq vs an old or shadowed ``attrs``) and
+  ``AttributeError: module 'stevedore' has no attribute 'ExtensionManager'``
+  (Qiskit vs a partial ``stevedore``). Fix by creating a clean virtualenv
+  and installing a matching set together, e.g.::
+
+      pip install --upgrade pip attrs stevedore
+      pip install "pyscf" "qiskit" "qiskit-nature"   # let pip resolve
+
+  Do not hand-pin qiskit below the range qiskit-nature requires.
 """
 
 from __future__ import annotations
@@ -100,6 +120,21 @@ class MolecularData:
 
         # Apply active space transformation
         h1_as, h2_as, n_elec, n_orbs = self._apply_active_space(active_space)
+
+        # Guard: mapping the FULL orbital space builds a Pauli sum whose size
+        # explodes with n_orbitals (benzene/6-31G full = 132 qubits, ~10^6
+        # terms). Warn and point at active_space, the same scoping Qiskit
+        # Nature / PennyLane rely on. Does not change the returned operator.
+        if 2 * n_orbs > 24:
+            import warnings
+            warnings.warn(
+                f"Mapping the full {n_orbs}-orbital space needs {2 * n_orbs} "
+                f"qubits and produces a very large Pauli sum. Pass "
+                f"active_space=(n_elec, n_orbs) (e.g. (6, 6) for benzene) to "
+                f"keep the fermion-to-qubit transform tractable.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         # Build fermionic operator
         from superfermion.chemistry.hamiltonians import FermionicOperator
@@ -320,26 +355,21 @@ def _compute_pyscf(mol: MolecularData):
     mol.hf_energy = float(mf.e_tot)
     mol._mo_coeffs = mf.mo_coeff
 
-    # One-body integrals in AO basis → transform to MO
+    C = mf.mo_coeff
+
+    # One-body integrals in AO basis → MO:  h1_mo = C^H . h1_ao . C
     h1_ao = mf.get_hcore()  # Kinetic + nuclear attraction
-    h1_mo = np.einsum(
-        "pi,pq,qj->ij",
-        mf.mo_coeff.conj().T, h1_ao, mf.mo_coeff,
-    )
+    h1_mo = C.conj().T @ h1_ao @ C
     mol.h1 = np.asarray(h1_mo, dtype=float)
 
-    # Two-body integrals in AO basis → transform to MO (chemist notation)
-    eri_ao = mol_obj.intor("int2e")
-    n_ao = eri_ao.shape[0]
-    eri_ao = eri_ao.reshape(n_ao, n_ao, n_ao, n_ao)
-
-    # Transform to MO basis
-    C = mf.mo_coeff
-    eri_mo = np.einsum(
-        "pi,qj,rk,sl,pqrs->ijkl",
-        C.conj().T, C.conj().T, C, C, eri_ao,
-    )
-    mol.h2 = np.asarray(eri_mo, dtype=float)
+    # Two-body integrals AO → MO (chemist notation (ij|kl)).
+    # PySCF's ao2mo runs four BLAS half-transforms, O(nao^5), instead of
+    # the O(nao^8) np.einsum that never finished on benzene/6-31G.
+    # compact=False yields the full (nao,nao,nao,nao) tensor the caller
+    # (and the active-space slicer) expects -- output is identical.
+    nao = mol_obj.nao
+    eri_mo = pyscf.ao2mo.full(mol_obj, C, compact=False)
+    mol.h2 = np.asarray(eri_mo, dtype=float).reshape(nao, nao, nao, nao)
 
     # Nuclear repulsion
     mol.nuclear_repulsion = float(mol_obj.energy_nuc())
