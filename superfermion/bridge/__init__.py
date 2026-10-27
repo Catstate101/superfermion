@@ -231,12 +231,16 @@ def from_pennylane(pennylane_circuit: Any, n_qubits: int = None) -> sf.Circuit:
     
     circuit = sf.Circuit(n_qubits)
     
+    # Gates absent from this map previously raised; the added entries all
+    # flow through the identical generic method(*params, *wires) path the
+    # existing entries already use, so they are pure additive coverage.
     PL_MAP = {
         'Hadamard': 'h', 'PauliX': 'x', 'PauliY': 'y', 'PauliZ': 'z',
-        'S': 's', 'T': 't',
+        'S': 's', 'T': 't', 'SX': 'sx',
         'RX': 'rx', 'RY': 'ry', 'RZ': 'rz',
-        'CNOT': 'cx', 'CZ': 'cz',
-        'SWAP': 'swap',
+        'PhaseShift': 'p',
+        'CNOT': 'cx', 'CY': 'cy', 'CZ': 'cz',
+        'SWAP': 'swap', 'ISWAP': 'iswap', 'CSWAP': 'cswap',
         'Toffoli': 'ccx',
     }
     
@@ -276,6 +280,12 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
     ) if _re.search(r'\b\d{16,}\b', qasm_str) else False
 
     # ── Fast path: Rust-native QASM2 parser ─────────────────
+    # QuantumDAG.from_qasm2 uses little-endian pass-through (an OpenQASM qubit
+    # q[i] maps to SF qubit i), matching from_qiskit/to_qiskit and to_qasm, so
+    # SF -> to_qasm -> from_qasm is an involution for asymmetric circuits.
+    # (The parser previously reversed q[i] -> n-1-i (big-endian); that defect
+    # was fixed in sf-ir/src/qasm.rs and is locked by test_bridges.
+    # TestQASMEndianness.test_qasm_rust_path_roundtrip_preserves_statevector.)
     if not _has_bigint:
         try:
             from superfermion._sf_core import QuantumDAG
@@ -363,10 +373,12 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             
             # Map gate (QASM_MAP hoisted outside loop)
             
-            # CRITICAL: Reverse qubit indices to match SF's MSB-first internal representation
-            # This ensures SF bitstrings match Qiskit ones 1:1.
-            n = circuit.n_qubits
-            mapped_indices = [n - 1 - i for i in qubit_indices]
+            # SF and Qiskit/OpenQASM share the little-endian (q0=LSB) order,
+            # so qubit labels pass through unchanged -- matching the Rust fast
+            # path above and to_qasm below. Reversing here made this fallback
+            # disagree with both and broke the SF->QASM->SF round-trip for
+            # asymmetric circuits (the old MSB-first comment was wrong).
+            mapped_indices = list(qubit_indices)
             
             sf_name = QASM_MAP.get(gate_name)
             if sf_name and hasattr(circuit, sf_name):
@@ -406,6 +418,8 @@ def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
         'SWAP': 'swap'
     }
     
+    circuit._ensure_gates()  # no-op for default Python storage
+
     for gate in circuit._gates:
         ionq_name = GATE_MAP.get(gate.name.upper())
         if ionq_name is None:
@@ -494,10 +508,21 @@ def to_qasm(circuit: sf.Circuit) -> str:
         'SWAP': 'swap', 'MEASURE': 'measure'
     }
     
+    circuit._ensure_gates()  # no-op for default Python storage
+
     for gate in circuit._gates:
         qasm_name = GATE_MAP.get(gate.name.upper())
         if not qasm_name:
-            continue
+            # BARRIER has no OpenQASM 2.0 equivalent and is safe to omit.
+            # Any *other* unmapped gate must not be silently dropped --
+            # that would emit a circuit that is missing operations. Raise
+            # instead, matching to_qiskit / to_cirq / to_ionq.
+            if gate.name.upper() == "BARRIER":
+                continue
+            raise ValueError(
+                f"Cannot map gate '{gate.name}' to OpenQASM 2.0 "
+                f"(supported names: {sorted(set(GATE_MAP.values()))})"
+            )
             
         if gate.name == "MEASURE":
             cbit = gate.classical_bits[0] if gate.classical_bits else gate.qubits[0]
@@ -696,6 +721,8 @@ def to_cirq(circuit: sf.Circuit) -> Any:
     
     operations = []
     
+    circuit._ensure_gates()  # no-op for default Python storage
+
     for gate in circuit._gates:
         gate_name = gate.name.upper()
 
@@ -767,6 +794,7 @@ def to_pennylane(circuit: sf.Circuit) -> Any:
     }
     
     # Store circuit data
+    circuit._ensure_gates()  # no-op for default Python storage
     n_qubits = circuit.n_qubits
     gates = list(circuit._gates)
     

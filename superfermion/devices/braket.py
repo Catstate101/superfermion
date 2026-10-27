@@ -35,6 +35,7 @@ def _to_braket(circuit: "Circuit") -> Any:
     }
 
     bc = BraketCircuit()
+    circuit._ensure_gates()  # no-op for default Python storage
     for gate in circuit._gates:
         name = gate.name.upper()
         braket_name = GATE_MAP.get(name)
