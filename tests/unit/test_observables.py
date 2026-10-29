@@ -226,3 +226,86 @@ class TestMpsTodense:
         sv = mps_todense(c, bond_dim=16)
         ref = sf.simulate(c).numpy()
         assert np.max(np.abs(sv - ref)) < 1e-9
+
+
+class TestFfiErrorPropagation:
+    """The FFI entry point must raise, never panic.
+
+    A Rust panic crosses the boundary as ``pyo3_runtime.PanicException``, which
+    derives from ``BaseException`` -- so it escapes ``except Exception`` in
+    caller code and cannot be handled at all. These pin that each rejected
+    input arrives as an ordinary, catchable Python exception.
+    """
+
+    def test_a_pauli_term_wider_than_the_state_raises(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        sv = np.zeros(4, dtype=np.complex128)
+        sv[0] = 1.0
+        # 3-character term on a 2-qubit state: bit 2 indexes past the end.
+        with pytest.raises(ValueError, match="only 2 qubits"):
+            core.hamiltonian_expval(sv, [([0, 0, 1], 1.0, 0.0)])
+
+    def test_an_over_long_term_does_not_shift_out_of_range(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        sv = np.zeros(4, dtype=np.complex128)
+        sv[0] = 1.0
+        with pytest.raises(ValueError, match="only 2 qubits"):
+            core.hamiltonian_expval(sv, [([0] * 69 + [1], 1.0, 0.0)])
+
+    def test_a_code_outside_the_pauli_alphabet_raises(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        sv = np.zeros(4, dtype=np.complex128)
+        sv[0] = 1.0
+        with pytest.raises(ValueError, match="invalid Pauli code 9"):
+            core.hamiltonian_expval(sv, [([9], 1.0, 0.0)])
+
+    def test_a_strided_view_raises_typeerror_and_is_catchable(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        strided = np.zeros(8, dtype=np.complex128)[::2]
+        with pytest.raises(TypeError, match="not contiguous"):
+            core.hamiltonian_expval(strided, [([1], 1.0, 0.0)])
+
+    def test_valid_input_is_unchanged(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        sv = np.zeros(4, dtype=np.complex128)
+        sv[0] = 1.0
+        assert core.hamiltonian_expval(sv, [([0, 1], 1.0, 0.0)]) == 0.0
+        # Identity padding wider than the state is legal: those bits are unused.
+        assert core.hamiltonian_expval(sv, [([0, 0, 0, 0], 2.0, 0.0)]) == 2.0
+
+
+class TestNumpyConstructorBounds:
+    """Same FFI boundary, different symptom: a silently wrong object.
+
+    Both constructors size-check the array against ``1 << n_qubits``. Written as
+    a bare shift, ``n_qubits = 64`` masks the shift amount to 0, so the expected
+    length becomes 1 and a one-amplitude array is accepted as a 64-qubit state --
+    no exception, just a ``State`` whose ``n_qubits`` disagrees with its data.
+    """
+
+    def test_from_numpy_rejects_n_qubits_64(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        with pytest.raises(ValueError, match="doesn't match n_qubits=64"):
+            core.State.from_numpy(np.zeros(1, dtype=np.complex128), 64)
+
+    def test_from_dm_rejects_n_qubits_64(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        with pytest.raises(ValueError, match="does not fit in a usize"):
+            core.State.from_dm(np.zeros(1, dtype=np.complex128), 64)
+
+    def test_from_dm_rejects_a_squared_dimension_that_overflows(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        # 2^32 amplitudes is a representable dim, but 4^32 is not.
+        with pytest.raises(ValueError, match="4\\^32 does not fit"):
+            core.State.from_dm(np.zeros(1, dtype=np.complex128), 32)
+
+    def test_valid_sizes_still_round_trip(self):
+        core = pytest.importorskip("superfermion._sf_core")
+        sv = np.zeros(4, dtype=np.complex128)
+        sv[0] = 1.0
+        assert core.State.from_numpy(sv, 2).n_qubits == 2
+        rho = np.zeros(16, dtype=np.complex128)
+        rho[0] = 1.0
+        assert core.State.from_dm(rho, 2).n_qubits == 2
+        with pytest.raises(ValueError, match="doesn't match n_qubits=3"):
+            core.State.from_numpy(sv, 3)

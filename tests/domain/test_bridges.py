@@ -1,5 +1,7 @@
 """Cross-framework bridge domain tests."""
 
+import threading
+
 import pytest
 
 import superfermion as sf
@@ -290,6 +292,149 @@ class TestQASMEndianness:
             np.asarray(sf.simulate(c).numpy()),
             atol=1e-9,
         )
+        # The docstring above is only true if the native parser actually ran.
+        # It used to be unfalsifiable: from_qasm caught BaseException, so a
+        # panicking native parser fell through to the Python parser, produced
+        # this same statevector, and the test passed with the Rust path dead.
+        pytest.importorskip("superfermion._sf_core")
+        assert bridge._RUST_QASM_FALLBACK_REASON is None, (
+            "from_qasm did not use the native parser: "
+            f"{bridge._RUST_QASM_FALLBACK_REASON}"
+        )
+
+    def test_a_native_parser_failure_is_not_swallowed(self, monkeypatch):
+        """Regression: ``from_qasm`` wrapped the native call in
+        ``except BaseException``, so ``pyo3_runtime.PanicException`` -- and every
+        other native failure -- was absorbed and the Python parser returned a
+        correct circuit. A broken Rust parser was invisible to all tests.
+        Only ImportError/ValueError/TypeError may fall back now."""
+        bridge = pytest.importorskip("superfermion.bridge")
+        sf_core = pytest.importorskip("superfermion._sf_core")
+
+        class _BrokenDAG:
+            @staticmethod
+            def from_qasm2(_qasm):
+                raise RuntimeError("simulated native parser failure")
+
+        monkeypatch.setattr(sf_core, "QuantumDAG", _BrokenDAG, raising=False)
+        with pytest.raises(RuntimeError, match="simulated native parser failure"):
+            bridge.from_qasm('OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[1];\nh q[0];\n')
+
+    def test_a_rejected_string_still_falls_back(self, monkeypatch):
+        """Narrowing the except must not remove the documented fallback: a
+        ValueError (what ``from_qasm2`` raises for syntax it cannot parse) still
+        reaches the Python parser, and the reason is recorded for callers."""
+        bridge = pytest.importorskip("superfermion.bridge")
+        sf_core = pytest.importorskip("superfermion._sf_core")
+
+        class _RejectingDAG:
+            @staticmethod
+            def from_qasm2(_qasm):
+                raise ValueError("unsupported syntax")
+
+        monkeypatch.setattr(sf_core, "QuantumDAG", _RejectingDAG, raising=False)
+        circuit = bridge.from_qasm(
+            'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[2];\nh q[0];\ncx q[0],q[1];\n'
+        )
+        assert len(circuit._gates) == 2
+        assert bridge._RUST_QASM_FALLBACK_REASON == "ValueError: unsupported syntax"
+
+    def test_a_conversion_failure_after_a_good_parse_propagates(self, monkeypatch):
+        """The guard covers the parse only. ``to_gate_records``/``Circuit``/
+        ``extend_raw_from_records`` are Rust-backed conversion, so a failure
+        there is a defect and must not be absorbed into a Python re-parse."""
+        bridge = pytest.importorskip("superfermion.bridge")
+        sf_core = pytest.importorskip("superfermion._sf_core")
+
+        class _BadRecordsDAG:
+            @staticmethod
+            def from_qasm2(_qasm):
+                return _BadRecordsDAG()
+
+            def to_gate_records(self):
+                raise RuntimeError("simulated conversion failure")
+
+            def n_qubits(self):
+                return 1
+
+            def n_cbits(self):
+                return 1
+
+        monkeypatch.setattr(sf_core, "QuantumDAG", _BadRecordsDAG, raising=False)
+        with pytest.raises(RuntimeError, match="simulated conversion failure"):
+            bridge.from_qasm('OPENQASM 2.0;\nqreg q[1];\nh q[0];\n')
+        assert bridge._RUST_QASM_FALLBACK_REASON.startswith("conversion-failed:")
+
+    def test_the_reason_is_reset_before_anything_can_raise(self):
+        """Regression: the reset used to sit after the big-integer pre-scan, so
+        a call that threw during the pre-scan left the previous call's reason in
+        place, and ``None`` is documented to mean 'the native parser ran'."""
+        bridge = pytest.importorskip("superfermion.bridge")
+
+        bridge.from_qasm('OPENQASM 2.0;\nqreg q[1];\nh q[0];\n// 99999999999999999\n')
+        assert bridge._RUST_QASM_FALLBACK_REASON == "bigint-parameter"
+
+        with pytest.raises(TypeError):
+            bridge.from_qasm(None)
+        assert bridge._RUST_QASM_FALLBACK_REASON is None, (
+            "a reason leaked from the previous call: "
+            f"{bridge._RUST_QASM_FALLBACK_REASON}"
+        )
+
+    def test_the_reason_is_per_thread(self):
+        """A module-level string let two threads overwrite each other's reason,
+        so the value a caller read need not describe its own call."""
+        bridge = pytest.importorskip("superfermion.bridge")
+        bridge.from_qasm('OPENQASM 2.0;\nqreg q[1];\nh q[0];\n')
+        assert bridge._RUST_QASM_FALLBACK_REASON is None
+
+        seen = {}
+
+        def worker():
+            bridge.from_qasm(
+                'OPENQASM 2.0;\nqreg q[1];\nh q[0];\n// 99999999999999999\n'
+            )
+            seen["reason"] = bridge._RUST_QASM_FALLBACK_REASON
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+
+        assert seen["reason"] == "bigint-parameter"
+        assert bridge._RUST_QASM_FALLBACK_REASON is None, (
+            "the worker's reason leaked into this thread: "
+            f"{bridge._RUST_QASM_FALLBACK_REASON}"
+        )
+
+    def test_the_bigint_skip_is_recorded(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        circuit = bridge.from_qasm(
+            'OPENQASM 2.0;\nqreg q[1];\nh q[0];\n// 99999999999999999\n'
+        )
+        assert len(circuit._gates) == 1
+        assert bridge._RUST_QASM_FALLBACK_REASON == "bigint-parameter"
+
+    def test_an_unsupported_gate_raises_instead_of_being_dropped(self):
+        """Regression: the native parser skipped unmapped gates, so the parse
+        'succeeded' with operations missing and the reason still said the native
+        path handled it. Both parsers are strict now."""
+        bridge = pytest.importorskip("superfermion.bridge")
+        with pytest.raises(ValueError, match="unsupported gate 'foo'"):
+            bridge.from_qasm('OPENQASM 2.0;\nqreg q[1];\nfoo q[0];\n')
+        assert bridge._RUST_QASM_FALLBACK_REASON is not None
+
+    def test_u2_is_expanded_rather_than_dropped(self):
+        # u2(phi, lam) == u3(pi/2, phi, lam); it used to vanish silently.
+        bridge = pytest.importorskip("superfermion.bridge")
+        circuit = bridge.from_qasm('OPENQASM 2.0;\nqreg q[1];\nu2(0.3, 0.7) q[0];\n')
+        assert len(circuit._gates) == 1
+
+    def test_measure_is_preserved(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        circuit = bridge.from_qasm(
+            'OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\nmeasure q[0] -> c[0];\n'
+        )
+        assert [g.name for g in circuit._gates] == ["H", "MEASURE"]
 
 
 class TestToQasmDropGuard:
