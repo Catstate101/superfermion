@@ -9,6 +9,16 @@ import numpy as np
 from superfermion.observables.core import Hamiltonian, PauliString
 
 
+def _term_cut(collected: Dict[str, complex], tol: float, relative: bool) -> float:
+    """Magnitude below which a mapped Pauli term is treated as zero."""
+    if tol < 0:
+        raise ValueError(f"tol must be >= 0, got {tol}")
+    if not relative or not collected:
+        return tol
+    scale = max(abs(c) for c in collected.values())
+    return tol * scale if scale > 0 else tol
+
+
 class FermionicOperator:
     r"""Represents a sum of fermionic creation and annihilation operators.
 
@@ -90,11 +100,22 @@ class FermionicOperator:
         f, res = FermionicOperator._MUL[(l, r)]
         return f, FermionicOperator._IDX_PAULI[res]
 
-    def jordan_wigner(self, n_qubits: int) -> Hamiltonian:
+    def jordan_wigner(
+        self, n_qubits: int, *, tol: float = 1e-12, relative: bool = False
+    ) -> Hamiltonian:
         """Perform the Jordan-Wigner transformation.
 
         Returns a :class:`Hamiltonian` whose terms are the qubit-space
         Pauli-string representation of this fermionic operator.
+
+        Terms whose collected coefficient is below the cut are dropped.  The
+        cut is ``tol`` when ``relative`` is false and ``tol * max|coefficient|``
+        when it is true.  A *relative* cut is the one that is stable under
+        rescaling: on water/6-31G the largest coefficient is ~55 Ha, so an
+        absolute 1e-12 cut sits at 2e-14 of the operator norm and a coefficient
+        that rounds to 1.0000001e-12 flips in and out between builds.  That is
+        the origin of the documented +/-1 term-count wobble, and the reason
+        :meth:`MolecularData.to_hamiltonian` defaults to the relative cut.
         """
         if not self.terms:
             return Hamiltonian([PauliString("I" * n_qubits, 0.0)])
@@ -164,10 +185,11 @@ class FermionicOperator:
                 collected[pstr] = collected.get(pstr, 0j) + c
 
         # Drop numerically zero terms
+        cut = _term_cut(collected, tol, relative)
         terms = []
         for pstr, c in collected.items():
-            if abs(c) > 1e-12:
-                if abs(c.imag) < 1e-12:
+            if abs(c) > cut:
+                if abs(c.imag) < cut:
                     terms.append(PauliString(pstr, float(c.real)))
                 else:
                     terms.append(PauliString(pstr, c))
@@ -180,90 +202,162 @@ class FermionicOperator:
     # -----------------------------------------------------------------
     #  Bravyi-Kitaev transformation
     # -----------------------------------------------------------------
-    def bravyi_kitaev(self, n_qubits: int) -> Hamiltonian:
+    def bravyi_kitaev(
+        self, n_qubits: int, *, tol: float = 1e-12, relative: bool = False
+    ) -> Hamiltonian:
         """Perform the Bravyi-Kitaev transformation to qubit space.
 
-        The BK encoding reduces qubit locality from O(n) (JW) to
-        O(log n), making it more efficient for large fermionic systems.
+        Qubit ``j`` stores the parity of the Fenwick interval
+        ``F(j) = {j - lowbit(j+1) + 1, ..., j}`` instead of the occupation of
+        a single mode::
 
-        Key mapping (for 4 qubits):
-          a_0 = 0.5 (X_0 X_1 + i X_0 Y_1 + i Y_0 X_1 - Y_0 Y_1)
-          a_1 = 0.5 (X_1 Z_2 + i Y_1 Z_2 + i Y_1 - X_1) * Z_0  (approx)
-          a_2 = 0.5 (X_2 Z_1 + i Y_2 Z_1 + i Y_2 - X_2)
-          a_3 = 0.5 (X_3 Z_0 Z_1 + i Y_3 Z_0 Z_1 + i Y_3 - X_3) * Z_2
+            b_j = sum_{i in F(j)} n_i   (mod 2)
 
-        This implementation computes the BK encoding using the binary
-        tree / Fenwick tree parity set for each orbital.
+        so a ladder operator becomes a Pauli string of weight ``O(log n)``
+        rather than the ``O(n)`` Jordan-Wigner chain.
+
+        The derivation used below.  Write ``M[j, i] = [i in F(j)]`` -- unit
+        lower triangular, hence invertible over GF(2) -- and let ``S(j)`` be
+        row ``j`` of ``M^-1``, so that ``n_j = sum_{k in S(j)} b_k``.  The
+        Jordan-Wigner identity ``a_j = (prod_{i<j} Z_i) X_j (1 - Z_j) / 2``
+        then reads, in the qubit basis,
+
+            a_j  = 1/2 [ X_{A(j)} Z_{T(j)} + i X_{A(j)-{j}} Y_j Z_{P(j)} ]
+            a_j+ = 1/2 [ X_{A(j)} Z_{T(j)} - i X_{A(j)-{j}} Y_j Z_{P(j)} ]
+
+        with the Fenwick column ``A(j) = {k : j in F(k)}`` (the qubits that
+        flip when ``n_j`` changes), ``T(j) = XOR_{i<j} S(i)`` (the sign from
+        the lower modes) and ``P(j) = (S(j)-{j}) XOR T(j)``.  ``A(j)`` is
+        disjoint from ``T(j)`` and ``P(j)``, so neither string needs a
+        product-order phase correction.
+
+        The previous revision of this method put ``X``/``Y`` on the mode's own
+        site and swapped the update and parity sets.  It produced 38 terms for
+        H2 whose spectrum differed from the Jordan-Wigner one by 1.67 Ha and
+        which conserved no parity at all, so it was replaced rather than
+        relabelled as approximate.
+
+        The term cut behaves exactly as in :meth:`jordan_wigner`.
+
+        Raises:
+            ValueError: if a term references a mode outside ``n_qubits``.
         """
-        # Precompute the BK update, parity, and flip sets for each
-        # orbital index (0-based).
-        def _bk_sets(idx: int):
-            """Return (update_set, parity_set, flip_set) for orbital idx."""
-            # Fenwick-tree style traversal
-            update = set()
-            parity = set()
-            flip = set()
-            p = idx
-            while p < n_qubits:
-                update.add(p)
-                p |= p + 1
-            p = idx
-            while p < n_qubits:
-                parity.add(p)
-                p = (p | (p + 1)) + 1
-                if p < n_qubits:
-                    parity.add(p)
-            # flip set: bits that toggle when occupation of idx changes
-            # (ancestors up the Fenwick tree)
-            p = idx
-            while p < n_qubits:
-                flip.add(p)
-                p |= p + 1
-            return update, parity, flip
+        return self._bk_pauli_sum(n_qubits, tol=tol, relative=relative)
 
+    @staticmethod
+    def _bk_index_sets(
+        n_qubits: int,
+    ) -> List[Tuple[Tuple[int, ...], Tuple[int, ...], Tuple[int, ...]]]:
+        """Per-mode Bravyi-Kitaev index sets ``(A, T, P)``.
+
+        ``A[j]`` is the Fenwick column (the qubits flipped by a change of
+        ``n_j``), ``T[j]`` the sign set of the lower modes and ``P[j]`` the
+        set that completes the ``iY`` branch.  ``S(j)`` is recovered by back
+        substitution because ``A(i)`` only involves indices ``>= i``.
+        """
+        if n_qubits < 1:
+            return []
+
+        intervals: List[Tuple[int, ...]] = []
+        for j in range(n_qubits):
+            lowbit = (j + 1) & -(j + 1)
+            intervals.append(tuple(range(j - lowbit + 1, j + 1)))
+
+        ancestors: List[List[int]] = [[] for _ in range(n_qubits)]
+        for k, interval in enumerate(intervals):
+            for i in interval:
+                ancestors[i].append(k)
+
+        # S(j) = row j of M^-1: solve (M^T y)_i = sum_{k in A(i)} y_k = d_ij.
+        signs: List[set] = []
+        for j in range(n_qubits):
+            y = [0] * n_qubits
+            for i in range(n_qubits - 1, -1, -1):
+                acc = 1 if i == j else 0
+                for k in ancestors[i]:
+                    if k > i:
+                        acc ^= y[k]
+                y[i] = acc
+            signs.append({i for i in range(n_qubits) if y[i]})
+
+        sets: List[Tuple[Tuple[int, ...], Tuple[int, ...], Tuple[int, ...]]] = []
+        lower: set = set()
+        for j in range(n_qubits):
+            parity = set(lower)
+            other = (signs[j] - {j}) ^ parity
+            sets.append(
+                (tuple(ancestors[j]), tuple(sorted(parity)), tuple(sorted(other)))
+            )
+            lower ^= signs[j]
+        return sets
+
+    @staticmethod
+    def _bk_ladder(
+        n_qubits: int,
+        site: int,
+        creation: bool,
+        index_sets: Optional[
+            List[Tuple[Tuple[int, ...], Tuple[int, ...], Tuple[int, ...]]]
+        ] = None,
+    ) -> List[Tuple[Dict[int, str], complex]]:
+        """The two Pauli strings of ``a_site`` / ``a^dagger_site`` under BK."""
+        sets = index_sets if index_sets is not None else (
+            FermionicOperator._bk_index_sets(n_qubits)
+        )
+        ancestors, parity, other = sets[site]
+        flipped = tuple(k for k in ancestors if k != site)
+
+        xz: Dict[int, str] = {k: "X" for k in ancestors}
+        for k in parity:
+            xz[k] = "Z"
+
+        yz: Dict[int, str] = {k: "X" for k in flipped}
+        yz[site] = "Y"
+        for k in other:
+            yz[k] = "Z"
+
+        return [(xz, 0.5 + 0j), (yz, -0.5j if creation else 0.5j)]
+
+    def _bk_pauli_sum(
+        self, n_qubits: int, *, tol: float = 1e-12, relative: bool = False
+    ) -> Hamiltonian:
+        """Expand every term with the :meth:`_bk_ladder` branch structure."""
         if not self.terms:
             return Hamiltonian([PauliString("I" * n_qubits, 0.0)])
 
+        index_sets = self._bk_index_sets(n_qubits)
         collected: Dict[str, complex] = {}
 
         for ops, coeff in self.terms.items():
-            sites = [idx for idx, _ in ops]
-            otypes = [ot for _, ot in ops]
-            n = len(ops)
-            base = (0.5 ** n) * coeff
+            acc: Dict[str, complex] = {'I' * n_qubits: coeff}
+            for site, ot in ops:
+                site = int(site)
+                if not 0 <= site < n_qubits:
+                    raise ValueError(
+                        f"mode {site} is outside the {n_qubits} qubits this BK "
+                        "transform was asked for"
+                    )
+                branches = self._bk_ladder(n_qubits, site, ot == 1, index_sets)
+                next_acc: Dict[str, complex] = {}
+                for pstr, c in acc.items():
+                    for branch, branch_c in branches:
+                        pauli = list(pstr)
+                        term_c = c * branch_c
+                        for k, p in branch.items():
+                            f, res = self._mul_pauli(pauli[k], p)
+                            term_c *= f
+                            pauli[k] = res
+                        key = ''.join(pauli)
+                        next_acc[key] = next_acc.get(key, 0j) + term_c
+                acc = next_acc
+            for pstr, c in acc.items():
+                collected[pstr] = collected.get(pstr, 0j) + c
 
-            for combo in range(1 << n):
-                term_c = base
-                pauli = ['I'] * n_qubits
-
-                for j in range(n):
-                    s = sites[j]
-                    ot = otypes[j]
-                    upd_set, par_set, flp_set = _bk_sets(s)
-
-                    if (combo >> j) & 1:  # Y choice
-                        pauli[s] = 'Y'
-                        term_c *= -1j if ot == 1 else 1j
-                    else:                 # X choice
-                        pauli[s] = 'X'
-
-                    # Creation ops require Z on parity set;
-                    # annihilation on update set (simplified BK convention)
-                    target_zs = par_set if ot == 1 else upd_set
-                    for k in target_zs:
-                        if k == s:
-                            continue
-                        f, p = self._mul_pauli('Z', pauli[k])
-                        term_c *= f
-                        pauli[k] = p
-
-                key = ''.join(pauli)
-                collected[key] = collected.get(key, 0j) + term_c
-
+        cut = _term_cut(collected, tol, relative)
         terms = []
         for pstr, c in collected.items():
-            if abs(c) > 1e-12:
-                if abs(c.imag) < 1e-12:
+            if abs(c) > cut:
+                if abs(c.imag) < cut:
                     terms.append(PauliString(pstr, float(c.real)))
                 else:
                     terms.append(PauliString(pstr, c))
