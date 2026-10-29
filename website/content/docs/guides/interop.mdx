@@ -106,7 +106,6 @@ print(len(pl_circuit()))  # 4 amplitudes
 ```python
 from superfermion.bridge import from_qasm, to_qasm
 
-# Parse QASM (Rust-accelerated parser)
 qasm_str = """
 OPENQASM 2.0;
 include "qelib1.inc";
@@ -114,11 +113,98 @@ qreg q[2];
 h q[0];
 cx q[0], q[1];
 """
-sf_qc = from_qasm(qasm_str)
-
-# Export to QASM 2
+sf_qc = from_qasm(qasm_str)   # Rust parser; pure-Python fallback for unusual syntax
 qasm_output = to_qasm(sf_qc)
 ```
+
+**Qubit labels pass through unchanged.** SF, Qiskit and OpenQASM all use little-endian
+(q0 = LSB), so an OpenQASM label `q[i]` becomes SF qubit `i` with no reversal. The same
+labels are written back on export, which makes the pair an involution on the statevector:
+
+```python
+import numpy as np
+import superfermion as sf
+from superfermion.bridge import from_qasm, to_qasm
+
+c = sf.Circuit(3).h(0).cx(0, 1).swap(0, 2)
+back = from_qasm(to_qasm(c))
+print(np.max(np.abs(sf.simulate(back).numpy() - sf.simulate(c).numpy())))  # 0.0
+```
+
+The involution holds on the *unitary*, not on gate names. Export spells every gate with a
+`qelib1` primitive, so `X` leaves as `u3(pi, 0, pi)` and comes back as `U`, and `rz(theta)`
+leaves as `u1(theta)` and comes back as `P`. Qubit indices and the action on the state are
+what round-trip.
+
+**Export never silently drops a gate.** `to_qasm` covers `h`, `u3` (X/Y/RX/RY), `u1`
+(Z/S/SDG/T/TDG/RZ), `cx`, `cz`, `swap` and `measure`. Anything else raises rather than
+emitting a circuit with operations missing:
+
+```python
+import superfermion as sf
+from superfermion.bridge import to_qasm
+
+try:
+    to_qasm(sf.Circuit(2).sx(0))
+except ValueError as exc:
+    print(exc)  # Cannot map gate 'SX' to OpenQASM 2.0 (supported names: [...])
+```
+
+**One gate is dropped on purpose: `BARRIER`.** OpenQASM 2.0 has no equivalent, so it is
+omitted instead of raising — a compiled barrier carries no semantics. The consequence is
+that a round trip returns a circuit with fewer operations than it started with:
+
+```python
+import superfermion as sf
+from superfermion.bridge import from_qasm, to_qasm
+
+c = sf.Circuit(2).h(0).barrier(0, 1).cnot(0, 1)
+print(len(c._gates), "->", len(from_qasm(to_qasm(c))._gates))  # 3 -> 2
+```
+
+**Import tries the native parser first, and only falls back on a rejection.** `from_qasm`
+hands the string to the Rust parser, then drops to the pure-Python parser for exactly three
+reasons: the extension is not built (`ImportError`), the parser rejected the string
+(`ValueError`), or the native API shape did not match (`TypeError`). Anything else
+propagates — a defect in the native parser is not absorbed by the fallback.
+
+A rejection is a real rejection: the native parser reports an unsupported gate, an
+out-of-range qubit index, a missing register declaration or an unparseable statement as an
+error, naming the line. It does **not** skip what it cannot represent, because a partially
+parsed circuit is indistinguishable from a correct one. `u2` is expanded to
+`u3(pi/2, phi, lambda)` rather than dropped, and `creg` declarations and a bare `barrier;`
+are recognised as declarations rather than gates.
+
+**The pure-Python fallback is equally strict.** It covers `h`, `x`, `y`, `z`, `s`, `sdg`,
+`t`, `tdg`, `sx`, `rx`, `ry`, `rz`, `u`, `u2`, `u3`, `p`, `u1`, `cx`, `cnot`, `cz`, `swap`,
+`ccx` and `measure`. A gate outside that set raises `ValueError` naming the gate and, when
+there is one, the reason the native parser was not used — it never returns a circuit with
+operations quietly missing.
+
+Which path ran is recorded, so you never have to guess whether the fast path was live:
+
+```python
+import superfermion as sf
+from superfermion import bridge
+
+c = sf.Circuit(2).h(0).cnot(0, 1)
+bridge.from_qasm(bridge.to_qasm(c))
+print(bridge._RUST_QASM_FALLBACK_REASON)  # None -> the native parser handled it
+```
+
+After a fallback the same attribute holds the reason instead — for a rejected gate that
+reads `ValueError: line 3: unsupported gate 'foo'`. After a failure in the post-parse
+conversion it starts with `conversion-failed:`; after an unexpected native error it ends
+with `(propagated)` — the exception is re-raised, never absorbed. The attribute is reset
+at the top of every call, so a reason never survives into the next one, and it is stored per
+thread: two threads importing QASM at the same time each read their own reason, not the one
+written last.
+
+`'bigint-parameter'` is the one deliberate skip: an integer literal above 2^53 cannot
+round-trip through the `f64` gate parameters the native parser produces, so that string goes
+straight to the Python parser. The trigger is textual — any 16-or-more-digit token anywhere
+in the text, comments included — so a comment containing a large number is enough to take
+the slow path.
 
 ## OpenQASM 3.0
 

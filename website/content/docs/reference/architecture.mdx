@@ -207,6 +207,50 @@ crates/
 └── sf-bindings/     PyO3 FFI — exposes State, QuantumDAG, compile, etc.
 ```
 
+### Optional GPU feature
+
+`sf-gpu` is compiled but not shipped. It sits behind `sf-ir`'s non-default `gpu` feature, and
+the published wheels and sdist build with only `pyo3/extension-module` and `pyo3/abi3-py310`, so
+`QuantumDAG::simulate_gpu` and `is_available()` are absent from every released artifact. The
+crate itself is a workspace member, so the normal Rust job does compile and lint it; what no
+published build exercises is the `#[cfg(feature = "gpu")]` glue inside `sf-ir`. The CI `gpu` job
+compile-checks exactly that combination (`cargo check -p sf-ir --features gpu --all-targets`).
+
+`cudarc` is configured with `dynamic-loading`, so building needs neither the CUDA toolkit nor a
+GPU — `libcuda` is only looked for at runtime. The `pip install "superfermion[gpu]"` extra is
+unrelated to this crate; it pulls `jax[cuda12]`.
+
+### FFI buffer contract
+
+Where it can avoid a copy, a numpy array crosses the boundary borrowed rather than copied,
+because at `4^n` amplitudes a copy dominates the call (`State.from_numpy` is the exception:
+it borrows and then owns a copy). Borrowing requires C-contiguous memory, so every entry
+point returns a Python error for a strided view (`psi[::2]`, `psi[::-1]`) instead of
+panicking. The distinction matters: a Rust panic surfaces as `pyo3_runtime.PanicException`,
+which derives from `BaseException` and so escapes `except Exception` in caller code
+entirely.
+
+Rejecting a bad *layout* is not the same as being panic-free, so the entry points that
+index into user data validate it first and raise `ValueError` instead. `hamiltonian_expval`
+checks that the statevector length is a power of two and that every Pauli term stays inside
+`log2(len)`; a term wider than the state used to index out of bounds and panic. The numpy
+constructors size-check against `2^n_qubits` (and `4^n_qubits` for `State.from_dm`) with a
+checked shift: `1usize << 64` is `1` in a release build because the shift amount is masked,
+so a bare shift accepted a one-amplitude array as a 64-qubit state — a wrong object rather
+than an exception.
+
+The public API accepts any layout — `Observable.expectation`, `expval` and every `_fast_expval`
+path call `.ravel()` first, which copies when a view is impossible. The contiguity rule only
+applies if you call `superfermion._sf_core` directly.
+
+### QASM parse strictness
+
+`sf-ir`'s `parse_qasm2` returns `Err` for an unsupported gate, an out-of-range qubit index,
+an unparseable statement or an instruction before any `qreg`. It deliberately does not skip
+what it cannot represent: a partially parsed DAG is indistinguishable from a correct one, and
+the caller cannot detect the difference. The Python bridge mirrors this, so `from_qasm`
+either returns a circuit with every operation accounted for or raises naming the line.
+
 ### `QuantumStateImpl` Trait
 
 The Rust trait that all simulation methods implement:

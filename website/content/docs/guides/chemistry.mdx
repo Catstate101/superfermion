@@ -1,142 +1,366 @@
 ---
 title: "Chemistry"
-description: "Molecular Hamiltonians, fermion-to-qubit mappings, UCCSD ansatz, and PySCF integration."
+description: "From a geometry string to an energy: reference choice, active-space selection, qubit reductions, and solvers — with the measured limits of each step."
 ---
 
-Superfermion's chemistry module handles molecular electronic structure: building Hamiltonians, mapping fermions to qubits, and constructing chemistry-inspired ansatze.
+The chemistry module turns a molecular geometry into something a quantum simulator can diagonalise, and it keeps every intermediate step inspectable. The pipeline is:
 
-## Quick Start
-
-```python
-from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian
-from superfermion.chemistry.ansatz import uccsd_ansatz
-import superfermion as sf
-
-# Get a pre-built molecular Hamiltonian
-H = get_molecular_hamiltonian("H2", basis="sto-3g")
-print(f"H2 Hamiltonian: {len(H.terms)} terms")
-
-# Build a UCCSD ansatz (minimal 2-qubit H2 ansatz)
-ansatz = uccsd_ansatz(n_qubits=2, n_electrons=2)
-print(f"Ansatz: {ansatz.n_parameters} parameter, {ansatz.gate_count} gates")
-
-# Run VQE
-from superfermion.algorithms.variational import VQE
-vqe = VQE(ansatz, H)
-result = vqe.minimize(iterations=100)
-print(f"H2 ground state energy: {result.optimal_value:.6f} Hartree")
+```
+geometry ──► integrals ──► active space ──► qubit operator ──► solver
+             (PySCF)      (APC / MP2-NO /      (JW, BK,          (exact, QSCI,
+                           AVAS / AutoCAS)       Z2, SCBK)         SQD, QSE, DMET)
 ```
 
-## Molecular Hamiltonians
+Each arrow is a function you can call on its own. Nothing is hidden in a monolith, and every reduction reports what it removed.
 
-### Pre-built Library
+## Install
 
-```python
-from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian
-
-# Built-in molecules (pre-computed at equilibrium geometry)
-h2 = get_molecular_hamiltonian("H2", basis="sto-3g")
-print(f"H2: {len(h2.terms)} terms")
-
-# Additional molecules (LiH, H2O, ...) require PySCF — install with:
-#   pip install "superfermion[chemistry]"
+```bash
+pip install "superfermion[chemistry]"
 ```
 
-### PySCF Bridge — Custom Molecules
+That extra pulls in PySCF, which is what computes the integrals. Without it the module still imports, but the molecule library contains only pre-computed H₂ at STO-3G — any other geometry raises rather than returning fabricated integrals.
 
-For any molecule, use the PySCF bridge:
+## Quick start: geometry → energy
 
 ```python
 from superfermion.chemistry.pyscf_bridge import molecule_from_geometry
+from superfermion.chemistry.subspace import exact_energy
 
-# Define any molecule via an XYZ geometry string
-mol = molecule_from_geometry("H 0 0 0; H 0 0 0.7414", basis="sto-3g", name="H2")
+WATER = "O 0 0 0; H 0 0 0.9697; H 0.9262 0 -0.2426"
+water = molecule_from_geometry(WATER, basis="sto-3g")
 
-# With PySCF installed this computes HF + integrals; otherwise it falls
-# back to the pre-computed molecule library
-summary = mol.summary()
-print(f"{summary['name']}: {summary['n_electrons']} electrons, "
-      f"{summary['n_orbitals']} orbitals, {summary['n_qubits']} qubits, "
-      f"pyscf={'available' if summary['pyscf_available'] else 'library fallback'}")
-
-# Build the qubit Hamiltonian
-H = mol.to_hamiltonian(active_space=(2, 2))
-print(f"Qubit Hamiltonian: {len(H.terms)} terms")
+nuclear = water.nuclear_repulsion
+e_fci = exact_energy(water.h1, water.h2, water.n_orbitals, water.n_electrons,
+                     nuclear_repulsion=nuclear)
+print(f"HF  {water.hf_energy:.6f}")
+print(f"FCI {e_fci:.6f}")
 ```
 
-## Fermion-to-Qubit Mappings
+`exact_energy` diagonalises every determinant in the `S_z = 0` block — correct, and exponential. It is the oracle the approximate paths are checked against, not a production solver.
+
+## Step 1 — Choose the reference and the integrals
+
+`molecule_from_geometry` runs Hartree–Fock by default and picks the reference from the spin:
 
 ```python
-from superfermion.chemistry.hamiltonians import FermionicOperator
+oh = molecule_from_geometry("O 0 0 0; H 0 0 0.9697", basis="sto-3g",
+                            spin=1, scf="rohf")
+summary = oh.summary()
+print(summary["scf_method"], summary["spin_squared"])
+```
+
+- `scf="auto"` (default) picks RHF for a closed shell and ROHF for an open shell.
+- `scf="uhf"` is available and reports ⟨S²⟩ including its spin contamination, rather than hiding it: a UHF reference that is not spin-pure says so in `summary["spin_squared"]`.
+- `scf="rhf"` on an open-shell molecule is allowed but is usually the wrong tool.
+
+Two optional knobs, both measured:
+
+```python
+fitted = molecule_from_geometry(WATER, basis="sto-3g", density_fit=True)
+print(f"|dE_HF| from the fit = {abs(fitted.hf_energy - water.hf_energy):.2e} Ha")
+
+symmetric = molecule_from_geometry(WATER, basis="sto-3g", symmetry=True)
+print(symmetric.point_group, symmetric.mo_irreps)
+```
+
+**Density fitting** changes the energy by ~1e-4 Ha at STO-3G in exchange for fitting every two-electron integral through an auxiliary basis. On molecules this small it is *not* faster — the fit costs more than evaluating the few thousand exact integrals — so use it for accuracy control and for larger systems, not as a small-molecule speed switch.
+
+**Symmetry** records the point group and a per-orbital irrep label. Only Abelian groups (C₁, Cs, C₂, C₂v, D₂, D₂h) can be used to filter determinants; a degenerate group such as C₃v or Td is rejected rather than guessed at, because there the irrep label is an index into a representation list rather than a bit pattern.
+
+## Step 2 — Choose the active space
+
+Four selectors ship. They answer different questions, so they are separate functions rather than one switch.
+
+### APC — mean-field only, no wavefunction
+
+APC-N scores each orbital by how strongly its pair amplitude couples to the virtuals, using the Fock and exchange matrices in the MO basis. It needs no correlated density and no functional:
+
+```python
+from superfermion.chemistry import apc
+
+choice = apc.apc_active_space(water, max_size=(6, 6))
+print(choice.active_indices, "->", choice.active_orbitals, "CSFs:", choice.n_csfs)
+```
+
+The result is an `ActiveSpaceChoice`, which carries the window and the electron split so the Hamiltonian can be built from it directly:
+
+```python
+H_active = water.to_hamiltonian(active_indices=choice.active_indices)
+print(len(H_active.terms), "Pauli terms")
+```
+
+`max_size` is either `(n_electrons, n_orbitals)`, which bounds the CSF count, or a bare integer, which bounds the orbital count. `fixed=True` selects exactly that many orbitals instead of dropping the cheapest ones — useful along a reaction path, where a window that changes size changes the energy for reasons that have nothing to do with the chemistry.
+
+Selected orbitals are not contiguous: `active_indices` is a list, and `to_hamiltonian` accepts it as such.
+
+### MP2 natural orbitals
+
+Occupation numbers near 0 or 2 mean "correlated like a closed shell"; numbers near 1 mean "genuinely multireference". Sorting by that is the cheapest way to find the important virtuals:
+
+```python
+from superfermion.chemistry import mp2
+
+window = mp2.active_space_from_mp2_no(water, n_cas=6)
+print(window["active_indices"], window["n_active_electrons"])
+```
+
+`mp2_no_molecule(water)` returns the molecule rotated into its natural-orbital basis (plus the MP2 summary) if you want to build the Hamiltonian in that basis instead. The rotation is unitary, so the FCI energy is unchanged — that is checked in the test suite.
+
+### AVAS — keep the orbitals that look like chosen atomic shells
+
+```python
+from superfermion.chemistry import avas
+
+in_core = avas.avas_active_space(water, target_atoms=[0])
+print(in_core.summary()["active_orbitals"])
+```
+
+### AutoCAS — entanglement entropy of a real wavefunction
+
+The one selector that needs a state rather than a mean field. Feed it the vector from a small exact or QSCI calculation:
+
+```python
+from superfermion.chemistry import entropy, excited as exc
+
+small = exc.excited_states(water, n_roots=1)
+picked = entropy.autocas_selection(
+    small["vectors"][:, 0], small["determinants"], water.n_orbitals,
+    threshold=0.05,
+)
+print("AutoCAS keeps", picked)
+```
+
+## Step 3 — Build the qubit operator and reduce it
+
+`to_hamiltonian` maps the fermionic operator to qubits. Jordan–Wigner is the default; Bravyi–Kitaev uses the same call with a different `mapping`.
+
+One guard fires before the operator is built: mapping the **full** orbital space warns when
+`2 * n_orbitals > 24`. The operator is still returned — the warning points at `active_space`,
+because the Pauli sum grows fast with the orbital count. The message names the case it was
+written for: benzene/6-31G, 132 qubits and on the order of 10^6 terms. Water/6-31G is 13
+orbitals, so 26 qubits, and trips the guard; the `active_space=(4, 4)` call below does not.
+
+```python
+from superfermion.chemistry import tapering
+
+H = water.to_hamiltonian(active_space=(4, 4))
+symmetries = tapering.z2_symmetries(H)
+print(len(H.terms), "terms,", "symmetries:", symmetries)
+
+tapered, info = tapering.taper_z2(H, reference=water.reference_occupation((4, 4)))
+print(len(tapered.terms), "terms after tapering")
+```
+
+`z2_symmetries` returns actual Pauli strings, not a count — each one is a stabiliser of the Hamiltonian that you can write down and check. `taper_z2` removes one qubit per symmetry and returns the tapered operator plus a `TaperedInfo` that can map an observable into the tapered frame and back (`info.unrotate(...)`).
+
+Always pass `reference=` (the Hartree–Fock occupation of the active space). Without it every symmetry is fixed to `+1`, which is the wrong sector for most molecules and produces an energy that looks reasonable and is not yours.
+
+**SCBK** removes qubits structurally — two, by construction — rather than by finding symmetries of a particular Hamiltonian. It returns one tapered Hamiltonian per symmetry sector, so you either know the sector or diagonalise all of them.
+
+The reduction is cheap; diagonalising a twelve-qubit sector is not. Four dense eigensolves of 4096 × 4096 take about a minute, so `compute_spectrum=False` is how you ask for the operators only:
+
+```python
+from superfermion.chemistry import scbk
+
+reduced = scbk.scbk_from_integrals(water.h1, water.h2, compute_spectrum=False)
+print(reduced["n_qubits_before"], "->", reduced["n_qubits_after"], "qubits")
+print("terms per sector:", reduced["n_terms_after"])
+```
+
+What it reports are **electronic** energies: the operator is built from one- and two-electron integrals, so the nuclear repulsion enters through `energy_offset`. On two-orbital H₂ the sectors are two qubits wide, the spectrum is free, and the four of them must tile the full spectrum:
+
+```python
+h2 = molecule_from_geometry("H 0 0 0; H 0 0 0.74", basis="sto-3g")
+sectors = scbk.scbk_from_integrals(
+    h2.h1, h2.h2, energy_offset=h2.nuclear_repulsion
+)
+for sector, energy in sorted(sectors["energies"].items()):
+    print(sector, f"{energy:+.10f}")
+
+e_h2 = exact_energy(h2.h1, h2.h2, h2.n_orbitals, h2.n_electrons,
+                    nuclear_repulsion=h2.nuclear_repulsion)
+lowest = min(sectors["energies"].values())
+print("lowest sector", f"{lowest:.10f}")
+print("exact FCI    ", f"{e_h2:.10f}")
+print("difference   ", f"{abs(lowest - e_h2):.1e}")
+```
+
+The difference is 9e-16 Ha. One of the four sectors *is* the ground state, and the other three are the lowest states of the sectors you did not ask for — which is the price of removing the qubits structurally instead of by finding symmetries: the sector is yours to pick, and the cheapest way to discover it is to diagonalise all four, which is only affordable while the sector is small.
+
+## Step 4 — Solve
+
+Every solver below takes bare integrals, so what it returns is an **electronic** energy. The nuclear repulsion is a constant added once, and `nuclear` from the quick start is it. That distinction is 9.13 Ha on water — large enough to look like a broken solver — so each number printed below says which one it is.
+
+### Exact, for reference
+
+`subspace.exact_energy` (above) and `subspace.ground_state` are the oracle. Water/STO-3G is 1 001 ten-electron determinants, or 441 once S_z = 0 is fixed — both instant. 6-31G water is 1 656 369 in the S_z = 0 block alone, which is the point where full CI stops being a solver and starts being a check.
+
+### QSCI — iterative subspace from a reference
+
+```python
+from superfermion.chemistry import sqd
+
+qsci = sqd.qsci(
+    water.h1, water.h2, water.n_orbitals, water.n_electrons,
+    n_alpha=5, n_beta=5, n_select=16, max_iter=4,
+)
+print(f"QSCI  total {qsci['energy'] + nuclear:.6f}"
+      f"  ({qsci['iterations']} iteration, {qsci['pool_size']} candidates)")
+print(f"FCI   total {e_fci:.6f}  gap {qsci['energy'] + nuclear - e_fci:+.2e}")
+print("selection covers the whole pool:", qsci["exact"])
+```
+
+`qsci["exact"]` is a flag, not an energy: it says whether the selected determinants span the entire pool, in which case the answer is the pool's exact ground state. With 16 of 441 it is `False`, and the 4.7e-3 Ha gap is the price of that selection — raise `n_select` to trade determinants for accuracy.
+
+The pool is every determinant reachable from the selected ones; `max_seniority=` drops the high-seniority part of it, which is the cheapest way to keep a subspace small without ignoring static correlation.
+
+### SQD — diagonalise in a sampled subspace
+
+```python
+from superfermion.chemistry import seniority as sen
+
+dets = sen.seniority_pool(water.n_orbitals, water.n_electrons, max_seniority=2)
+sqd_result = sqd.sqd_energy(water.h1, water.h2, dets, return_vector=True)
+total = sqd_result["energy"] + nuclear
+print(f"{len(dets)} determinants -> {total:.6f}  ({total - e_fci:+.2e} above FCI)")
+```
+
+Seniority ≤ 2 keeps 441 of the 1 001 ten-electron determinants and lands 2.0e-2 Ha above full CI: static correlation is in the pool, and the dynamical tail is what the truncation dropped. `sqd.sample_determinants(...)` builds such a list from shot counts when the input comes from hardware rather than from a criterion.
+
+### Excited states and QSE
+
+`excited_states` takes the molecule rather than the integrals, so these are total energies and root 0 is the quick start's FCI number. `qse_excited` is the quantum subspace expansion around one state:
+
+```python
+from superfermion.chemistry import excited as exc
+
+roots = exc.excited_states(water, n_roots=4)
+print([round(float(e), 6) for e in roots["energies"]])
+print("multiplicities:", list(roots["multiplicity"]))
+```
+
+```python
+reference = (1 << 10) - 1  # five lowest spatial orbitals, doubly filled
+pool = exc.excitation_pool(water.n_orbitals, reference, rank=2)
+qse = exc.qse_excited(
+    roots["terms"], roots["determinants"], roots["vectors"][:, 0],
+    pool=pool, n_spatial=water.n_orbitals, n_roots=4,
+    energy_offset=roots["energy_offset"],
+)
+print("pool", qse["pool_size"], "subspace", qse["subspace_dimension"])
+print([f"{float(e):.6f}" for e in qse["energies"]])
+```
+
+**QSE is exact for the state it starts from and approximate for everything above it, and the approximation is the pool.** On water the ground state comes out at 1e-12 while the first excited root is off by 6e-4 Ha with singles+doubles — that pool spans 141 of the 441 determinants. Raising the rank closes the gap, measurably:
+
+| pool rank | operators | subspace | worst error on roots 0–3 |
+|---|---|---|---|
+| 1 (singles) | 20 | 21 | 5.4e-02 Ha |
+| 2 (+doubles) | 140 | 141 | 6.2e-04 Ha |
+| 3 (+triples) | 340 | 341 | 7.9e-06 Ha |
+| 4 (+quadruples) | 440 | 441 | 2.6e-12 Ha |
+
+`rank=` is a ceiling: ask for more than the orbital count allows and you get everything that exists, not an error.
+
+### Embedding and orbital optimisation
+
+One-shot DMET partitions the occupied space and solves each fragment exactly. The partition is the whole method, and so is the basis:
+
+```python
+from superfermion.chemistry import dmet
+
+whole = dmet.one_shot_dmet(
+    water.h1, water.h2, water.n_electrons, [list(range(water.n_orbitals))],
+    nuclear_repulsion=nuclear,
+)
+print(f"one fragment   {whole['energy']:.6f}  (FCI {e_fci:.6f})")
+```
+
+A single fragment holding every orbital has no environment, so its impurity problem *is* the molecule: that call returns full CI to machine precision, which is the anchor for the bath construction. Splitting water across canonical MOs is the opposite extreme and does nothing at all: the density is diagonal, so `embedding_basis` generates **no bath orbitals**, every fragment is a one-orbital problem with two electrons, and the correction is identically zero. The measured correlation for `[[0], [1]]`, `[[0, 1], [2, 3]]` and seven one-orbital fragments in the canonical basis is 0.0, −2.8e-14 and 0.0 Ha — not a numerical accident, a property of the construction. Real fragments need a basis in which the density is not diagonal:
+
+```python
 import numpy as np
 
-# One-body integrals h1 (spin-orbital basis) — a two-site model
-h1 = np.zeros((2, 2))
-h1[0, 0] = -1.0
-h1[1, 1] = -0.5
-h1[0, 1] = h1[1, 0] = 0.2
-
-fermion_op = FermionicOperator.from_coeffs(h1)
-
-# Jordan-Wigner transform
-jw_qubit_op = fermion_op.jordan_wigner(n_qubits=2)
-print(f"Jordan-Wigner: {len(jw_qubit_op.terms)} terms")
-
-# Bravyi-Kitaev transform
-bk_qubit_op = fermion_op.bravyi_kitaev(n_qubits=2)
-print(f"Bravyi-Kitaev: {len(bk_qubit_op.terms)} terms")
+rng = np.random.default_rng(7)
+q, _ = np.linalg.qr(rng.normal(size=(water.n_orbitals, water.n_orbitals)))
+fragments = dmet.one_shot_dmet(
+    water.h1, water.h2, water.n_electrons, [[0], [1]],
+    orbitals=q, nuclear_repulsion=nuclear,
+)
+print(f"two fragments  {fragments['energy']:.6f}",
+      f"correlation {fragments['correlation_total']:+.6f}",
+      "bath", [f["n_bath"] for f in fragments["fragments"]])
 ```
 
-| Mapping | Qubit Scaling | Locality | Best For |
-|---------|--------------|----------|----------|
-| Jordan-Wigner | O(N) | O(N) weight | Small molecules |
-| Bravyi-Kitaev | O(N) | O(log N) weight | Larger molecules |
+That is −2.1e-3 Ha of correlation from one bath orbital per fragment. The rotation here is a stand-in for a localised basis; the point is that one-shot DMET is only as meaningful as the fragmentation *and* the basis it is expressed in, and this package does not build a localised basis for you.
 
-## UCCSD Ansatz
-
-The Unitary Coupled Cluster Singles and Doubles ansatz is the standard choice for molecular VQE:
+Orbital optimisation searches for a rotation that lowers a chosen objective:
 
 ```python
-from superfermion.chemistry.ansatz import uccsd_ansatz
+from superfermion.chemistry import orbital_reduction
 
-# Minimal 2-qubit H2 ansatz (single parameter, O'Malley et al. 2016)
-h2_ansatz = uccsd_ansatz(n_qubits=2, n_electrons=2)
-print(f"H2 ansatz: {h2_ansatz.n_parameters} parameter, {h2_ansatz.gate_count} gates")
-
-# Hardware-efficient UCC-style ansatz for larger active spaces
-uccsd = uccsd_ansatz(n_qubits=4, n_electrons=2)
-print(f"4-qubit ansatz: {uccsd.n_parameters} parameters, {uccsd.gate_count} gates")
+optimised = orbital_reduction.optimise_orbital_basis(
+    water.h1, water.h2, cost="sparsity", n_starts=4, maxiter=40,
+)
+print(f"objective {optimised['objective_before']:.4f} -> "
+      f"{optimised['objective_after']:.4f}"
+      f"  ({optimised['improvement']:.4f} lower, {optimised['n_starts']} starts)")
 ```
 
-## Full VQE Workflow
+`cost="sparsity"` is the L1 surrogate on `h1` off-diagonal plus `h2`, and it moves: 86.22 → 53.76, 32.45 lower, about a third off in four starts of BFGS. The end point is not reproducible to the decimal — the objective involves `|.|` and BFGS on it lands at slightly different points (53.65 and 53.76 on two runs of this page, same seed) — so quote the direction and the size, not the last digit. The two determinant-space costs do not move from a canonical Hartree–Fock start, and both reasons are physics rather than a stall:
 
-End-to-end VQE with a custom molecule:
+- `cost="cisd"` is the ground state of a singles+doubles pool around the current aufbau determinant. At the HF reference the singles do not couple to it (Brillouin's theorem), so the starting point is a stationary point of that objective and BFGS finds no descent direction. Report `1e-3`-level improvement from this start and you have a bug, not a better basis.
+- `cost="fci"` is flat everywhere: the spectrum of a unitary rotation does not change. It is not an optimiser objective at all — it is the correctness check that `rotate_integrals` leaves the energy alone, and the reference the truncated costs are judged against.
+
+`cost="custom"` with `cost_function=` is the hook a tensor-network objective plugs into; there is no GPU DMRG kernel in this package and nothing here claims one.
+
+## Step 5 — Hand the operator to qiskit
 
 ```python
-from superfermion.chemistry.hamiltonians import get_molecular_hamiltonian
-from superfermion.chemistry.ansatz import uccsd_ansatz
-from superfermion.algorithms.variational import VQE
-import numpy as np
+from superfermion.chemistry import interop
 
-# 1. Build molecular Hamiltonian (pre-computed H2 library entry)
-H = get_molecular_hamiltonian("H2", basis="sto-3g")
-
-# 2. Build ansatz
-ansatz = uccsd_ansatz(2, 2)
-
-# 3. Initial parameters (array, ordered as ansatz.parameters)
-init_params = np.zeros(ansatz.n_parameters)
-
-# 4. Run VQE
-vqe = VQE(ansatz, H)
-result = vqe.minimize(initial_params=init_params, iterations=200)
-print(f"Ground state energy: {result.optimal_value:.8f} Hartree")
-print(f"Optimal parameters: {result.optimal_params}")
+labels, coeffs = interop.to_qiskit_labels(H)
+print(len(labels), "terms, first:", labels[0], round(abs(coeffs[0]), 6))
 ```
 
-## Performance Notes
+`to_qiskit_op` returns a `SparsePauliOp` ready for `qiskit_algorithms`, and `from_qiskit_op` brings one back. The round trip is exact (193 → 193 labels, coefficient drift 0.0 in the measurement):
 
-- **Hamiltonian construction** — runs in Python using PySCF's integral engine
-- **Expectation values** — computed in Rust via `sf.State.expectation()`
-- **Gradients** — adjoint method in Rust, O(1) scaling regardless of parameter count
-- **Recommendation** — for molecules < 20 qubits, combine UCCSD + adjoint gradient for fastest convergence
+```python
+op = interop.to_qiskit_op(H)
+back = interop.from_qiskit_op(op)
+print(len(back.terms), "terms after the round trip")
+```
+
+## Symmetry sectors
+
+Point-group symmetry can also be used to diagonalise one sector instead of the whole space:
+
+```python
+from superfermion.chemistry import symmetry as sym
+from superfermion.chemistry.subspace import all_determinants
+
+sector_mol = molecule_from_geometry(WATER, basis="sto-3g", symmetry=True)
+irreps = sym.orbit_irreps(sector_mol)
+every = all_determinants(sector_mol.n_orbitals, sector_mol.n_electrons)
+kept = sym.sector_determinants(irreps, every, sector=0)
+print(f"{len(kept)} of {len(every)} determinants in the totally symmetric sector")
+```
+
+The off-diagonal Hamiltonian elements between different sectors are exactly zero, so the sector energy equals the full energy while diagonalising a fraction of the space. On 6-31G water the C₂ᵥ sector is 415 513 of 1 656 369 determinants.
+
+## What this module does not do
+
+Stated here rather than discovered later:
+
+- **No GPU DMRG.** `optimise_orbital_basis` accepts a custom objective, so an MPS/DMRG cost can be plugged in, but no such kernel ships and no CAS(30,30) run is claimed.
+- **No BKSF Hamiltonian builder.** `chemistry.bksf` computes the cost of the Bravyi–Kitaev superfast encoding — qubit count and interaction graph — for a given molecule. On the molecules measured, that graph is complete, so the encoding loses on both qubit count and term weight; the verdict is the deliverable, not an operator.
+- **Density fitting is accuracy control, not a small-molecule speed switch** (measured above).
+- **Tapering covers Z₂ symmetries expressible as `{I, Z}` strings.** Point-group or spin symmetry detection beyond that is not implemented, and the tapered operator is not composed with a mapper.
+- **No orbital localisation.** One-shot DMET needs a fragment basis in which the density is not diagonal, or no bath orbital is generated and the correction is exactly zero. Boys or Pipek–Mezey localisation is not implemented, so you supply the orthogonal transformation.
+- **The dense sector spectrum is a debugging aid, not a solver path.** `compute_spectrum=True` on water is four 4096 × 4096 eigensolves — about 72 s measured, and the reason the call above passes `False`. Each Pauli term is now assembled in O(2ⁿ) from its action on a basis state rather than as a Kronecker product, which is what took the twelve-qubit case from twenty minutes down to that.
+- **The orbital optimiser only moves the L1 objective.** `cost="cisd"` is stationary at a canonical Hartree–Fock start (Brillouin) and `cost="fci"` is flat everywhere by construction, so `cost="sparsity"` is the one that actually redesigns a basis.
+- **QSE accuracy is pool-limited** (table above). Reproducing an exact excited root requires a pool that spans it.
+- **The library fallback contains H₂ only.** Everything else needs PySCF; a missing molecule raises instead of quietly returning zeros.
+
+Every number above is reproducible with the files listed in `_v021_CHEM_ACTIVE_SPACE.md` §9–§10.
