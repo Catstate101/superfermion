@@ -192,6 +192,12 @@ jobs:
           pip install -e ".[dev]"
       - name: Lint (ruff)
         run: ruff check superfermion/ scripts/ --select=F --ignore=F401,F821
+      # `git diff --check` only sees a blank line at EOF while it is still in the
+      # diff, so it does not catch one that landed earlier or arrives through a
+      # merge. W391 is a preview rule, hence --preview; the selection is kept to
+      # that single rule so nothing else runs under preview semantics.
+      - name: Lint (end of file)
+        run: ruff check superfermion/ tests/ scripts/ --preview --select=W391
       - name: Type check (mypy)
         continue-on-error: true
         run: mypy superfermion/

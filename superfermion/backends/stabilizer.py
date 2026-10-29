@@ -461,5 +461,3 @@ def _phase_of_product(x1: np.ndarray, z1: np.ndarray,
     contributions = g_table[p1, p2]  # (k, n) if batched, else (n,)
     axis = tuple(range(1, contributions.ndim)) if contributions.ndim > 1 else None
     return contributions.sum(axis=axis) % 4
-
-

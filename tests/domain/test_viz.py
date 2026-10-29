@@ -47,5 +47,3 @@ class TestPlotHistogram:
         fig = viz.plot_histogram(counts, sort="desc")
         assert fig is not None
         plt.close(fig)
-
-
