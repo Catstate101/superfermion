@@ -21,7 +21,7 @@ use std::f64::consts::PI;
 pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
     let mut dag: Option<QuantumDAG> = None;
 
-    for raw_line in qasm_str.lines() {
+    for (lineno, raw_line) in qasm_str.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty()
             || line.starts_with("//")
@@ -33,32 +33,78 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
 
         // ── qubit declaration ──────────────────────────────────
         if line.starts_with("qreg") {
-            dag = parse_qreg_size(line).map(|n| QuantumDAG::new(n, n));
+            match parse_qreg_size(line) {
+                Some(n) => dag = Some(QuantumDAG::new(n, n)),
+                None => {
+                    return Err(format!(
+                        "line {}: malformed qreg declaration: {line}",
+                        lineno + 1
+                    ))
+                }
+            }
             continue;
         }
 
         // QASM3-style: qubit[N] name;
         if line.starts_with("qubit[") {
-            dag = parse_bracket_size(line, "qubit[").map(|n| QuantumDAG::new(n, n));
+            match parse_bracket_size(line, "qubit[") {
+                Some(n) => dag = Some(QuantumDAG::new(n, n)),
+                None => {
+                    return Err(format!(
+                        "line {}: malformed qubit declaration: {line}",
+                        lineno + 1
+                    ))
+                }
+            }
+            continue;
+        }
+
+        // Classical register declarations carry no quantum operation. The DAG
+        // is created with one classical bit per qubit, so the size is unused
+        // here but the line is legal QASM and must not be treated as a gate.
+        if line.starts_with("creg") {
+            continue;
+        }
+
+        // A bare `barrier;` addresses every qubit and carries no semantics
+        // (`to_qasm` drops BARRIER for the same reason).
+        if line.trim_end_matches(';').trim() == "barrier" {
             continue;
         }
 
         let dag_ref = match dag.as_mut() {
             Some(d) => d,
-            None => continue,
+            None => {
+                return Err(format!(
+                    "line {}: instruction before any qreg declaration: {line}",
+                    lineno + 1
+                ))
+            }
         };
         let n = dag_ref.n_qubits;
 
         // ── gate instruction ───────────────────────────────────
         let (gate_name, params, qubits_str) = match split_qasm2_line(line) {
             Some(t) => t,
-            None => continue,
+            None => {
+                return Err(format!(
+                    "line {}: cannot parse statement: {line}",
+                    lineno + 1
+                ))
+            }
         };
 
-        // Map gate name to OpType
+        // Map gate name to OpType. An unmapped name is an error, not a skip:
+        // dropping it returns a circuit that is missing operations while
+        // looking like a successful parse, and the caller has no way to tell.
         let op = match map_gate(&gate_name, &params) {
             Some(o) => o,
-            None => continue, // skip unknown gates silently
+            None => {
+                return Err(format!(
+                    "line {}: unsupported gate '{gate_name}'",
+                    lineno + 1
+                ))
+            }
         };
 
         // Handle measure specially: "measure q[i] -> c[j]" has two bracket
@@ -72,7 +118,10 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
             };
             if let Some(q_idx) = parse_first_bracket_index(q_part) {
                 if q_idx >= n {
-                    continue;
+                    return Err(format!(
+                        "line {}: measure names qubit {q_idx} but the circuit has {n} qubits",
+                        lineno + 1
+                    ));
                 }
                 // SF/OpenQASM are both little-endian (q0 = LSB): labels pass
                 // through unchanged so this stays consistent with to_qasm.
@@ -82,6 +131,11 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
                     .filter(|&ci| ci < n)
                     .unwrap_or(qubit);
                 dag_ref.add_measure(qubit, cbit);
+            } else {
+                return Err(format!(
+                    "line {}: measure without a qubit operand: {line}",
+                    lineno + 1
+                ));
             }
             continue;
         }
@@ -93,19 +147,40 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
                 let abs_start = search_from + bracket_start + 1;
                 let bracket_end = match qubits_str[abs_start..].find(']') {
                     Some(i) => abs_start + i,
-                    None => break,
+                    None => {
+                        return Err(format!(
+                            "line {}: unterminated qubit index in '{line}'",
+                            lineno + 1
+                        ))
+                    }
                 };
                 let num_str = &qubits_str[abs_start..bracket_end];
-                if let Ok(idx) = num_str.parse::<usize>() {
-                    if idx < n {
-                        // Little-endian pass-through (q[i] -> SF qubit i).
-                        qubit_indices.push(idx);
+                let idx = match num_str.parse::<usize>() {
+                    Ok(i) => i,
+                    Err(_) => {
+                        return Err(format!(
+                            "line {}: qubit index '{num_str}' is not an integer in '{line}'",
+                            lineno + 1
+                        ))
                     }
+                };
+                if idx >= n {
+                    return Err(format!(
+                        "line {}: qubit index {idx} out of range for {n} qubits in '{line}'",
+                        lineno + 1
+                    ));
                 }
+                // Little-endian pass-through (q[i] -> SF qubit i).
+                qubit_indices.push(idx);
                 search_from = bracket_end + 1;
             }
             if !qubit_indices.is_empty() {
                 dag_ref.add_op(op, &qubit_indices);
+            } else if gate_name == "reset" {
+                return Err(format!(
+                    "line {}: reset names no qubit operand in '{line}'",
+                    lineno + 1
+                ));
             }
             continue;
         }
@@ -117,20 +192,39 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
             let abs_start = search_from + bracket_start + 1;
             let bracket_end = match qubits_str[abs_start..].find(']') {
                 Some(i) => abs_start + i,
-                None => break,
+                None => {
+                    return Err(format!(
+                        "line {}: unterminated qubit index in '{line}'",
+                        lineno + 1
+                    ))
+                }
             };
             let num_str = &qubits_str[abs_start..bracket_end];
-            if let Ok(idx) = num_str.parse::<usize>() {
-                if idx < n {
-                    // Little-endian pass-through: SF q0 = QASM q[0] = LSB.
-                    qubit_indices.push(idx);
+            let idx = match num_str.parse::<usize>() {
+                Ok(i) => i,
+                Err(_) => {
+                    return Err(format!(
+                        "line {}: qubit index '{num_str}' is not an integer in '{line}'",
+                        lineno + 1
+                    ))
                 }
+            };
+            if idx >= n {
+                return Err(format!(
+                    "line {}: qubit index {idx} out of range for {n} qubits in '{line}'",
+                    lineno + 1
+                ));
             }
+            // Little-endian pass-through: SF q0 = QASM q[0] = LSB.
+            qubit_indices.push(idx);
             search_from = bracket_end + 1;
         }
 
         if qubit_indices.is_empty() {
-            continue;
+            return Err(format!(
+                "line {}: gate '{gate_name}' names no qubit operand in '{line}'",
+                lineno + 1
+            ));
         }
 
         dag_ref.add_op(op, &qubit_indices);
@@ -298,6 +392,14 @@ fn map_gate(name: &str, params: &[f64]) -> Option<OpType> {
             Parameter::Const(p1()),
             Parameter::Const(p2()),
         )),
+        // u2(phi, lambda) is u3(pi/2, phi, lambda) -- a qelib1 gate that
+        // Qiskit emits in some exports. Without this it used to be dropped
+        // silently by the caller's `None =>` arm.
+        "u2" => Some(OpType::U(
+            Parameter::Const(PI / 2.0),
+            Parameter::Const(p0()),
+            Parameter::Const(p1()),
+        )),
         "cu" | "cu3" => Some(OpType::Cu(
             Parameter::Const(p0()),
             Parameter::Const(p1()),
@@ -328,6 +430,52 @@ fn map_gate(name: &str, params: &[f64]) -> Option<OpType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unsupported_gate_is_an_error_not_a_silent_drop() {
+        // Regression: an unmapped gate used to be skipped, so the parse
+        // "succeeded" with operations missing. The caller cannot detect that.
+        let qasm = "OPENQASM 2.0;\nqreg q[1];\nfoo q[0];\n";
+        let err = parse_qasm2(qasm)
+            .err()
+            .expect("unsupported gate must not parse");
+        assert!(err.contains("foo"), "error should name the gate: {err}");
+        assert!(err.contains("line 3"), "error should carry the line: {err}");
+    }
+
+    #[test]
+    fn test_out_of_range_qubit_is_an_error_not_a_silent_drop() {
+        let qasm = "OPENQASM 2.0;\nqreg q[2];\nx q[5];\n";
+        let err = parse_qasm2(qasm)
+            .err()
+            .expect("out-of-range qubit must not parse");
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn test_u2_expands_to_u3_pi_half() {
+        // u2(phi, lambda) == u3(pi/2, phi, lambda); it used to be dropped.
+        let qasm = "OPENQASM 2.0;\nqreg q[1];\nu2(0.3, 0.7) q[0];\n";
+        let dag = parse_qasm2(qasm).expect("u2 should parse");
+        assert_eq!(dag.gate_count(), 1);
+    }
+
+    #[test]
+    fn test_creg_and_bare_barrier_are_not_gates() {
+        let qasm =
+            "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nbarrier;\nh q[0];\nmeasure q[0] -> c[0];\n";
+        let dag = parse_qasm2(qasm).expect("declarations must not be treated as gates");
+        assert_eq!(dag.n_qubits, 2);
+    }
+
+    #[test]
+    fn test_instruction_before_qreg_is_an_error() {
+        let qasm = "OPENQASM 2.0;\nh q[0];\nqreg q[1];\n";
+        let err = parse_qasm2(qasm)
+            .err()
+            .expect("instruction before qreg must not parse");
+        assert!(err.contains("before any qreg"), "{err}");
+    }
 
     #[test]
     fn test_parse_bell_circuit() {

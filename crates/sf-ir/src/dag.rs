@@ -1544,7 +1544,7 @@ impl QuantumDAG {
             }
 
             let mat = op.op_type.to_matrix();
-            let qubits: Vec<usize> = op.qubits.iter().map(|&q| q).collect();
+            let qubits: Vec<usize> = op.qubits.iter().copied().collect();
             let n = mat.nrows();
 
             let is_diagonal =

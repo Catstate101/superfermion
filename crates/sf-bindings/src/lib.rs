@@ -36,6 +36,21 @@ use sf_ir::{MPSState, OpType, Parameter, QuantumDAG, SerializedCircuit};
 // Error mapping — Rust MethodError -> Python MethodError
 // ═══════════════════════════════════════════════════════════
 
+/// `1 << n_qubits`, or `None` when that does not fit in a `usize`.
+///
+/// A plain shift is not usable for validating `n_qubits` coming from Python:
+/// for `n_qubits >= usize::BITS` the shift amount is masked in a release build
+/// (so `1usize << 64 == 1`) and the shift panics in a debug one. Written that
+/// way, `Data.len() != 1 << n_qubits` compares against 1 and accepts a
+/// one-amplitude array as a 64-qubit state.
+fn checked_dim(n_qubits: usize) -> Option<usize> {
+    if n_qubits < usize::BITS as usize {
+        1usize.checked_shl(n_qubits as u32)
+    } else {
+        None
+    }
+}
+
 /// Map a Rust `MethodError` to the Python `MethodError` class from
 /// `superfermion.utils.exceptions` (which subclasses RuntimeError), so
 /// unsupported-method calls surface as the documented exception type.
@@ -390,12 +405,13 @@ impl PyState {
         n_qubits: usize,
     ) -> PyResult<Self> {
         let v: Vec<num_complex::Complex64> = data.as_slice()?.to_vec();
-        if v.len() != 1 << n_qubits {
+        if checked_dim(n_qubits) != Some(v.len()) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "array length {} doesn't match 2^{} = {}",
+                "array length {} doesn't match n_qubits={} (expected {} amplitudes)",
                 v.len(),
                 n_qubits,
-                1usize << n_qubits
+                checked_dim(n_qubits)
+                    .map_or_else(|| "more than usize::MAX".to_string(), |n| n.to_string())
             )));
         }
         Ok(PyState {
@@ -421,20 +437,34 @@ impl PyState {
         // Borrow the input array directly: the permutation below only reads
         // it, and copying it first would keep a second 4^n buffer live.
         let flat = rho.as_slice()?;
-        let dim = 1usize << n_qubits;
-        if flat.len() != dim * dim {
+        // 2^n and 4^n both have to be computed with a checked shift/multiply:
+        // `1usize << 64` is 1 in a release build (shift amount masked) and a
+        // panic in a debug one, so a bare length check would accept a
+        // one-element array as a 64-qubit density matrix; and the squared
+        // dimension already overflows `usize` at n_qubits = 32.
+        let Some(dim) = checked_dim(n_qubits) else {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_qubits={n_qubits} is too large: 2^{n_qubits} does not fit in a usize"
+            )));
+        };
+        let Some(pairs) = dim.checked_mul(dim) else {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_qubits={n_qubits} is too large: 4^{n_qubits} does not fit in a usize"
+            )));
+        };
+        if flat.len() != pairs {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "array length {} doesn't match 2^{} * 2^{} = {}",
                 flat.len(),
                 n_qubits,
                 n_qubits,
-                dim * dim
+                pairs
             )));
         }
         // Wrappers index the density matrix in the interleaved vectorized
         // layout data[ket | (bra << n)] (see DensityMatrixStateWrapper),
         // while the input rho is row-major; permute accordingly.
-        let mut data = vec![num_complex::Complex64::new(0.0, 0.0); dim * dim];
+        let mut data = vec![num_complex::Complex64::new(0.0, 0.0); pairs];
         for ket in 0..dim {
             for bra in 0..dim {
                 data[ket | (bra << n_qubits)] = flat[ket * dim + bra];
@@ -2487,9 +2517,42 @@ fn reverse_bits(val: usize, n_bits: usize) -> usize {
 fn hamiltonian_expval(
     sv: numpy::PyReadonlyArray1<num_complex::Complex64>,
     terms: Vec<(Vec<u8>, f64, f64)>,
-) -> f64 {
-    let sv = sv.as_slice().unwrap();
+) -> PyResult<f64> {
+    // Borrow the statevector instead of copying it: at 4^n entries a copy is the
+    // dominant cost of the call. A non C-contiguous view (``sv[::2]``,
+    // ``sv[::-1]``) has no contiguous slice to borrow, so this has to return a
+    // Python error. It must not be unwrapped -- a panic crosses the FFI boundary
+    // as ``pyo3_runtime.PanicException``, which derives from ``BaseException``
+    // and so escapes ``except Exception`` in caller code entirely. Every other
+    // numpy entry point in this file propagates the same way.
+    let sv = sv.as_slice()?;
     let dim = sv.len();
+    if dim == 0 || !dim.is_power_of_two() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "statevector length {dim} is not a power of two"
+        )));
+    }
+    let n_qubits = dim.trailing_zeros();
+    // The term loop below indexes ``sv[target_idx]`` with ``target_idx`` built
+    // from ``1 << bit_pos``. A term longer than the state, or a code outside
+    // {0,1,2,3}, therefore indexes past the end (or shifts out of range) and
+    // panics -- the exact failure the ``as_slice()?`` above is meant to avoid.
+    // Validate once, up front, so bad input raises instead of aborting.
+    for (paulis, _, _) in &terms {
+        for (q, &pauli_op) in paulis.iter().enumerate() {
+            if pauli_op > 3 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid Pauli code {pauli_op} at position {q}; expected 0 (I), 1 (X), \
+                     2 (Y) or 3 (Z)"
+                )));
+            }
+            if pauli_op != 0 && q as u32 >= n_qubits {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Pauli term acts on qubit {q} but the statevector has only {n_qubits} qubits"
+                )));
+            }
+        }
+    }
     let mut total = num_complex::Complex64::new(0.0, 0.0);
 
     for (paulis, coef_re, coef_im) in &terms {
@@ -2528,7 +2591,7 @@ fn hamiltonian_expval(
         }
         total += coef * expval;
     }
-    total.re
+    Ok(total.re)
 }
 
 // ═══════════════════════════════════════════════════════════
