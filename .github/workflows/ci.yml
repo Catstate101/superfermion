@@ -224,9 +224,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The framework set below needs roughly 9 GB installed and the hosted image
+      # leaves about 14 GB free alongside toolchains this job never touches
+      # (.NET, Android, GHC). Without this the install dies at Errno 28 before a
+      # single test runs -- which is what happened on the first run of this lane.
+      # CodeQL is removed by name rather than clearing hostedtoolcache, because
+      # that directory also holds the interpreter setup-python just installed.
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # CPU-only torch, installed before the extras so they see the
+          # requirement already met. The default Linux wheel drags in several
+          # GB of CUDA libraries, and this job has no GPU to use them on.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
           pip install -e ".[dev,interop]"
       - name: Run full suite
         run: python -m pytest tests/ -q --timeout=300
