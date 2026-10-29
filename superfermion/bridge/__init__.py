@@ -11,7 +11,26 @@ from __future__ import annotations
 from __future__ import annotations
 
 from typing import Any
+import threading as _threading
+
 import superfermion as sf
+
+# Diagnostics for :func:`from_qasm`. ``None`` after a call means the native Rust
+# parser handled it; a string records why the pure-Python parser was used instead
+# (``"bigint-parameter"``, or ``"<ExceptionType>: <message>"``). Exposed so tests
+# can prove the native path actually ran rather than trusting that it did.
+#
+# The storage is thread-local: a module-level string would let two threads read
+# each other's reason, so the value a caller inspects need not describe its own
+# call. ``__getattr__`` below keeps the documented ``bridge._RUST_QASM_FALLBACK_REASON``
+# spelling working without making the value shared.
+_RUST_QASM_STATE = _threading.local()
+
+
+def __getattr__(name: str):
+    if name == "_RUST_QASM_FALLBACK_REASON":
+        return getattr(_RUST_QASM_STATE, "reason", None)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _bit_reverse_matrix(matrix, n_qubits: int):
@@ -269,7 +288,16 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
 
     Uses the native Rust parser (6× faster than Qiskit) when available,
     falling back to the pure-Python parser for unsupported syntax.
+
+    Both parsers are strict: a gate or statement that cannot be represented
+    raises ``ValueError`` instead of being dropped, so a returned circuit is
+    never silently missing operations.
     """
+    # Reset before anything else can raise. The pre-scan below throws on a
+    # non-str argument, and without this a later read of the attribute would
+    # still report the previous call's reason.
+    _RUST_QASM_STATE.reason = None
+
     # ── Pre-scan: skip Rust path if QASM contains big-integer parameters (> 2^53)
     #   that would lose precision when parsed as IEEE-754 f64.
     import re as _re
@@ -286,22 +314,63 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
     # (The parser previously reversed q[i] -> n-1-i (big-endian); that defect
     # was fixed in sf-ir/src/qasm.rs and is locked by test_bridges.
     # TestQASMEndianness.test_qasm_rust_path_roundtrip_preserves_statevector.)
-    if not _has_bigint:
+    #
+    # Only the failures that mean "this build or this string cannot use the
+    # native parser" are caught:
+    #   ImportError -- the extension is not built (pure-Python install)
+    #   ValueError  -- from_qasm2 rejected the string. sf-ir/src/qasm.rs now
+    #                  reports unsupported gates, out-of-range qubits, missing
+    #                  declarations and unparseable statements as errors rather
+    #                  than skipping them, so this is a real rejection
+    #   TypeError   -- native API shape did not match (defensive)
+    # Anything else propagates. This used to be ``except BaseException``, which
+    # also swallowed ``pyo3_runtime.PanicException``: a panicking native parser
+    # then produced a correct circuit via the Python fallback, so the involution
+    # test passed while the Rust parser stayed broken.
+    if _has_bigint:
+        # Documented skip: integer literals above 2^53 cannot round-trip through
+        # the f64 parameters the native parser produces.
+        _RUST_QASM_STATE.reason = "bigint-parameter"
+    else:
+        # Only the import and the parse call are guarded. Everything after a
+        # successful parse -- to_gate_records, Circuit(), extend_raw_from_records
+        # -- is Rust-backed conversion, and a failure there is a defect, not an
+        # "unsupported syntax" case, so it must propagate.
+        dag = None
         try:
             from superfermion._sf_core import QuantumDAG
-            from superfermion.circuit import GateRecord as _GateRecord
             dag = QuantumDAG.from_qasm2(qasm_str)
-            records = dag.to_gate_records()
-            circ = sf.Circuit(dag.n_qubits(), n_cbits=dag.n_cbits())
-            # Single-pass bulk append: avoids intermediate list + double .upper()
-            circ.extend_raw_from_records(records)
+        except (ImportError, ValueError, TypeError) as exc:
+            _RUST_QASM_STATE.reason = f"{type(exc).__name__}: {exc}"
+        except BaseException as exc:
+            # Recorded, then re-raised. Letting it propagate is the whole point
+            # (a panicking parser is a defect); leaving the reason at ``None``
+            # would report the opposite of what happened.
+            _RUST_QASM_STATE.reason = f"{type(exc).__name__}: {exc} (propagated)"
+            raise
+        if dag is not None:
+            try:
+                from superfermion.circuit import GateRecord as _GateRecord
+                records = dag.to_gate_records()
+                circ = sf.Circuit(dag.n_qubits(), n_cbits=dag.n_cbits())
+                # Single-pass bulk append: avoids intermediate list + double .upper()
+                circ.extend_raw_from_records(records)
+            except BaseException as exc:
+                _RUST_QASM_STATE.reason = (
+                    f"conversion-failed: {type(exc).__name__}: {exc}"
+                )
+                raise
             return circ
-        except BaseException:
-            pass  # Fall back to Python parser (catches PanicException too)
 
     from superfermion.circuit import GateRecord as _GateRecord
     import re
     lines = [l.strip() for l in qasm_str.strip().split('\n') if l.strip()]
+    # Carried into fallback errors so a gate this parser cannot map still tells
+    # the caller why the native parser was not used.
+    _native_hint = (
+        f" (native parser: {_RUST_QASM_STATE.reason})"
+        if _RUST_QASM_STATE.reason else ""
+    )
 
     # Gate-name → SF method mapping (hoisted outside loop for speed)
     QASM_MAP = {
@@ -310,6 +379,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
         'sx': 'sx',
         'rx': 'rx', 'ry': 'ry', 'rz': 'rz',
         'u': 'u', 'u3': 'u',
+        'u2': 'u',  # u2(phi, lam) == u3(pi/2, phi, lam); params prepended below
         'p': 'p', 'u1': 'p',
         'cx': 'cx', 'cnot': 'cx',
         'cz': 'cz',
@@ -329,13 +399,26 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
         if line.startswith('qubit[') or line.startswith('qreg'):
             # qubit[N] q; OR qreg q[N];
             m = re.search(r'\[(\d+)\]', line)
-            if m:
-                n_qubits = int(m.group(1))
-                circuit = sf.Circuit(n_qubits)
+            if not m:
+                raise ValueError(
+                    f"Could not parse QASM: malformed qubit declaration: {line!r}"
+                )
+            n_qubits = int(m.group(1))
+            circuit = sf.Circuit(n_qubits)
             continue
         
-        if circuit is None:
+        # Classical register declarations carry no quantum operation.
+        if line.startswith('creg'):
             continue
+
+        # A bare barrier has no semantics (to_qasm drops BARRIER too).
+        if line.rstrip(';').strip() == 'barrier':
+            continue
+
+        if circuit is None:
+            raise ValueError(
+                f"Could not parse QASM: instruction before any qreg declaration: {line!r}"
+            )
         
         # Gate instructions
         # Format: gate_name q[i], q[j]; OR gate_name(param) q[i];
@@ -345,8 +428,32 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             params_str = m.group(2)
             qubits_str = m.group(3)
             
+            if gate_name == 'barrier':
+                continue
+
+            if gate_name == 'measure':
+                # measure q[i] -> c[j];  (c[j] optional)
+                q_part, _, c_part = qubits_str.partition('->')
+                qm = re.search(r'\[(\d+)\]', q_part)
+                if not qm:
+                    raise ValueError(f"Could not parse measure target: {line!r}")
+                q_idx = int(qm.group(1))
+                if q_idx >= n_qubits:
+                    raise ValueError(
+                        f"measure names qubit {q_idx} but the circuit has "
+                        f"{n_qubits} qubits"
+                    )
+                cm = re.search(r'\[(\d+)\]', c_part)
+                circuit.measure(q_idx, int(cm.group(1)) if cm else q_idx)
+                continue
+
             # Parse qubits
             qubit_indices = [int(x) for x in re.findall(r'\[(\d+)\]', qubits_str)]
+            if any(i >= n_qubits for i in qubit_indices):
+                raise ValueError(
+                    f"gate {gate_name!r} names a qubit outside the "
+                    f"{n_qubits}-qubit circuit: {line!r}"
+                )
             
             # Parse params
             params = []
@@ -381,7 +488,11 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             mapped_indices = list(qubit_indices)
             
             sf_name = QASM_MAP.get(gate_name)
-            if sf_name and hasattr(circuit, sf_name):
+            if gate_name == 'u2':
+                # u2(phi, lam) is u3(pi/2, phi, lam).
+                import math
+                params = [math.pi / 2] + params
+            if sf_name is not None and hasattr(circuit, sf_name):
                 # Fast path: append GateRecord directly, skipping
                 # per-gate validation (qubits already verified by parser).
                 circuit._gates.append(_GateRecord(
@@ -389,6 +500,15 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                     qubits=mapped_indices,
                     params=params,
                 ))
+            else:
+                # Previously this branch silently dropped the gate, so the
+                # returned circuit was missing operations with no signal.
+                raise ValueError(
+                    f"Pure-Python QASM fallback cannot map gate {gate_name!r} "
+                    f"in {line!r}{_native_hint}"
+                )
+        else:
+            raise ValueError(f"Could not parse QASM statement: {line!r}")
     
     if circuit is None:
         raise ValueError("Could not parse QASM: no qubit declaration found")
