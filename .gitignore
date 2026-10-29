@@ -87,3 +87,10 @@ Thumbs.db
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
+
+# MPS SVD debug dumps: crates/sf-ir/src/mps.rs writes _svd_dbg_*_N.{txt,bin}
+# into the process CWD when SF_MPS_SVD_DEBUG_FULL is set
+_svd_dbg_*
+
+# Local wheel drops from crates/sf-bindings
+dist_local/

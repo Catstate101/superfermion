@@ -61,7 +61,10 @@ qml = [
     "optax>=0.2.0",
 ]
 dev = [
-    "pytest>=7.0",
+    # pytest 9 removed Function._nodeid, which pytest-benchmark 5.3 still reads
+    # while setting up its fixture: every benchmark test errors before its body
+    # runs. The ceiling stays until a plugin release supports pytest 9.
+    "pytest>=7.0,<9",
     "pytest-benchmark>=4.0",
     "pytest-cov>=4.0",
     "pytest-timeout>=2.0",
@@ -76,6 +79,33 @@ gpu = [
 qpu = [
     "qiskit-ibm-runtime>=0.20",
     "amazon-braket-sdk>=1.60",
+]
+interop = [
+    # Frameworks the bridge, device and gradient layers are tested against.
+    # Those tests guard themselves with importorskip, so installing this extra
+    # is what turns their skips into assertions; one CI lane installs it and
+    # runs the suite with no name filter.
+    "superfermion[jax]",
+    "qiskit>=1.0",
+    "qiskit-ibm-runtime>=0.20",
+    "pennylane>=0.35",
+    "cirq-core>=1.3",
+    "stim>=1.12",
+    "boto3>=1.26",
+    "amazon-braket-sdk>=1.60",
+    "flax>=0.8.0",
+    "matplotlib>=3.7",
+    # The nn-layer tests cover all three backends. torch is a large install
+    # (about 2.5 GB), which is why this extra is separate from ``dev``; the
+    # tests skip cleanly when a backend is absent.
+    "torch>=2.0",
+    # pyscf publishes wheels for Linux (x86_64, aarch64) and macOS (Intel,
+    # Apple silicon) but has never shipped a Windows build, so the marker is
+    # "not Windows" rather than "Linux": this extra must install on macOS too,
+    # it only has to stay installable on the Windows dev boxes.
+    "pyscf>=2.3; sys_platform != 'win32'",
+    # TensorFlow has no wheel for 3.13 or newer; same cap as the ml extra.
+    "tensorflow>=2.15; python_version < '3.13'",
 ]
 benchmarks = [
     "pennylane>=0.45.0",
@@ -95,7 +125,12 @@ viz = [
 ]
 chemistry = [
     "scipy>=1.10.0",
-    "pyscf>=2.3",
+    # pyscf has never shipped a Windows wheel and its sdist needs a C toolchain
+    # that CMake can find, so without this marker `superfermion[chemistry]` --
+    # and therefore `superfermion[all]` -- died in a cmake dump on Windows. The
+    # bridge degrades on its own there: it imports cleanly and raises a
+    # LookupError naming pyscf when asked for anything beyond the tabulated set.
+    "pyscf>=2.3; sys_platform != 'win32'",
 ]
 docs = [
     "sphinx>=7.0",

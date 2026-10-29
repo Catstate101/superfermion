@@ -295,7 +295,28 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy scipy pytest pytest-timeout pytest-benchmark
+          # pytest 9 and pytest-benchmark 5.3 are an incompatible pair: the
+          # plugin reads Function._nodeid, which pytest 9 removed, so all 21
+          # benchmark tests error during fixture setup. The ceiling holds until
+          # a plugin release supports pytest 9.
+          python -m pip install numpy scipy "pytest>=7,<9" pytest-timeout pytest-benchmark
+          # The suite guards framework tests with importorskip. Installing them
+          # here is what makes this lane assert interop behaviour instead of
+          # skipping it; wheel availability for the job's interpreter was
+          # checked for every package below.
+          python -m pip install qiskit qiskit-ibm-runtime pennylane cirq-core \
+            stim jax flax boto3 amazon-braket-sdk matplotlib torch
+          # TensorFlow has no wheel for 3.13 or newer, so on this lane's 3.15 the
+          # marker keeps it out by design; the 3.12 `interop` job runs that test.
+          python -m pip install "tensorflow>=2.15; python_version < '3.13'"
+          # pyscf is deliberately absent from this gate. Its two chemistry tests
+          # (reference-vs-SCF energy in test_chemistry.py, symmetry-sector FCI in
+          # test_chemistry_parity.py) need a Linux wheel and have never executed
+          # in any lane, so they would first run here, at publish time, where a
+          # failure costs a release. They run in the `interop` job on every PR
+          # instead. Once that has passed once, promote them into this gate by
+          # adding this to the line above:
+          #     "pyscf>=2.3; sys_platform != 'win32'"
           python -m pip install --no-index --only-binary=:all: --find-links dist superfermion
 
       - name: Run tests against the installed wheel
@@ -303,11 +324,9 @@ jobs:
         run: |
           # Remove local source so it doesn't shadow the installed package
           rm -rf superfermion/
-          python -m pytest tests/ -q --timeout=120 \
-            --ignore=tests/domain/test_gradients_full.py \
-            --ignore=tests/integration/test_provider_adapters.py \
-            --ignore=tests/integration/test_tracked_experiment.py \
-            -k "not (aer or qiskit or pennylane or braket or test_decomposes_swap)"
+          # No -k and no --ignore: this lane installs everything the suite needs,
+          # so a skip here means the environment lost a dependency.
+          python -m pytest tests/ -q --timeout=120
 
   # ---- Publish ----
   publish:

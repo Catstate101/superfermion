@@ -3,12 +3,16 @@
 import math
 import os
 
+import pytest
+
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import jax  # noqa: E402
+# jax is optional (the ``jax`` extra). Importing it unguarded makes a jax-less
+# environment fail during collection, which aborts the whole run instead of
+# costing one module; importorskip keeps the damage to this file.
+jax = pytest.importorskip("jax", reason="jax extra not installed")
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-import pytest  # noqa: E402
 
 import superfermion as sf  # noqa: E402
 from superfermion.observables.core import SparsePauliOp  # noqa: E402

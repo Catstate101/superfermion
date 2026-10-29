@@ -65,6 +65,50 @@ jobs:
         env:
           PYO3_PYTHON: python
 
+  # ── Optional GPU feature ─────────────────────────────────
+  # crates/sf-gpu is a workspace member, so the `rust` job above already compiles
+  # and lints the crate on its own. What no other lane compiles is the glue:
+  # sf-ir's `#[cfg(feature = "gpu")]` block in dag.rs (simulate_gpu,
+  # is_available), the sf_gpu::diagnose() call in lib.rs, and sf-bindings'
+  # own `gpu = ["sf-ir/gpu"]` feature (gpu_diagnose). Those live behind
+  # non-default features that no published wheel enables, so without this lane
+  # they can stop type-checking while every other check stays green.
+  # cudarc is configured with `dynamic-loading`, so compiling needs neither the
+  # CUDA toolkit nor a GPU on the runner; libcuda is only looked for at runtime.
+  gpu:
+    name: gpu feature compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: cargo check (sf-ir + gpu)
+        env:
+          PYO3_PYTHON: python
+        run: cargo check -p sf-ir --features gpu --all-targets
+      - name: cargo clippy (sf-ir + gpu)
+        env:
+          PYO3_PYTHON: python
+        run: cargo clippy -p sf-ir --features gpu --all-targets -- -D warnings
+      - name: cargo check (sf-bindings + gpu)
+        env:
+          PYO3_PYTHON: python
+        run: cargo check -p sf-bindings --features gpu
+      # sf-gpu has no #[test] of its own and nothing in sf-ir's suite calls the
+      # gated code (`simulate_gpu`, `gpu_available`), so this step adds no
+      # coverage -- the test set is byte-identical with the feature on or off.
+      # What it does prove is that the test binaries still link and run with
+      # sf-gpu compiled in; `cargo check` above only type-checks them, so a
+      # link failure would otherwise stay invisible.
+      - name: cargo test (sf-ir + gpu)
+        env:
+          PYO3_PYTHON: python
+        run: cargo test -p sf-ir --features gpu
+
   # ── Distribution artifacts ───────────────────────────────
   # pip installs the sdist whenever a wheel is missing for the platform, so the
   # tarball has to be as complete as the wheel. Maturin derives its file list
@@ -151,13 +195,65 @@ jobs:
       - name: Type check (mypy)
         continue-on-error: true
         run: mypy superfermion/
+      # No -k and no --ignore. This matrix has to stay installable on every
+      # interpreter it lists (3.10-3.15, both OSes), so the interop frameworks
+      # are not all present here; a test that cannot run reports itself as
+      # skipped with the missing module. The `interop` job below installs them
+      # and runs the same suite unfiltered, so no test only ever skips.
       - name: Run core tests
         shell: bash
         run: |
           pip install scipy
-          python -m pytest tests/ -q --timeout=120 \
-            --ignore=tests/domain/test_gradients_full.py \
-            -k "not (aer or qiskit or pennylane)"
+          python -m pytest tests/ -q --timeout=120
+
+  # One lane that installs the frameworks the suite is written against and runs
+  # it with no name filter, no --ignore and no -k. pytest stops collecting a
+  # module that raises ImportError, so this lane also catches a test file that
+  # grows an unguarded optional import.
+  interop:
+    name: Full suite with interop frameworks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,interop]"
+      - name: Run full suite
+        run: python -m pytest tests/ -q --timeout=300
+
+  # The pyscf-backed bridge is the one part of the package that cannot be
+  # pip-installed on Windows at all, and before this lane it had never run on
+  # macOS or on ARM, where pyscf does publish wheels. Every row below is a
+  # platform pyscf ships a wheel for, so a skip here means the extra broke, not
+  # that the platform lacks support. Both macOS architectures are listed because
+  # pyscf publishes them as separate wheels.
+  chemistry-platforms:
+    name: pyscf bridge on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      # Installing the extra the way a user would is half the assertion: on each
+      # row, `superfermion[chemistry]` has to resolve to scipy plus pyscf.
+      - name: Install the chemistry extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,chemistry]"
+      - name: Run the pySCF-backed chemistry tests
+        run: |
+          python -m pytest tests/domain/test_chemistry.py \
+            tests/domain/test_chemistry_parity.py -q --timeout=300
 
   # ── Free-threaded CPython ────────────────────────────────
   # A limited API does not exist for free-threaded builds before 3.15, so no
