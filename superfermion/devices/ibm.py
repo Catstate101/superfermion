@@ -36,24 +36,28 @@ def _ensure_measurements(qc: Any) -> Any:
         return qc  # circuit cannot be introspected (e.g. mocked in tests)
     if not has_measure:
         qc.measure_all()
+        return qc
+
+    # A partial measurement is the second silent-corruption case: SF result
+    # keys are full-width, so a circuit that measures only q0 delivers
+    # ``P(q) = [0.02, 0.0, 0.0]`` for the untouched qubits -- they are absent
+    # from the bitstring, and ``expectation`` reads them as 0 (measured on
+    # 0.1.22 against FakeSherbrooke).  Measuring every qubit on a copy leaves
+    # the supplied measurements in place (same basis, same final state) and
+    # makes the ``meas`` register available with full width.
+    try:
+        measured = {
+            qc.find_bit(inst.qubits[0]).index
+            for inst in qc.data
+            if getattr(inst.operation, "name", "") == "measure"
+        }
+    except Exception:
+        return qc
+    if len(measured) < qc.num_qubits:
+        completed = qc.copy()
+        completed.measure_all()
+        return completed
     return qc
-
-
-def _normalize_counts_to_sf(counts: dict[str, int], width: int) -> dict[str, int]:
-    """Convert IBM SamplerV2 counts to SF's q0-last bitstring convention.
-
-    Verified on real hardware (ibm_fez/ibm_marrakesh, 2026-09):
-    ``bridge.to_qiskit`` reverses qubit indices (sf i -> qiskit n-1-i) and
-    ``measure_all`` maps creg[i] <- qiskit q[i], so the two reversals cancel
-    and SamplerV2 keys come back q0-first (bitstring position i holds SF
-    qubit i). SF counts are q0-last (qubit q is bit n-1-q, see results.py),
-    so each key of the measured width is reversed. Keys of other widths
-    (e.g. exotic multi-register mid-circuit layouts) are left untouched.
-    """
-    return {
-        (k[::-1] if len(k) == width else k): v
-        for k, v in (counts or {}).items()
-    }
 
 
 class IBMDeviceExecutor:
@@ -80,10 +84,43 @@ class IBMDeviceExecutor:
         )
         isa_circuit = pm.run(qc)
 
-        from qiskit_ibm_runtime import SamplerV2 as Sampler
+        try:
+            # SamplerV2 is deprecated in qiskit-ibm-runtime >= 0.4x in favour
+            # of ``executor_sampler.Sampler``; keep the old import first and
+            # fall back so the adapter survives its removal.  Both take
+            # ``(mode=...)`` and return ``data.<reg>.get_counts()``.
+            from qiskit_ibm_runtime import SamplerV2 as Sampler
+        except Exception:  # pragma: no cover - future runtime
+            from qiskit_ibm_runtime.executor_sampler import Sampler
         sampler = Sampler(mode=ibmq_backend)
         raw_job = sampler.run([isa_circuit], shots=shots)
-        remote_res = raw_job.result()
+        try:
+            job_id = str(raw_job.job_id())
+        except Exception:  # mocked or older runtime
+            job_id = None
+        # ``timeout`` was previously swallowed into **kwargs, so a job queued
+        # behind a long backlog blocked forever with no job id in hand.  Pass
+        # it through when the runtime supports it.
+        timeout = kwargs.pop("timeout", None)
+        if timeout is None:
+            remote_res = raw_job.result()
+        else:
+            try:
+                remote_res = raw_job.result(timeout=timeout)
+            except TypeError:  # runtime without the timeout keyword
+                remote_res = raw_job.result()
+            except Exception as exc:
+                # The wait aborted but the job keeps running server-side, and
+                # the runtime's own error carries no handle.  Re-raise with the
+                # id we already captured so the caller can poll or cancel the
+                # job instead of hunting for it in the dashboard.
+                if "Timeout" not in type(exc).__name__:
+                    raise
+                handle = f"IBM job {job_id}" if job_id else "IBM job"
+                raise type(exc)(
+                    f"{handle} still running after {timeout}s (not cancelled). "
+                    "Poll or cancel it with that job id."
+                ) from exc
 
         try:
             pub_result = remote_res[0]
@@ -96,21 +133,37 @@ class IBMDeviceExecutor:
         except Exception as exc:
             raise RuntimeError(f"Could not parse IBM result: {exc}") from exc
 
-        # SamplerV2 keys are q0-first; SF counts are q0-last. Normalize so
-        # all SF counts consumers (results.py, parameter_shift, readout
-        # correction) read the documented convention.
-        counts = _normalize_counts_to_sf(
-            counts, circuit.n_cbits or circuit.n_qubits)
-
+        # No key transformation here. ``to_qiskit`` keeps qubit labels
+        # unchanged (SF and Qiskit both use little-endian, q0 = LSB) and
+        # ``_ensure_measurements`` maps creg[q] <- qubit q, so a SamplerV2 key
+        # already holds SF qubit q at position n-1-q -- exactly SF's documented
+        # q0-last order (see results.py). A reversal used to live here to
+        # compensate for the bridge's n-1-q reversal, which 59f29bc removed;
+        # left in place it mirrored every multi-qubit hardware result.
         return RunResult(
             counts=counts,
             shots=shots,
-            metadata={"backend": self._backend_name, "provider": "ibm"},
+            metadata={
+                "backend": self._backend_name,
+                "provider": "ibm",
+                "job_id": job_id,
+            },
         )
 
     def capabilities(self) -> DeviceCapabilities:
+        # Was hardcoded to 127, which under-reports 156-qubit Herons and
+        # over-reports smaller devices.  Ask the backend, keep 127 as the
+        # offline fallback so constructors stay usable without a network.
+        max_qubits = 127
+        try:
+            reported = int(getattr(
+                self._service.backend(self._backend_name), "num_qubits", 0))
+            if reported > 0:
+                max_qubits = reported
+        except Exception:
+            pass
         return DeviceCapabilities(
-            max_qubits=127,
+            max_qubits=max_qubits,
             skip_fusion=False,
             supports_statevector=False,
             is_simulator=False,
