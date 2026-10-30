@@ -617,11 +617,17 @@ class TestIBMTimeout:
                     return self._executor().execute(sf.Circuit(1), shots=8, **kwargs)
 
     def test_timeout_is_forwarded_to_result(self):
+        pytest.importorskip("qiskit")
+        pytest.importorskip("qiskit_ibm_runtime")
+
         job = self._job(result=self._pub({"0": 8}))
         self._execute(job, timeout=0.01)
         job.result.assert_called_once_with(timeout=0.01)
 
     def test_expired_timeout_keeps_the_job_id(self):
+        pytest.importorskip("qiskit")
+        pytest.importorskip("qiskit_ibm_runtime")
+
         from qiskit_ibm_runtime.exceptions import RuntimeJobMaxTimeoutError
 
         job = self._job(side_effect=RuntimeJobMaxTimeoutError("waited too long"))
@@ -629,6 +635,9 @@ class TestIBMTimeout:
             self._execute(job, timeout=0.01)
 
     def test_runtime_without_timeout_kwarg_retries_plain(self):
+        pytest.importorskip("qiskit")
+        pytest.importorskip("qiskit_ibm_runtime")
+
         remote = self._pub({"0": 8})
         job = self._job(side_effect=[TypeError("unexpected keyword"), remote])
         result = self._execute(job, timeout=0.01)
