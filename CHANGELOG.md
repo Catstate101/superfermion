@@ -2,6 +2,67 @@
 
 All notable changes to the Superfermion framework.
 
+## [Unreleased]
+
+### Fixed
+- **Braket result order** — Braket keys every bitstring with the first measured
+  qubit leftmost, SF reads q0 from the right (see `results.py`). Counts are now
+  flipped into SF order, and untouched qubits — which Braket omits from the key
+  entirely — are scattered back onto their real positions. Measured through
+  `BraketDeviceExecutor.execute` against `LocalSimulator`: a 3-qubit circuit
+  with q0 at 3% and q2 at 30% delivered `{q0: 0.0, q1: 0.2989, q2: 0.0289}`
+  before the fix and `{q0: 0.0299, q1: 0.0, q2: 0.2971}` after (`<Z0>` +0.940
+  vs +0.939 exact, `<Z2>` +0.406 vs +0.409; pre-fix those read +0.402 and
+  +1.000).
+- **Braket `RESET`** — `RESET` was in the skip list, so a circuit that reset a
+  qubit ran with the reset missing. This SDK has no reset instruction, so
+  `_to_braket` now refuses instead of silently dropping the operation.
+- **IBM partial measurement** — `_ensure_measurements` only added
+  `measure_all()` when *no* measurement existed, so `measure(0)` produced
+  full-width keys with the untouched qubits reading 0 (verified on released
+  0.1.22 against `FakeSherbrooke`). Circuits with an incomplete measurement are
+  now completed on a copy before transpilation.
+- **IonQ counts** — the adapter assigned the whole `/results` document to
+  `RunResult.counts`, so `expectation()` raised `TypeError: unsupported operand
+  type(s) for +: 'int' and 'str'`. `_extract_ionq_counts` unwraps `histogram`
+  (or scales `probabilities` by the submitted shots) and converts IonQ's
+  integer keys, which put qubit 0 in the most significant bit, into SF order.
+- **Device width** — `runner` fetched `capabilities()` and discarded it, so a
+  5-qubit circuit dispatched to a 2-qubit device and returned `{'00000': 8}`.
+  `max_qubits` is now enforced for hardware executors; simulators and devices
+  reporting 0 are left alone.
+- **IBM capabilities** — `max_qubits` was hardcoded to 127, under-reporting
+  156-qubit Herons. It now reads `backend.num_qubits` and keeps 127 as the
+  offline fallback.
+- **IBM job timeout** — a `timeout` kwarg was swallowed by `**kwargs`, so a job
+  stuck behind a backlog blocked forever. It is forwarded to `job.result()`
+  when the runtime accepts it, and an expired wait now re-raises the runtime's
+  `RuntimeJobMaxTimeoutError` with the job id attached — the job keeps running
+  server-side, so the handle is what lets the caller poll or cancel it.
+
+### Added
+- **Braket gate coverage** — `SDG`, `TDG`, `SX`, `P`, `CP`, `RXX`, `RYY`,
+  `RZZ` map to `si`/`ti`/`v`/`phaseshift`/`cphaseshift`/`xx`/`yy`/`zz`, and `U`
+  is emitted as `rz`-`ry`-`rz` (`U3 = e^{-i(phi+lam)/2} RZ(phi) RY(theta)
+  RZ(lam)`). Each was checked against `LocalSimulator`: worst TVD 0.0058
+  against a 0.0500 five-sigma floor.
+- **OpenQASM 2 output** — `CY`, `CCX`, `CSWAP`, `P`, `CP`, `U`, `SX` and
+  `RESET` emit qelib1 statements, and `ISWAP`, `RXX`, `RYY`, `RZZ` expand into
+  exact `u3`/`cx`/`u1`/`s` sequences. Every snippet was round-tripped through
+  Qiskit's OpenQASM 2.0 parser and compared against the gate unitary (max
+  deviation 1e-11).
+- **IonQ JSON coverage** — `CY`, `RXX`, `RYY`, `RZZ` map directly and `SX`
+  emits `v` (IonQ's square-root-of-not; `sx` is not an API gate name). `P`, `U`
+  and `CP` expand into `rz`/`ry`/`zz` sequences, `CCX` into the documented
+  multi-controlled `not` form, and `CSWAP`/`ISWAP` into exact `cnot`/`not` and
+  `swap`/`s`/`cz` decompositions — IonQ v0.3 documents no `ccnot`, `cswap` or
+  `iswap` instruction. `CY` now emits `control`/`target` rather than `targets`.
+  Parity checked by interpreting the emitted JSON back into a unitary (13
+  gates, max deviation 2e-16).
+- **Tests** — 31 new regression tests across the provider adapters, the QASM
+  and IonQ converters, IBM measurement completion, IBM timeout handling and the
+  runner width guard.
+
 ## [0.1.22] — 2026-10-30
 
 ### Added
