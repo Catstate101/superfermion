@@ -251,14 +251,16 @@ jobs:
   # macOS or on ARM, where pyscf does publish wheels. Every row below is a
   # platform pyscf ships a wheel for, so a skip here means the extra broke, not
   # that the platform lacks support. Both macOS architectures are listed because
-  # pyscf publishes them as separate wheels.
+  # pyscf publishes them as separate wheels. The arm64 row names macos-15: the
+  # macos-14 image retires on 2026-11-02, and its brownout windows cancel the job
+  # within a second, before any runner is assigned.
   chemistry-platforms:
     name: pyscf bridge on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
