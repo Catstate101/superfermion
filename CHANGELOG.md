@@ -2,6 +2,138 @@
 
 All notable changes to the Superfermion framework.
 
+## [0.1.22] — 2026-10-30
+
+### Added
+- **Chemistry toolkit** — the 17 modules that were in the tree but in no release
+  join the five published in 0.1.21: active-space selection (MP2 natural
+  orbitals, AVAS, APC, AEGISS, orbital entropy, orbital reduction), mappings and
+  symmetry (Jordan-Wigner, Bravyi-Kitaev, symmetry-conserving BK, Z2 tapering,
+  point-group sectors), solvers (MP2, SQD/QSCI, excited states and QSE,
+  seniority, DMET), determinant-subspace tools, Pauli interop with Qiskit, and
+  FCIDUMP/HDF5 ingest.
+- **`pyscf_bridge` coverage** — restricted and unrestricted orbitals, integrals
+  through `pyscf.ao2mo`, folding of the inactive spin orbitals, and reference
+  occupations for a chosen active space.
+
+### Fixed
+- **OpenQASM 2 parser** — `parse_qasm2` skipped any `qreg`/`qubit` declaration
+  it could not parse and left the DAG at its default width, so later gates were
+  applied to the wrong qubits without an error. Each declaration now either
+  sizes the DAG or returns an error naming the offending line.
+- **State-dimension guard** — `n_qubits` was validated with `1 << n`, which
+  wraps to 1 for `n >= usize::BITS` in a release build and panics in a debug
+  one, so a one-amplitude array was accepted as a 64-qubit state. `checked_dim()`
+  returns `None` instead of relying on the shift.
+- **Logical ops** — `DefaultLogicalOps` returned the caller's DAG unchanged for
+  logical X and Z, which reads as success while the operation is missing. Both
+  now panic via `unimplemented!()` until the insertion is implemented.
+- **QASM fallback reason** — the reason a native QASM parse fell back to the
+  pure-Python one is now thread-local and exposed through module `__getattr__`,
+  so two threads cannot read each other's reason and the documented
+  `bridge._RUST_QASM_FALLBACK_REASON` spelling still works.
+
+### Changed
+- **Tests** — 174 new chemistry tests (parity against analytic references,
+  methods, SCBK, defect regressions), per-thread QASM fallback assertions, and
+  FFI errors checked to arrive in Python as catchable exceptions.
+- **CI** — the wheel lane runs unfiltered: 21 tests deselected by name and an
+  `--ignore` that hid a collection `ImportError` are both gone. pytest is capped
+  below 9 because 9 removed `Function._nodeid`, which pytest-benchmark 5.3 reads
+  while setting up its fixture. New `interop` and `chemistry-platforms` lanes
+  install the frameworks and run the suite for real. `cirq-core` and `flax` are
+  gated off the 3.15 wheel lane: `tensorstore` has no 3.15 wheel, so the install
+  died in a Bazel source build before pytest ran.
+- **Docs** — chemistry toolkit, interop and architecture pages.
+
+## [0.1.21] — 2026-10-27
+
+### Fixed
+- **Benzene/6-31G import** — `_compute_pyscf` replaced the `O(nao^8)`
+  `np.einsum("pi,qj,rk,sl,pqrs->ijkl", ...)` — nao = 66 for benzene/6-31G, which
+  never finished — with `pyscf.ao2mo.full(compact=False)` and a `C^H . h . C` MO
+  transform. `from_coeffs` now scans the non-zeros with `np.argwhere` instead of
+  four nested Python loops. The benzene import went from not finishing (>120 s,
+  killed) to 4.86 s; the (6, 6) Hamiltonian takes 0.10 s.
+- **Active-space guard** — `to_hamiltonian` warns when mapping the full space
+  needs more than 24 qubits, naming `active_space` as the fix. The operator is
+  still returned, which is the documented behaviour.
+- **OpenQASM 2 endianness** — the Rust parser reversed every qubit label to
+  `(n-1-i)`, contradicting the little-endian pass-through used by `to_qasm` and
+  `from_qiskit`, so `to_qasm -> from_qasm` was not an involution for asymmetric
+  circuits. `q[i]` now passes through unchanged at all four sites (gates,
+  reset/barrier, measure qubit, measure cbit), with a Rust regression test.
+- **Bridge exporters** — `to_qasm` raises on unmappable gates instead of
+  silently dropping them (barriers excepted); `to_ionq`, `to_cirq`,
+  `to_pennylane` and `_to_braket` call `_ensure_gates()` so Rust-storage
+  circuits export; the pure-Python QASM fallback is little-endian; `PL_MAP`
+  gains `SX`, `PhaseShift`, `CY`, `ISWAP` and `CSWAP`.
+
+### Changed
+- **Bridge tests** — endianness round-trips through both parsers, the `to_qasm`
+  drop guard, Rust-storage exporters, Cirq's unitary convention, and the new
+  PennyLane ops. The xfail that stood in for the Rust QASM path is now a
+  permanent passing lock.
+
+## [0.1.20] — 2026-10-26
+
+### Added
+- **Update notice** — importing the package checks PyPI at most once a day and
+  prints one line to stderr when a newer release exists. The request runs in a
+  daemon thread with `urllib` imported inside the worker, the answer is cached
+  for 24 h, and the check is silent offline, in CI, under pytest, and whenever
+  `SF_NO_UPDATE_CHECK`, `NO_UPDATE_NOTIFIER` or `SF_OFFLINE` is set. Import cost
+  is unchanged (+5 ms warm, +0.8 ms cold) and returns in 0.0 ms against an
+  endpoint that never answers.
+- **Install guidance** — docs and README state that pip never upgrades an
+  existing install on its own, and that `pip install -U superfermion` is the way
+  forward.
+
+## [0.1.19] — 2026-10-26
+
+### Changed
+- **Dependencies** — `rand` 0.8.5 -> 0.8.6; website `next` 16.2.11 -> 16.4.3,
+  `sharp` 0.34.5 -> 0.35.5, `postcss` 8.4.31 -> 8.5.31, `nanoid`
+  3.3.16 -> 3.3.20, `source-map-js` 1.2.1 -> 1.2.2, `zod` 4.4.3 -> 4.6.7,
+  `undici` 7.28.0 -> 7.30.1. The five transitive pins live in `pnpm.overrides`
+  inside `pnpm-workspace.yaml`, which is where pnpm 11 reads them.
+- **Lint** — the workspace is clean under `cargo clippy --all-targets`, and CI
+  now runs it with `-D warnings` so test and example code cannot drift back.
+  Three lints in the library's own tests were real and are fixed; the four
+  measurement probes keep explicit index loops on purpose and carry a
+  documented file-level allow instead.
+
+### Fixed
+- **`discarded_weight` docstring** — the head clause called it a fraction, which
+  contradicts the body two lines down and the measured 1.79 at bond 16. It is a
+  sum, and a regression test now pins the first line.
+
+## [0.1.18] — 2026-10-26
+
+### Fixed
+- **MPS bond cap** — `blockdiag_exact_split` kept a prefix of `C`'s rows, so when
+  a gate concentrated the state in the lower block and `2 * r_q` exceeded the
+  cap, the rows carrying the mass were dropped while the rank check still
+  passed. Measured on the 16-qubit, 12-layer brickwork at bond 16, it was
+  reported as ordinary truncation: `F(16) = 0.0032` against `F(15) = 0.7889`, a
+  larger cap returning a worse state. Rows are now chosen by measured weight,
+  `F(16)` is 0.8328, and the curve is monotone through bond 64.
+- **`mps_todense` argument check** — passing an IR, the natural mistake after
+  `evolve_mps` hands back a state, failed deep inside the call with an opaque
+  attribute error. It now raises a `TypeError` naming the type it received and
+  the call that does work.
+
+### Changed
+- **MPS diagnostics documented** — `discarded_weight` is a sum and can exceed 1,
+  `fidelity_lower_bound` is clamped so `0.0` only means `sum(eps) >= 1`,
+  `truncation_events` counts steps rather than severity, and the densified
+  vector is not renormalised. Each is stated at the binding with the measured
+  numbers, and a new reference page covers the four quantities, the
+  survivor-norm convention, the policy switch and a bond ladder.
+- **Release CI** — the publish job now requests `contents: read`. Job-level
+  permissions replace the defaults rather than adding to them, so the v0.1.18
+  upload failed at checkout while the other 29 jobs were green.
+
 ## [0.1.17] — 2026-10-25
 
 ### Fixed
