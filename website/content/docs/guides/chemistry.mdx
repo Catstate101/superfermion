@@ -68,6 +68,12 @@ print(symmetric.point_group, symmetric.mo_irreps)
 
 **Symmetry** records the point group and a per-orbital irrep label. Only Abelian groups (C₁, Cs, C₂, C₂v, D₂, D₂h) can be used to filter determinants; a degenerate group such as C₃v or Td is rejected rather than guessed at, because there the irrep label is an index into a representation list rather than a bit pattern.
 
+**Cost of this step.** The two-electron AO-to-MO transform runs through `pyscf.ao2mo`, so it
+costs what a BLAS transform costs instead of the eighth power of the basis size that a naive
+four-index sum costs. Benzene/6-31G — `nao = 66`, 132 spin orbitals — builds in 4 to 5 s and
+reports `E_HF = -230.6235 Ha`. Before 0.1.21 the same call used that naive sum and did not
+finish in practice. What stays expensive at that size is the next step, not this one.
+
 ## Step 2 — Choose the active space
 
 Four selectors ship. They answer different questions, so they are separate functions rather than one switch.
@@ -137,9 +143,15 @@ print("AutoCAS keeps", picked)
 
 One guard fires before the operator is built: mapping the **full** orbital space warns when
 `2 * n_orbitals > 24`. The operator is still returned — the warning points at `active_space`,
-because the Pauli sum grows fast with the orbital count. The message names the case it was
-written for: benzene/6-31G, 132 qubits and on the order of 10^6 terms. Water/6-31G is 13
+because the Pauli sum grows roughly as the eighth power of the orbital count. Water/6-31G is 13
 orbitals, so 26 qubits, and trips the guard; the `active_space=(4, 4)` call below does not.
+
+Measured on the full space, all three on one machine: water 13,000 terms
+in 16 s, ammonia (15 orbitals, 30 qubits) 38,000 in 53 s, methane (17 orbitals, 34 qubits)
+104,000 in 159 s. The warning suggests the `(6, 6)` window it was written for — benzene/6-31G,
+132 qubits — which is orders of magnitude past methane and past what any eigensolver in this
+module can consume. The exact counts move with the geometry and the SCF gauge; the order of
+magnitude and the growth rate do not.
 
 ```python
 from superfermion.chemistry import tapering
