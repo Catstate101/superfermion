@@ -98,6 +98,21 @@ def run(
     # 4. Gate fusion is handled in Rust during simulation
     _caps = executor.capabilities()  # noqa: F841 — validated during dispatch
 
+    # Remote devices advertise a fixed width, and the value used to be thrown
+    # away: a 5-qubit circuit dispatched to a 2-qubit stub device and came back
+    # with ``{'00000': 8}``.  Only enforce this for hardware (simulators size
+    # themselves per run); ``max_qubits <= 0`` means "unknown, do not gate".
+    _max_qubits = int(getattr(_caps, "max_qubits", 0) or 0)
+    if (
+        not getattr(_caps, "is_simulator", True)
+        and _max_qubits > 0
+        and exec_circuit.n_qubits > _max_qubits
+    ):
+        raise ValueError(
+            f"Circuit needs {exec_circuit.n_qubits} qubits but device "
+            f"'{_device_label(device)}' supports at most {_max_qubits}."
+        )
+
     # 5. Resolve tracker (explicit > context > None)
     active_tracker = tracker
     if active_tracker is None:
