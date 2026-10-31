@@ -2,7 +2,7 @@
 
 All notable changes to the Superfermion framework.
 
-## [Unreleased]
+## [0.1.23] — 2026-10-31
 
 ### Fixed
 - **Braket result order** — Braket keys every bitstring with the first measured
