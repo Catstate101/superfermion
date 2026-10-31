@@ -153,34 +153,58 @@ class TestIBMDeviceAdapter:
         qc = MagicMock()
         assert _ensure_measurements(qc) is qc
 
-    def test_normalize_counts_reverses_q0_first_keys(self):
-        """SamplerV2 keys are q0-first (position i = SF qubit i); SF counts
-        are q0-last (qubit q is bit n-1-q), so keys are reversed."""
-        from superfermion.devices.ibm import _normalize_counts_to_sf
+    def test_sampler_keys_already_match_sf_order(self):
+        """SamplerV2 keys need no reversal before reaching SF.
 
-        # x(0) on a real IBM backend returns '10' (q0-first); SF expects '01'
-        assert _normalize_counts_to_sf({"10": 1011, "00": 8, "11": 5}, 2) == {
-            "01": 1011, "00": 8, "11": 5,
-        }
-        # symmetric and single-qubit keys are invariant under reversal
-        assert _normalize_counts_to_sf({"00": 512, "11": 512}, 2) == {
-            "00": 512, "11": 512,
-        }
-        assert _normalize_counts_to_sf({"0": 5, "1": 9}, 1) == {"0": 5, "1": 9}
-        # keys of a different width (multi-register layouts) are untouched
-        assert _normalize_counts_to_sf({"0": 3, "00": 7}, 2) == {"0": 3, "00": 7}
+        ``to_qiskit`` keeps qubit labels unchanged (SF and Qiskit share
+        little-endian q0 = LSB) and ``measure_all`` maps creg[q] <- qubit q,
+        so a key already carries SF qubit q at position n-1-q -- SF's
+        documented q0-last order (results.py). A reversal here compensated for
+        the bridge's n-1-q reversal, which 59f29bc removed; left in place it
+        mirrored every multi-qubit hardware result.
+        """
+        pytest.importorskip("qiskit")
+        from superfermion.bridge import to_qiskit
+        from superfermion.devices.ibm import _ensure_measurements
+        from superfermion.results import RunResult
 
-    def test_execute_normalizes_raw_q0_first_counts(self, bell_circuit):
-        """End-to-end (mocked SamplerV2): raw q0-first counts must reach
-        RunResult in SF q0-last order, so RunResult.expectation and the
-        parameter-shift counts parser read the documented convention."""
+        circ = sf.Circuit(3).x(0)  # SF qubit 0 flipped
+        qc = _ensure_measurements(to_qiskit(circ))
+
+        assert qc.data[0].operation.name == "x"
+        # to_qiskit keeps labels: SF qubit 0 stays Qiskit qubit 0
+        assert qc.find_bit(qc.data[0].qubits[0]).index == 0
+
+        # SF circuits carry n_cbits == n_qubits, so to_qiskit builds a 'c'
+        # register and measure_all adds its own 'meas' one; execute() reads
+        # data.meas, whose keys are indexed by the register, not the circuit.
+        meas_reg = next(r for r in qc.cregs if r.name == "meas")
+        meas = [i for i in qc.data if i.operation.name == "measure"]
+        assert len(meas) == 3
+        for inst in meas:
+            qubit = qc.find_bit(inst.qubits[0]).index
+            assert inst.clbits[0] in meas_reg
+            assert inst.clbits[0] == meas_reg[qubit]  # creg[q] <- qubit q
+
+        # So q0=1 arrives as key '001' (leftmost char is q2). SF's q0-last
+        # parser reads the rightmost char as q0: the two already agree, and
+        # reversing '001' -> '100' would flip the sign of <Z0>.
+        res = RunResult(counts={"001": 800, "000": 200}, shots=1000)
+        assert res.expectation([([3, 0], 1.0, 0.0)]) == pytest.approx(-0.6)
+
+    def test_execute_preserves_sampler_counts_order(self, bell_circuit):
+        """Raw SamplerV2 counts must reach RunResult unchanged.
+
+        A reversal here mirrors every multi-qubit hardware result; the
+        q0-last parser is expected to agree with the key as delivered.
+        """
         pytest.importorskip("qiskit_ibm_runtime")
         from superfermion.devices.ibm import IBMDeviceExecutor
 
         mock_service = MagicMock()
         mock_pub = MagicMock()
-        # q0-first raw counts as returned by SamplerV2 for x(0)+noise
-        mock_pub.data.meas.get_counts.return_value = {"10": 700, "00": 300}
+        # real SamplerV2 counts for x(0): q0 is the rightmost character
+        mock_pub.data.meas.get_counts.return_value = {"01": 700, "00": 300}
         mock_result = MagicMock()
         mock_result.__getitem__.return_value = mock_pub
         mock_sampler = MagicMock()
@@ -199,6 +223,7 @@ class TestIBMDeviceAdapter:
         assert result.counts == {"01": 700, "00": 300}
         # q0-last parser: <Z0> = P('00') - P('01') = 0.3 - 0.7 = -0.4
         assert result.expectation([([3, 0], 1.0, 0.0)]) == pytest.approx(-0.4)
+        assert "job_id" in result.metadata
 
     def test_list_devices_returns_sf_device_info(self):
         """list_devices() maps account backends to SF-style DeviceInfo."""
@@ -267,6 +292,36 @@ class TestIonQDeviceAdapter:
         ionq = IonQDevice()
         with pytest.raises(ValueError, match="requires an api_key"):
             ionq("ionq.aria-1")
+
+    def test_histogram_is_unwrapped_and_reordered(self):
+        """The adapter used to store the whole /results document as counts."""
+        from superfermion.devices.ionq import _extract_ionq_counts
+
+        payload = {
+            "id": "abc",
+            "status": "completed",
+            "shots": 40,
+            "histogram": {"0": 10, "3": 30},
+        }
+        assert _extract_ionq_counts(payload, shots=40, n_qubits=2) == {
+            "00": 10, "11": 30,
+        }
+        # 2 = '10' with q0 leftmost -> q0=1, q1=0 -> SF '01'
+        assert _extract_ionq_counts({"histogram": {"2": 5}}, 5, 2) == {"01": 5}
+
+    def test_probabilities_are_scaled_to_shots(self):
+        from superfermion.devices.ionq import _extract_ionq_counts
+
+        counts = _extract_ionq_counts(
+            {"probabilities": {"0": 0.25, "1": 0.75}}, shots=400, n_qubits=1,
+        )
+        assert counts == {"0": 100, "1": 300}
+
+    def test_unparseable_payload_raises(self):
+        from superfermion.devices.ionq import _extract_ionq_counts
+
+        with pytest.raises(RuntimeError, match="Could not parse IonQ result"):
+            _extract_ionq_counts({"id": "abc", "status": "completed"}, 10, 2)
 
 
 class TestBraketDeviceAdapter:
@@ -357,6 +412,45 @@ class TestBraketDeviceAdapter:
         assert infos[1].n_qubits == -1  # graceful fallback
         assert infos[1].status == "ONLINE"
 
+    def test_counts_are_flipped_into_sf_order(self):
+        """Braket puts q0 leftmost; SF puts q0 last."""
+        from superfermion.devices.braket import _braket_counts_to_sf
+
+        assert _braket_counts_to_sf({"001": 7}) == {"100": 7}
+        assert _braket_counts_to_sf({"1": 7}) == {"1": 7}
+
+    def test_untouched_qubits_are_scattered_back(self):
+        """Braket drops untouched qubits from the key; they must be restored."""
+        from superfermion.devices.braket import _braket_counts_to_sf
+
+        # 3-qubit run that only touched q0 and q2, key '10' = q0:1, q2:0
+        counts = _braket_counts_to_sf({"10": 4}, width=3, qubits=[0, 2])
+        assert counts == {"001": 4}
+        # full-width case still behaves like a plain reversal
+        assert _braket_counts_to_sf({"001": 2}, width=3, qubits=[0, 1, 2]) == {"100": 2}
+
+    def test_reset_is_refused_not_dropped(self):
+        pytest.importorskip("braket")
+        from superfermion.devices.braket import _to_braket
+
+        circuit = sf.Circuit(1)
+        circuit.x(0).reset(0)
+        with pytest.raises(ValueError, match="RESET"):
+            _to_braket(circuit)
+
+    def test_recently_added_gate_names_map(self):
+        """SDG/TDG/SX/P/CP/RXX/RYY/RZZ/U used to raise 'Cannot map gate'."""
+        pytest.importorskip("braket")
+        from superfermion.devices.braket import _to_braket
+
+        circuit = sf.Circuit(2)
+        circuit.sdg(0).tdg(1).sx(0).p(0.4, 0)
+        circuit.cp(0.7, 0, 1).rxx(0.3, 0, 1).ryy(0.3, 0, 1).rzz(0.3, 0, 1)
+        circuit.u3(0.3, 0.2, 0.1, 1)
+
+        braket_circuit = _to_braket(circuit)
+        assert len(braket_circuit.instructions) >= 9
+
 
 class TestAdapterProtocolCompliance:
     @pytest.mark.parametrize(
@@ -395,3 +489,158 @@ class TestAdapterProtocolCompliance:
         mock_executor.execute.assert_called_once()
         assert result.counts == {"00": 500, "11": 500}
         assert result.shots == 1000
+
+
+class TestIBMMeasurementCompletion:
+    def test_partial_measurement_is_completed(self):
+        """Measuring one qubit used to leave the others out of the counts."""
+        pytest.importorskip("qiskit")
+        from superfermion.bridge import to_qiskit
+        from superfermion.devices.ibm import _ensure_measurements
+
+        circuit = sf.Circuit(3)
+        circuit.measure(0)
+        out = _ensure_measurements(to_qiskit(circuit))
+
+        measured = {
+            out.find_bit(inst.qubits[0]).index
+            for inst in out.data
+            if inst.operation.name == "measure"
+        }
+        assert measured == {0, 1, 2}
+        assert any(reg.name == "meas" for reg in out.cregs)
+
+    def test_circuit_without_measurement_gets_measure_all(self):
+        pytest.importorskip("qiskit")
+        from superfermion.bridge import to_qiskit
+        from superfermion.devices.ibm import _ensure_measurements
+
+        out = _ensure_measurements(to_qiskit(sf.Circuit(2)))
+        measured = {
+            out.find_bit(inst.qubits[0]).index
+            for inst in out.data
+            if inst.operation.name == "measure"
+        }
+        assert measured == {0, 1}
+
+    def test_capabilities_reports_backend_width(self):
+        import types
+
+        from superfermion.devices.ibm import IBMDeviceExecutor
+
+        service = MagicMock()
+        service.backend.return_value = types.SimpleNamespace(num_qubits=156)
+        caps = IBMDeviceExecutor(service, "ibm_x").capabilities()
+        assert caps.max_qubits == 156
+        assert caps.is_simulator is False
+
+    def test_capabilities_falls_back_offline(self):
+        from superfermion.devices.ibm import IBMDeviceExecutor
+
+        service = MagicMock()
+        service.backend.side_effect = RuntimeError("no network")
+        assert IBMDeviceExecutor(service, "ibm_x").capabilities().max_qubits == 127
+
+
+class _StubDevice:
+    def __init__(self, max_qubits, is_simulator):
+        self._max_qubits = max_qubits
+        self._is_simulator = is_simulator
+        self.calls = 0
+
+    def capabilities(self):
+        return sf.DeviceCapabilities(
+            max_qubits=self._max_qubits, is_simulator=self._is_simulator)
+
+    def execute(self, circuit, shots=8, **kwargs):
+        self.calls += 1
+        return sf.RunResult(counts={"00000": shots}, shots=shots)
+
+
+class TestRunnerDeviceWidthGuard:
+    def test_hardware_width_is_enforced(self):
+        """A 5-qubit circuit reached a 2-qubit device and returned counts."""
+        device = _StubDevice(max_qubits=2, is_simulator=False)
+        with pytest.raises(ValueError, match="supports at most 2"):
+            sf.run(sf.Circuit(5), device=device, shots=8)
+        assert device.calls == 0
+
+    def test_simulator_is_not_gated(self):
+        device = _StubDevice(max_qubits=2, is_simulator=True)
+        sf.run(sf.Circuit(5), device=device, shots=8)
+        assert device.calls == 1
+
+    def test_unknown_width_is_not_gated(self):
+        device = _StubDevice(max_qubits=0, is_simulator=False)
+        sf.run(sf.Circuit(5), device=device, shots=8)
+        assert device.calls == 1
+
+
+class TestIBMTimeout:
+    """The runtime wait must honour ``timeout=`` without losing the job id."""
+
+    @staticmethod
+    def _executor():
+        from superfermion.devices.ibm import IBMDeviceExecutor
+
+        service = MagicMock()
+        service.backend.return_value = MagicMock()
+        return IBMDeviceExecutor(service, "ibm_fez")
+
+    @staticmethod
+    def _job(result=None, side_effect=None, job_id="job-123"):
+        job = MagicMock()
+        job.job_id.return_value = job_id
+        if side_effect is not None:
+            job.result.side_effect = side_effect
+        else:
+            job.result.return_value = result
+        return job
+
+    @staticmethod
+    def _pub(counts=None):
+        pub = MagicMock()
+        pub.data.meas.get_counts.return_value = counts or {"0": 8}
+        remote = MagicMock()
+        remote.__getitem__.return_value = pub
+        return remote
+
+    def _execute(self, job, **kwargs):
+        sampler = MagicMock()
+        sampler.run.return_value = job
+        with patch("superfermion.bridge.to_qiskit", return_value=MagicMock()):
+            with patch(
+                "qiskit.transpiler.preset_passmanagers.generate_preset_pass_manager",
+            ) as mock_pm:
+                mock_pm.return_value.run.return_value = MagicMock()
+                with patch("qiskit_ibm_runtime.SamplerV2", return_value=sampler):
+                    return self._executor().execute(sf.Circuit(1), shots=8, **kwargs)
+
+    def test_timeout_is_forwarded_to_result(self):
+        pytest.importorskip("qiskit")
+        pytest.importorskip("qiskit_ibm_runtime")
+
+        job = self._job(result=self._pub({"0": 8}))
+        self._execute(job, timeout=0.01)
+        job.result.assert_called_once_with(timeout=0.01)
+
+    def test_expired_timeout_keeps_the_job_id(self):
+        pytest.importorskip("qiskit")
+        pytest.importorskip("qiskit_ibm_runtime")
+
+        from qiskit_ibm_runtime.exceptions import RuntimeJobMaxTimeoutError
+
+        job = self._job(side_effect=RuntimeJobMaxTimeoutError("waited too long"))
+        with pytest.raises(RuntimeJobMaxTimeoutError, match="job-123"):
+            self._execute(job, timeout=0.01)
+
+    def test_runtime_without_timeout_kwarg_retries_plain(self):
+        pytest.importorskip("qiskit")
+        pytest.importorskip("qiskit_ibm_runtime")
+
+        remote = self._pub({"0": 8})
+        job = self._job(side_effect=[TypeError("unexpected keyword"), remote])
+        result = self._execute(job, timeout=0.01)
+        assert result.counts == {"0": 8}
+        assert job.result.call_count == 2
+        assert job.result.call_args_list[1].kwargs == {}

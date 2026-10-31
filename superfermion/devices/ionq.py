@@ -18,6 +18,58 @@ from typing import Any, Optional
 from superfermion.devices import DeviceCapabilities
 
 
+def _ionq_key_to_sf(key: Any, n_qubits: int) -> str:
+    """Convert one IonQ result key into an SF-order bitstring.
+
+    IonQ's ``/results`` payload keys are integers whose binary form has
+    qubit 0 as the most significant bit, so ``3`` on 3 qubits means
+    ``q0=0, q1=1, q2=1``.  SF stores q0 last (see ``results.py``).
+    Strings that are already ``n_qubits`` wide are treated as bitstrings in
+    the same q0-first convention.
+    """
+    text = str(key)
+    if len(text) == n_qubits and set(text) <= {"0", "1"}:
+        bits = text
+    else:
+        bits = format(int(text), f"0{n_qubits}b")
+    return bits[::-1]
+
+
+def _extract_ionq_counts(payload: Any, shots: int, n_qubits: int) -> dict:
+    """Turn an IonQ ``/results`` document into SF counts.
+
+    The adapter used to hand the entire JSON document to ``RunResult`` as
+    ``counts``, so ``result.counts`` held ``{'id','status','histogram',...}``
+    and ``expectation()`` died with ``TypeError: unsupported operand type(s)
+    for +: 'int' and 'str'``.  Accept the documented ``histogram``, fall back
+    to ``probabilities`` scaled by the submitted shots, and normalise the
+    little/big-endian difference at the same time.
+    """
+    if isinstance(payload, dict) and "histogram" in payload:
+        source = payload.get("histogram") or {}
+    elif isinstance(payload, dict) and "probabilities" in payload:
+        probs = payload.get("probabilities") or {}
+        total = sum(float(v) for v in probs.values()) or 1.0
+        source = {k: float(v) / total * shots for k, v in probs.items()}
+    elif isinstance(payload, dict) and payload and all(
+        isinstance(v, (int, float)) for v in payload.values()
+    ):
+        # Already a flat counts map (older API or a mock).
+        source = payload
+    else:
+        keys = list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
+        raise RuntimeError(
+            f"Could not parse IonQ result: expected a 'histogram' or "
+            f"'probabilities' field, got {keys}"
+        )
+
+    counts: dict = {}
+    for key, value in source.items():
+        sf_key = _ionq_key_to_sf(key, n_qubits)
+        counts[sf_key] = counts.get(sf_key, 0) + int(round(float(value)))
+    return counts
+
+
 class IonQDeviceExecutor:
     """Executor bound to a specific IonQ target."""
 
@@ -58,7 +110,8 @@ class IonQDeviceExecutor:
         job_id = resp.json()["id"]
 
         timeout = kwargs.pop("timeout", 600)
-        counts = self._poll(job_id, headers, timeout)
+        payload = self._poll(job_id, headers, timeout)
+        counts = _extract_ionq_counts(payload, shots, circuit.n_qubits)
 
         return RunResult(
             counts=counts,

@@ -161,7 +161,9 @@ jobs:
 
   build-macos:
     name: macOS wheels (universal2)
-    runs-on: macos-14
+    # macos-14 retires on 2026-11-02; macos-15 is the same arm64 architecture and
+    # the label GitHub's retirement notice points at.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 

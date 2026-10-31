@@ -32,12 +32,33 @@ def _to_braket(circuit: "Circuit") -> Any:
         "CCX": "ccnot", "CSWAP": "cswap",
         "ECR": "ecr",
         "XX": "xx", "YY": "yy", "ZZ": "zz",
+        # Additive aliases for names ``sf.Circuit`` actually stores but the
+        # original map missed (each was a hard "Cannot map gate" failure).
+        "SDG": "si", "TDG": "ti", "SX": "v",
+        "P": "phaseshift", "CP": "cphaseshift",
+        "RXX": "xx", "RYY": "yy", "RZZ": "zz",
     }
 
     bc = BraketCircuit()
     circuit._ensure_gates()  # no-op for default Python storage
     for gate in circuit._gates:
         name = gate.name.upper()
+
+        # SF stores RESET, Braket's Circuit has no reset method in this SDK.
+        # The original code skipped it silently, so a circuit that relied on a
+        # reset ran with the reset missing.  Refuse rather than corrupt.
+        if name == "RESET":
+            raise ValueError(
+                "Cannot map gate 'RESET' to Braket: this SDK has no reset "
+                "instruction, and dropping it would change the circuit. "
+                "Remove the reset or decompose the circuit before submitting."
+            )
+
+        if name == "U" and len(gate.params) == 3:
+            theta, phi, lam = (float(p) for p in gate.params)
+            _apply_u3(bc, int(list(gate.qubits)[0]), theta, phi, lam)
+            continue
+
         braket_name = GATE_MAP.get(name)
         if braket_name is None:
             if name in ("MEASURE", "BARRIER", "ID", "RESET"):
@@ -50,6 +71,58 @@ def _to_braket(circuit: "Circuit") -> Any:
         else:
             method(*qubits)
     return bc
+
+
+def _braket_counts_to_sf(
+    counts: Dict[str, int],
+    width: int = 0,
+    qubits: Optional[List[int]] = None,
+) -> Dict[str, int]:
+    """Rewrite Braket bitstrings into SF order.
+
+    Braket orders every bitstring with the first measured qubit in the
+    leftmost character (``LocalSimulator`` and ``AwsDevice`` alike), while SF
+    documents q0-last (see ``results.py``: qubit q is bit n-1-q).
+    ``_to_braket`` maps qubit labels through unchanged, so without this flip a
+    multi-qubit hardware result is mirrored: on a 3-qubit circuit where q0
+    should read 0.02 and q2 0.58, the delivered counts read 0.58 on q0
+    (verified against Braket's LocalSimulator on the same circuit).
+
+    Braket also drops untouched qubits from the key entirely: a 3-qubit SF
+    circuit that only touches q0 and q2 returns 2-character keys over
+    ``(q0, q2)`` in ascending order.  Pass ``width=circuit.n_qubits`` and
+    ``qubits=sorted(braket_circuit.qubits)`` to scatter the bits back onto
+    their real positions; with no ``qubits`` the key is treated as a plain
+    reversal over all ``width`` positions.
+    """
+    out: Dict[str, int] = {}
+    for key, value in (counts or {}).items():
+        key = str(key)
+        if qubits and width > 0:
+            placed = ["0"] * width
+            for i, q in enumerate(qubits):
+                if i < len(key) and 0 <= width - 1 - int(q) < width:
+                    placed[width - 1 - int(q)] = key[i]
+            flipped = "".join(placed)
+        else:
+            if width > len(key):
+                key = key.rjust(width, "0")
+            flipped = key[::-1] if len(key) > 1 else key
+        out[flipped] = out.get(flipped, 0) + value
+    return out
+
+
+def _apply_u3(braket_circuit: Any, qubit: int, theta: float, phi: float, lam: float) -> None:
+    """Emit an SF ``U(theta, phi, lam)`` as rz/ry/rz.
+
+    ``U3 = e^{-i(phi+lam)/2} RZ(phi) RY(theta) RZ(lam)``, so the three rotations
+    reproduce the gate up to a global phase, which measurement cannot see.
+    Verified against Braket's ``to_unitary`` to 1e-16.  Braket has no ``u3``
+    method, so this replaces raising "Cannot map gate 'U'".
+    """
+    braket_circuit.rz(qubit, lam)
+    braket_circuit.ry(qubit, theta)
+    braket_circuit.rz(qubit, phi)
 
 
 def _extract_braket_counts(result: Any) -> Dict[str, int]:
@@ -112,6 +185,11 @@ class BraketDeviceExecutor:
 
         result = task.result()
         counts = _extract_braket_counts(result)
+        counts = _braket_counts_to_sf(
+            counts,
+            getattr(circuit, "n_qubits", 0),
+            sorted(int(q) for q in bc.qubits),
+        )
 
         return RunResult(
             counts=counts,

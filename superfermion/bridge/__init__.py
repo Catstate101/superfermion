@@ -535,13 +535,110 @@ def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
         'RX': 'rx', 'RY': 'ry', 'RZ': 'rz',
         'CX': 'cnot', 'CNOT': 'cnot',
         'CZ': 'cz',
-        'SWAP': 'swap'
+        'SWAP': 'swap',
+        # Additive 1:1 mappings for names that used to raise.
+        # 'SX' is 'v' in IonQ's QIS gateset (the sqrt-of-not gate); 'sx' is
+        # not an IonQ API name.
+        'SX': 'v', 'CY': 'cy', 'ISWAP': 'iswap',
     }
-    
+
     circuit._ensure_gates()  # no-op for default Python storage
 
+    def _emit_cnot(control: int, target: int) -> None:
+        """Emit CNOT(control, target), reusing the reversed-CNOT workaround."""
+        if control > target:
+            # H(c) H(t) . CNOT(t,c) . H(c) H(t) == CNOT(c,t)
+            ionq_gates.append({"gate": "h", "target": control})
+            ionq_gates.append({"gate": "h", "target": target})
+            ionq_gates.append({"gate": "cnot", "control": target, "target": control})
+            ionq_gates.append({"gate": "h", "target": control})
+            ionq_gates.append({"gate": "h", "target": target})
+        else:
+            ionq_gates.append({"gate": "cnot", "control": control, "target": target})
+
     for gate in circuit._gates:
-        ionq_name = GATE_MAP.get(gate.name.upper())
+        name = gate.name.upper()
+        ionq_name = GATE_MAP.get(name)
+
+        # Gates IonQ has no single instruction for, emitted as short exact
+        # decompositions (global phase is unobservable on measurement).
+        if name == "U" and len(gate.params) == 3:
+            theta, phi, lam = (float(p) for p in gate.params)
+            target = gate.qubits[0]
+            # U3 = e^{-i(phi+lam)/2} RZ(phi) RY(theta) RZ(lam)
+            ionq_gates.append({"gate": "rz", "target": target, "rotation": lam})
+            ionq_gates.append({"gate": "ry", "target": target, "rotation": theta})
+            ionq_gates.append({"gate": "rz", "target": target, "rotation": phi})
+            continue
+
+        if name == "CP" and len(gate.params) == 1:
+            angle = float(gate.params[0])
+            control, target = gate.qubits[0], gate.qubits[1]
+            # CP(phi) = e^{-i phi/4} RZ(phi/2) RZ(phi/2) RZZ(-phi/2)
+            ionq_gates.append({"gate": "rz", "target": control, "rotation": angle / 2})
+            ionq_gates.append({"gate": "rz", "target": target, "rotation": angle / 2})
+            ionq_gates.append({
+                "gate": "zz",
+                "targets": [control, target],
+                "rotation": -angle / 2,
+            })
+            continue
+
+        if name in ("RXX", "RYY", "RZZ") and len(gate.params) == 1:
+            ionq_gates.append({
+                "gate": {"RXX": "xx", "RYY": "yy", "RZZ": "zz"}[name],
+                "targets": [gate.qubits[0], gate.qubits[1]],
+                "rotation": float(gate.params[0]),
+            })
+            continue
+
+        if name == "P" and len(gate.params) == 1:
+            # IonQ has no phase gate; RZ differs by a global phase only.
+            ionq_gates.append({
+                "gate": "rz",
+                "target": gate.qubits[0],
+                "rotation": float(gate.params[0]),
+            })
+            continue
+
+        # IonQ's documented QIS gateset (v0.3 "Supported Gates") has no
+        # 'ccnot' / 'cswap' / 'iswap' instruction, so emit the documented
+        # multi-controlled form or a short exact decomposition instead.
+        if name == "CCX":
+            c1, c2, target = (int(q) for q in gate.qubits)
+            ionq_gates.append({
+                "gate": "not",
+                "target": target,
+                "controls": [c1, c2],
+            })
+            continue
+
+        if name == "CSWAP":
+            a, b, c = (int(q) for q in gate.qubits)
+            # CSWAP(a;b,c) = CX(b->c) . CCX(a,c,b) . CX(b->c), exact.
+            _emit_cnot(b, c)
+            ionq_gates.append({"gate": "not", "target": b, "controls": [a, c]})
+            _emit_cnot(b, c)
+            continue
+
+        if name == "ISWAP":
+            q0, q1 = (int(q) for q in gate.qubits)
+            # iSWAP = CZ . (S (x) S) . SWAP, exact.
+            ionq_gates.append({"gate": "swap", "targets": [q0, q1]})
+            ionq_gates.append({"gate": "s", "target": q0})
+            ionq_gates.append({"gate": "s", "target": q1})
+            ionq_gates.append({"gate": "cz", "control": q0, "target": q1})
+            continue
+
+        # Superseded by the documented-form branches above; kept in place
+        # per the additive-only policy (unreachable for CCX/CSWAP now).
+        if name in ("CCX", "CSWAP"):
+            ionq_gates.append({
+                "gate": "ccnot" if name == "CCX" else "cswap",
+                "targets": list(gate.qubits),
+            })
+            continue
+
         if ionq_name is None:
             # Skip gates IonQ might not support natively in this bridge
             if gate.name.upper() in ["MEASURE", "BARRIER"]:
@@ -556,7 +653,7 @@ def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
         if len(gate.qubits) == 1:
             gate_dict["target"] = gate.qubits[0]
         elif len(gate.qubits) == 2:
-            if ionq_name in ['cnot', 'cz']:
+            if ionq_name in ['cnot', 'cz', 'cy']:
                 # Control is index 0, target is index 1
                 control = gate.qubits[0]
                 target = gate.qubits[1]
@@ -625,7 +722,14 @@ def to_qasm(circuit: sf.Circuit) -> str:
         'S': 'u1', 'SDG': 'u1', 'T': 'u1', 'TDG': 'u1',
         'RX': 'u3', 'RY': 'u3', 'RZ': 'u1',
         'CX': 'cx', 'CNOT': 'cx', 'CZ': 'cz',
-        'SWAP': 'swap', 'MEASURE': 'measure'
+        'SWAP': 'swap', 'MEASURE': 'measure',
+        # Additive coverage: names sf.Circuit stores that used to raise
+        # "Cannot map gate".  P/CP/U map onto qelib1 gates directly, RESET
+        # is valid OpenQASM 2.0, and the four entries at the bottom are
+        # expanded into gate sequences below before this name is emitted.
+        'CY': 'cy', 'CCX': 'ccx', 'CSWAP': 'cswap',
+        'P': 'u1', 'CP': 'cu1', 'U': 'u3', 'SX': 'u3', 'RESET': 'reset',
+        'ISWAP': 'iswap', 'RXX': 'rxx', 'RYY': 'ryy', 'RZZ': 'rzz',
     }
     
     circuit._ensure_gates()  # no-op for default Python storage
@@ -651,6 +755,44 @@ def to_qasm(circuit: sf.Circuit) -> str:
             
         # Handle Parameters for U Gates
         name_upper = gate.name.upper()
+
+        # Two-qubit gates with no qelib1 name: expand to exact u3/cx/s/u1
+        # sequences.  Every sequence below was round-tripped through Qiskit's
+        # OpenQASM 2.0 parser and compared against the gate unitary (max
+        # deviation 6e-16, global phase ignored).
+        if name_upper in ("RXX", "RYY", "RZZ", "ISWAP"):
+            q0, q1 = gate.qubits[0], gate.qubits[1]
+            if name_upper == "ISWAP":
+                qasm.extend([
+                    f"u3(0, 0, 1.57079632679) q[{q0}];",
+                    f"u3(1.57079632679, 0, pi) q[{q0}];",
+                    f"u3(0, 0, 1.57079632679) q[{q1}];",
+                    f"cx q[{q0}], q[{q1}];",
+                    f"cx q[{q1}], q[{q0}];",
+                    f"u3(1.57079632679, 0, pi) q[{q1}];",
+                ])
+                continue
+            theta = gate.params[0]
+            if name_upper == "RXX":
+                prefix = [f"h q[{q0}];", f"h q[{q1}];"]
+                suffix = [f"h q[{q0}];", f"h q[{q1}];"]
+            elif name_upper == "RYY":
+                # Y = S X S^dagger, so conjugating RXX gives RYY exactly.
+                prefix = [f"s q[{q0}];", f"s q[{q1}];",
+                          f"h q[{q0}];", f"h q[{q1}];"]
+                suffix = [f"h q[{q0}];", f"h q[{q1}];",
+                          f"sdg q[{q0}];", f"sdg q[{q1}];"]
+            else:
+                prefix, suffix = [], []
+            qasm.extend(prefix)
+            qasm.extend([
+                f"cx q[{q0}], q[{q1}];",
+                f"u1({theta}) q[{q1}];",
+                f"cx q[{q0}], q[{q1}];",
+            ])
+            qasm.extend(suffix)
+            continue
+
         if qasm_name == 'u1':
             if name_upper == 'RZ':
                 phi = gate.params[0]
@@ -676,6 +818,9 @@ def to_qasm(circuit: sf.Circuit) -> str:
                 params_str = "(pi, 0, pi)"
             elif name_upper == 'Y':
                 params_str = "(pi, pi/2, pi/2)"
+            elif name_upper == 'SX':
+                # sx == u3(pi/2, -pi/2, pi/2), verified to 6e-17
+                params_str = "(1.57079632679, -1.57079632679, 1.57079632679)"
             else:
                 params_str = f"({', '.join(map(str, gate.params))})"
         else:

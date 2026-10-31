@@ -447,7 +447,7 @@ class TestToQasmDropGuard:
         bridge = pytest.importorskip("superfermion.bridge")
         c = sf.Circuit(2)
         c.h(0)
-        c.iswap(0, 1)  # ISWAP is not in to_qasm's GATE_MAP
+        c.ecr(0, 1)  # ECR has no qelib1 name
         with pytest.raises(ValueError, match="OpenQASM"):
             bridge.to_qasm(c)
 
@@ -531,3 +531,146 @@ class TestPennyLaneAdditiveOps:
         tape = make_qscript(ansatz)()
         c = bridge.from_pennylane(tape, n_qubits=2)
         assert c.gate_count == 3
+
+
+class TestQASMAdditiveCoverage:
+    """Gate names sf.Circuit stores that to_qasm used to reject."""
+
+    def test_qelib1_names_are_emitted(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(2)
+        c.cy(0, 1).cp(0.7, 0, 1).sx(0).p(0.4, 1)
+
+        text = bridge.to_qasm(c)
+        assert "cy q[0], q[1];" in text
+        assert "cu1(0.7) q[0], q[1];" in text
+        assert "u1(0.4) q[1];" in text
+        assert "u3(1.57079632679, -1.57079632679, 1.57079632679) q[0];" in text
+
+    def test_three_qubit_gates_are_emitted(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(3)
+        c.ccx(0, 1, 2).cswap(0, 1, 2)
+
+        text = bridge.to_qasm(c)
+        assert "ccx q[0], q[1], q[2];" in text
+        assert "cswap q[0], q[1], q[2];" in text
+
+    def test_reset_is_emitted_not_dropped(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(1)
+        c.x(0).reset(0)
+        assert "reset q[0];" in bridge.to_qasm(c)
+
+    def test_rotation_gates_expand_to_cx_sequences(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(2)
+        c.rzz(0.5, 0, 1)
+        text = bridge.to_qasm(c)
+        assert "cx q[0], q[1];" in text
+        assert "u1(0.5) q[1];" in text
+
+        c = Circuit(2)
+        c.ryy(0.5, 0, 1)
+        text = bridge.to_qasm(c)
+        assert "s q[0];" in text and "sdg q[1];" in text
+
+        c = Circuit(2)
+        c.iswap(0, 1)
+        gate_lines = [
+            ln for ln in bridge.to_qasm(c).splitlines()
+            if ln.startswith(("u3", "cx"))
+        ]
+        assert len(gate_lines) == 6
+
+    def test_u_gate_keeps_its_three_parameters(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(1)
+        c.u3(0.1, 0.2, 0.3, 0)
+        assert "u3(0.1, 0.2, 0.3) q[0];" in bridge.to_qasm(c)
+
+
+class TestIonQAdditiveCoverage:
+    """Converters for the IonQ JSON dialect: control/target vs targets."""
+
+    def test_controlled_y_uses_control_and_target(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(2)
+        c.cy(0, 1)
+        ops = bridge.to_ionq(c)
+        assert ops == [{"gate": "cy", "control": 0, "target": 1}]
+
+    def test_u3_decomposes_into_rz_ry_rz(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(1)
+        c.u3(0.4, 0.5, 0.6, 0)
+        ops = bridge.to_ionq(c)
+        assert [op["gate"] for op in ops] == ["rz", "ry", "rz"]
+        assert [op["rotation"] for op in ops] == pytest.approx([0.6, 0.4, 0.5])
+
+    def test_cp_decomposes_into_rz_and_zz(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(2)
+        c.cp(0.8, 0, 1)
+        ops = bridge.to_ionq(c)
+        assert [op["gate"] for op in ops] == ["rz", "rz", "zz"]
+        assert ops[2]["rotation"] == pytest.approx(-0.4)
+        assert ops[2]["targets"] == [0, 1]
+
+    def test_two_qubit_rotations_carry_rotation(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(2)
+        c.rxx(0.9, 0, 1).ryy(0.9, 0, 1).rzz(0.9, 0, 1)
+        ops = bridge.to_ionq(c)
+        assert [op["gate"] for op in ops] == ["xx", "yy", "zz"]
+        assert all(op["rotation"] == pytest.approx(0.9) for op in ops)
+
+    def test_phase_gate_becomes_rz(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(1)
+        c.p(0.35, 0)
+        assert bridge.to_ionq(c) == [
+            {"gate": "rz", "target": 0, "rotation": 0.35}]
+
+    def test_three_qubit_gates_use_documented_forms(self):
+        # IonQ v0.3 documents Toffoli as a multi-controlled 'not'; 'ccnot'
+        # and 'cswap' are not API gate names.
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(3)
+        c.ccx(0, 1, 2).cswap(0, 1, 2)
+        ops = bridge.to_ionq(c)
+        assert ops == [
+            {"gate": "not", "target": 2, "controls": [0, 1]},
+            {"gate": "cnot", "control": 1, "target": 2},
+            {"gate": "not", "target": 1, "controls": [0, 2]},
+            {"gate": "cnot", "control": 1, "target": 2},
+        ]
+
+    def test_sqrt_x_maps_to_v(self):
+        # IonQ's square-root-of-not gate is 'v'; 'sx' is not an API name.
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(1)
+        c.sx(0)
+        assert bridge.to_ionq(c) == [{"gate": "v", "target": 0}]
+
+    def test_iswap_decomposes_into_documented_gates(self):
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(2)
+        c.iswap(0, 1)
+        assert bridge.to_ionq(c) == [
+            {"gate": "swap", "targets": [0, 1]},
+            {"gate": "s", "target": 0},
+            {"gate": "s", "target": 1},
+            {"gate": "cz", "control": 0, "target": 1},
+        ]
+
+    def test_reversed_cswap_cnots_keep_the_workaround(self):
+        # b > c forces the H-sandwich path; CSWAP(c;b,a) is still exact.
+        bridge = pytest.importorskip("superfermion.bridge")
+        c = Circuit(3)
+        c.cswap(2, 1, 0)
+        ops = bridge.to_ionq(c)
+        assert [op["gate"] for op in ops] == [
+            "h", "h", "cnot", "h", "h", "not", "h", "h", "cnot", "h", "h"]
+        assert ops[2] == {"gate": "cnot", "control": 0, "target": 1}
+        assert ops[5] == {"gate": "not", "target": 1, "controls": [2, 0]}
