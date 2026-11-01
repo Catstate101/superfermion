@@ -30,15 +30,16 @@ Application modules (importable but not promoted to ``sf.*``):
     superfermion.viz          — circuit visualization
 """
 
-__version__ = "0.1.23"
+__version__ = "0.1.24"
 
 # ── Core imports (only numpy required) ────────────────────────────────
 from superfermion.circuit import Circuit
-from superfermion.runner import run, simulate
 from superfermion.compiler.manager import compile
 from superfermion.parameters import param
-from superfermion.results import RunResult
 from superfermion.prepared import PreparedCircuit, prepare
+from superfermion.results import RunResult
+from superfermion.runner import run, simulate
+
 try:
     from superfermion._sf_core import State as _RustState
 except ImportError as e:
@@ -74,6 +75,7 @@ _RustState.qfim = _state_qfim_with_check
 State = _RustState
 from superfermion._sf_core import DiagonalObservable
 
+
 # SUP-22: expose classical-shadow utilities on State (pure states only; the
 # snapshots are sampled from the exact statevector returned by numpy()).
 def _state_classical_shadow(self, shots, seed=None):
@@ -90,40 +92,40 @@ def _state_shadow_expval(self, observable, shots=1000, seed=None, k=1):
 
 _RustState.classical_shadow = _state_classical_shadow
 _RustState.shadow_expval = _state_shadow_expval
-from superfermion.utils.exceptions import MethodError
-
-from superfermion.devices import (
-    DeviceExecutor, DeviceCapabilities,
-    Provider, Job, Algorithm, AlgorithmResult,
-)
-from superfermion.experiment.protocols import TrackerProtocol
-from superfermion.experiment.context import experiment
-from superfermion.experiment.local_tracker import LocalTracker
-
-from superfermion.observables.core import (
-    PauliString,
-    SparsePauliOp,
-    Hamiltonian,
-    expval,
-    variance,
-    mps_expval,
-    mps_todense,
-)
-from superfermion.noise import NoiseModel
-
-# SUP-22: classical shadow protocol (randomized Pauli-basis snapshots) and
-# shadow expectation values. Pure-Python/numpy; snapshots sampled from the
-# exact statevector. See superfermion.mitigation.classical_shadow.
-from superfermion.mitigation import ClassicalShadow, classical_shadow, shadow_expval
-
-# cat backend: compile-once execution handle (statevector wired first).
-from superfermion.cat import cat
-
 # Additive 0.1.15 compatibility shims (MPS output order; >3-qubit
 # statevector fallback proxy).  Importing the module installs the MPS
 # wrapper; no compiled-core symbol is replaced.
 import superfermion._fixes as _fixes  # noqa: F401,E402
 
+# cat backend: compile-once execution handle (statevector wired first).
+from superfermion.cat import cat
+from superfermion.devices import (
+    Algorithm,
+    AlgorithmResult,
+    DeviceCapabilities,
+    DeviceExecutor,
+    Job,
+    Provider,
+)
+from superfermion.experiment.context import experiment
+from superfermion.experiment.local_tracker import LocalTracker
+from superfermion.experiment.protocols import TrackerProtocol
+
+# SUP-22: classical shadow protocol (randomized Pauli-basis snapshots) and
+# shadow expectation values. Pure-Python/numpy; snapshots sampled from the
+# exact statevector. See superfermion.mitigation.classical_shadow.
+from superfermion.mitigation import ClassicalShadow, classical_shadow, shadow_expval
+from superfermion.noise import NoiseModel
+from superfermion.observables.core import (
+    Hamiltonian,
+    PauliString,
+    SparsePauliOp,
+    expval,
+    mps_expval,
+    mps_todense,
+    variance,
+)
+from superfermion.utils.exceptions import MethodError
 
 __all__ = [
     # Core

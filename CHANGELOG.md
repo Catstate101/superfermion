@@ -2,6 +2,255 @@
 
 All notable changes to the Superfermion framework.
 
+## [0.1.24] — 2026-10-31
+
+Gradient correctness. Five defects that returned **plausible wrong numbers** —
+not exceptions — on 0.1.22 and 0.1.23, all reproducible on the PyPI wheel and on
+a source build. Each is now pinned by a finite-difference-anchored test, and the
+class of bug that produced them is blocked by an exhaustiveness test, a rule
+table that raises instead of guessing, and a gate every install lane runs.
+
+The same release closes an audit of `sf.cat`, the compile-once handle: nine
+findings — one silent wrong answer, one panic that escaped `except Exception`,
+two false refusals and five message defects. Four of them change what the
+library accepts or refuses on purpose. The last unimplemented lane,
+`density_matrix`, is implemented here; it is the only one that can hold a
+`Reset` after use.
+
+### Fixed
+- **Adjoint gradients were 0.0 for `p`, `u`/`u3`, `cp`, `cu`** (and `r1`,
+  `crx`, `crz` in the IR). The Rust kernel's generator table stopped at
+  `Rx/Ry/Rz/Rxx/Ryy/Rzz` and had no error branch, so a parameter used only in
+  one of the other seven gates fell through the accumulation guard. Reported
+  on the reviewer's 2-qubit circuit: `p(a)` returned 0.0 where `rz(a)` — which
+  differs from it only by a global phase — returned +0.038875. `u`/`cp`/`cu`
+  now match central finite differences to 1e-11, and the whole table is
+  verified against an independent numerical derivative of `to_matrix()`.
+- **Adjoint gradients were 0.0 for an already-bound circuit.** `bind()` folds
+  the symbols into constants, so the DAG no longer knows the names and
+  `grad_dict.get(name, 0.0)` turned "not a parameter" into a plausible zero.
+  It now raises `ValueError` naming the missing symbols and pointing at
+  `circuit.to_ir()`; the same guard covers `res.grad()` and `State.grad()`.
+- **Parameter-shift returned half the gradient when one name drove several
+  gates.** `ry(t); ry(t)` at t=0.35 gave 0.0 instead of −1.2884353744: the
+  shift used `bind()`, which is name-global, so both occurrences moved
+  together. Shifts are now applied per occurrence through the new
+  `Circuit.bind_occurrence`, and the contributions are summed.
+- **Parameter-shift was wrong for controlled rotations.** `cu`'s θ generator
+  has spectrum {0, ±½}, which the single π/2 shift cannot see; the new rule
+  adds a π shift. Reported value −0.2424653649, true −0.1714489037 — now
+  within 1e-9 of finite differences, along with φ, λ and γ.
+- **Parameter-shift rejected `str` observables** with
+  `AttributeError: 'str' object has no attribute '_fast_expval'`. `str`,
+  `dict`, list-of-`str`, `SparsePauliOp`, `Hamiltonian` and `PauliString` are
+  now all coerced through the public `expval`, in both `parameter_shift_grad`
+  and `finite_diff_grad`.
+- **A gate outside the shift-rule table now raises**
+  `ValueError("parameter-shift rule unavailable for gate …")` instead of
+  returning a number derived from the wrong spectrum.
+- **`from_qasm3` silently dropped seven gate names.** Its dispatch table had
+  no entry for `r1`, `cp`/`cr1`, `cu`/`cu3`, `crx`, `cry`, `crz` or `u`/`u3`,
+  and an unmapped gate hit a bare `continue`. `from_qasm3(to_qasm3(c))` therefore
+  returned a circuit with the right qubit count and **missing operations** —
+  the same wrong-answer class as the gradient defects, in serialization. A
+  two-gate probe came back with one gate and a statevector off by 0.28.
+  Unknown statements now raise, naming the statement and pointing at
+  `strict=False`; the escape hatch keeps the old skip behaviour for callers who
+  know what they are dropping. Round-trips are now bit-exact (0.00e+00) for
+  every gate the writer emits, including `cu` whose fourth parameter
+  (`gamma`) follows the qubits in Python but precedes them in QASM. Classical
+  feed-forward (`c[k] = measure q[j]` / `if (c[k] == v) g;`) is parsed and
+  re-emitted text-identically, and a whole-register `measure q;` is expanded.
+- **`Circuit.draw()` raised `UnicodeEncodeError` on a cp1252 console.** The
+  diagram used `─`, `●`, `⊕` and `│` unconditionally, so `print(circuit.draw())`
+  died with `'charmap' codec can't encode character '\u2500'` on a default
+  Windows code page and under `PYTHONIOENCODING=ascii`. `draw()` now checks what
+  the target stream can encode and falls back to `-`, `o`, `+`, `|`.
+- **`bridge.from_qasm` rejected its own QASM 3 output.** The function documents
+  OpenQASM 2.0/3.0, but the native parser does not read `bit[n] c;` and the
+  pure-Python fallback is QASM 2 only, so `from_qasm(c.to_qasm3())` raised
+  `ValueError: Could not parse QASM statement: 'bit[2] c;'`. QASM 3 input the
+  native parser rejects is now routed to `from_qasm3`.
+- **`sf.cat(mode="adjoint")` returned a gradient that does not exist.** On
+  `ry(θ); measure(0); rz(φ)` with observable X the readout leaves the qubit
+  with no coherence, so `<X> == 0` for every angle and *both* partial
+  derivatives are exactly 0. `Mode::Adj` compiled the measurement away and
+  returned the unitary-only `cos θ · cos φ` — 0.7307 at θ=0.7, φ=0.3. Every
+  lane now runs the same dynamic-circuit guard before compiling, with its own
+  name in the message; a terminal measurement stays legal, because it cannot
+  change a unitary or the expectation of a Pauli observable.
+- **`measure_all()` with `n_cbits < n_qubits` panicked inside Rust.** The
+  `PanicException` derives from `BaseException`, so `except Exception` did not
+  catch it; it fired from every entry point, `sf.run(...,
+  method="statevector")` included, and printed a Rust backtrace instead of a
+  message. `c_if()` already bounds-checked its classical bit — `measure()` did
+  not. It does now: `measure() classical bit 1 out of range (circuit has 1
+  cbits).` with the bit, the width and a fix. Five regression tests, including
+  the `to_ir()` call where the panic used to happen.
+- **`statevector` refused every measurement, including a terminal one**, while
+  `stabilizer`/`clifford` accepted the same circuit, so the answer depended on
+  which lane you asked for. A readout that nothing follows is now dropped (the
+  returned state is the state *before* it, which is the number
+  `Aer.save_statevector` gives when the save sits there), and a readout with
+  any gate after it is still refused, even a gate on another qubit. That is
+  deliberately stricter than the tableau rule: a later gate leaves a
+  distribution's marginal alone, and does not leave a state alone.
+- **A `Reset` on an untouched qubit was refused** by the adjoint and
+  statevector lanes, so `reset(0); h(0); cx(0,1)` — an ordinary hardware-style
+  preamble — could be neither simulated nor differentiated, while both tableau
+  lanes accepted it. A leading reset is the identity on `|0>` and is now
+  skipped: the adjoint gradient with and without it is bit-identical
+  (`assert_eq!` on the returned state, not a tolerance). A reset *after* use
+  stays refused in both lanes, and that is a deliberate divergence from
+  Qiskit — `Statevector.from_instruction` returns `|00>` there, a
+  post-selection on one branch, where the reset channel gives
+  `diag(.5, 0, .5, 0)` and no single pure vector can hold it.
+- **Refusal messages named the wrong lane.** The adjoint gate-set limit came
+  from `AdjProgram`, one code path over from the guard, so it said `cat adj:
+  unsupported gate H (only RY/RZ ...)` while every neighbouring refusal said
+  `cat: <lane> plan:`; the dynamic guard said `stabilizer/clifford` to adjoint
+  callers; two explanations hard-coded "the Pauli-frame sampler"; and four
+  printed messages carried an em dash, which a cp437 console renders as `ù`.
+  Each lane now names itself, and the printed strings are ASCII.
+
+### Added
+- `Circuit.r1(φ,q)`, `Circuit.crx(θ,c,t)`, `Circuit.cry(θ,c,t)` and
+  `Circuit.crz(θ,c,t)`. Those gates were already in both rule tables (adjoint
+  and parameter-shift) but had no Python builder, so that coverage could only
+  be reached from a hand-written IR. `r1` maps to its own opcode and is the
+  same matrix as `p`; the IR has no `CRy` opcode, so `cry(θ)` emits the exact
+  equivalent `cu(θ, 0, 0)` (`U3(θ,0,0) == Ry(θ)`, and a controlled block keeps
+  the phase). Checked against Qiskit's `Statevector` (0.0 on ⟨O⟩), PennyLane
+  (≤4.4e-16 on ⟨O⟩, ≤8.3e-17 on the gradient) and finite differences, and
+  pinned by four new tests in `test_gradient_regressions.py`.
+- `Circuit.param_occurrences(name)` and `Circuit.bind_occurrence(values, name,
+  k, value=…)` — bind one occurrence of a shared symbol without touching the
+  others.
+- `tests/domain/test_gradient_regressions.py` — ten finite-difference-anchored
+  tests covering every defect above, the three public gradient entry points,
+  and VQE on the package's own `u_ansatz` (which used to stall at 0.38165590
+  with a true ground state of −1.0).
+- `tests/domain/test_engine_provenance.py` — every run records the interpreter,
+  package path, engine path and engine sha256; `SF_EXPECT_ENGINE_ROOT` turns
+  "which install produced this?" into an assertion. `tests/conftest.py` prints
+  the same identity in the pytest header.
+- `scripts/grad_gate.py` — one file, numpy only, about twenty seconds: verifies
+  all five defects plus the VQE path against whichever engine the current
+  interpreter can import, and exits non-zero on any failure. Runs in CI on the
+  editable installs, the abi3 wheel, an sdist-built install and free-threaded
+  3.14t, and in the release workflow before and after the wheel matrix.
+- Rust: `test_every_parametric_gate_has_generator`,
+  `test_closed_form_covers_every_parametric_slot`,
+  `test_numerical_fallback_matches_closed_form` and
+  `test_unknown_parametric_gate_is_an_error` in `crates/sf-ir/src/adjoint.rs`.
+  A new parametric gate that is not added to the table now fails the build
+  rather than returning zeros.
+- macOS row in the Python matrix, and `SF_EXPECT_ENGINE_ROOT` on every row.
+- `tests/domain/test_gate_unitary_oracle.py` — 128 dependency-free assertions
+  that re-derive every gate's matrix from its definition (Pauli exponentials,
+  controlled blocks, basis permutations) and compare it element for element
+  with `Circuit.to_unitary()`, for all 37 builders and every parameter slot.
+  No Qiskit/PennyLane/qulacs needed, so the oracle runs on every install lane.
+  It also pins the documented relationship between the two orderings: a
+  `GateRecord` matrix is textbook (`qubits[0]` most significant) and
+  bit-reversing it reproduces the little-endian `Circuit.to_unitary()`.
+- `tests/domain/test_qasm3_roundtrip.py` — 26 tests over the writer's whole
+  gate set, the `cu` gamma ordering, feed-forward, the strict/lenient contract
+  and the QASM 2 ↔ QASM 3 importer split.
+- `Circuit.draw(ascii_only=…)` — force the plain-ASCII rendering (or force the
+  Unicode one); the default detects the stream's codec.
+- **`sf.cat(mode="density_matrix")`, alias `"dm"`** — the last unimplemented
+  lane, and the only one that can answer `h(0); cx(0,1); reset(0)`. `Reset` is
+  the channel `rho -> Tr_q(rho) ⊗ |0><0|` (Kraus `{P0, |0><1|}`) and a
+  non-selective readout is `P0 rho P0 + P1 rho P1` — a dephasing, not a
+  collapse — both applied through `sf-ir`'s `apply_1q_superop`. Feed-forward
+  stays refused: the lane returns one `rho`, not a mixture over
+  branch-conditioned states, so a conditioned gate has no single matrix here.
+  `CatPlan` carries `dm: Option<DmProgram>`, and `Exec` a `Rho(Vec<Complex64>)`.
+- The density-matrix lane also applies **gates wider than two qubits**.
+  `DensityMatrixState::apply_unitary` panics above two, so `DmProgram`
+  transforms the ket axis by `U` and the bra axis by `U†` itself; Toffoli,
+  CSWAP and opaque three-qubit unitaries work through `sf.cat` and match the
+  statevector lane to 2.8e-17. `sf.run(..., method="density_matrix")` is
+  unchanged and still panics on those, which is why the probe that exposed the
+  gap now passes in one lane and not the other.
+- `tests/unit/test_cat_density_matrix.py` — 12 tests: the exact mixed state
+  after a reset (`diag(.5, 0, .5, 0)`, purity 0.5, von Neumann entropy ln 2),
+  the same bits through `sf.run(method="density_matrix")` at
+  `max |diff| = 0.0`, parameter rebinding through a reset, feed-forward
+  refusal, a three-qubit gate against the statevector lane, and a Qiskit
+  `DensityMatrix.from_instruction` cross-check behind `importorskip`.
+- `tests/unit/test_cat_dynamic_guard.py` — 17 tests over the matrix of lanes
+  against dynamic shapes, including every shape each lane must still refuse.
+
+### Performance
+- The stabilizer/clifford plan builder was rebuilt around a column-major
+  tableau (`crates/sf-cat/src/colbuild.rs`), with a per-word column cache for
+  the AG measurement pass and a fused row update in place of three passes over
+  the same row. Cold A/B of the previous and the current binary in one window,
+  per-call medians:
+
+  ```text
+  ghz:64          0.2099 -> 0.2084 ms   1.01x
+  ghz:256         1.0060 -> 0.9819 ms   1.02x
+  brick:256      11.6379 -> 11.6888 ms  1.00x
+  brick:1024     53.9616 -> 53.8499 ms  1.00x
+  randcliff:1024 122.592 -> 98.531 ms   1.24x
+  ```
+
+  The gain lands where the change points: at `randcliff:1024` the plan build
+  itself went 85.7 -> 6.2 ms. The other four rungs are inside their own spread
+  and are reported as unchanged, not as wins.
+- `SF_CAT_THREADS` (or the workspace-wide `SF_THREADS`) caps this crate's
+  rayon pool without touching the host application's global one, so batch
+  hosts running several Python workers per machine stop paying for
+  `workers x cores` runnable threads. Read once, at first use.
+
+### Notes
+- The RY/RZ adjoint results are bit-identical to 0.1.23 (same generator
+  constants, same fused ≤2-Pauli accumulation, same cache), but the two arms
+  were rewritten from a single-entry table lookup to explicit generator
+  vectors to make room for the seven new gates, so the binary hash moved.
+  Timings were re-measured on the new build; the drift is not attributable to
+  this change, since the untouched Qulacs lane slowed by as much.
+- Parameter-shift now costs two simulations per *occurrence* rather than per
+  name; a name reused m times costs m times as much. Statevector users are
+  unaffected (adjoint remains the default and is cheaper).
+- No adjoint support is added for density-matrix, MPS or stabilizer states;
+  they keep raising `MethodError` and using parameter-shift. The new `sf.cat`
+  density-matrix lane is an execution lane, not a gradient one.
+- Four of the `sf.cat` items above are deliberate behaviour changes, not
+  silent relaxations: `adjoint` now *refuses* mid-circuit readouts,
+  feed-forward and resets after use (it used to return the unitary-only
+  gradient), and `statevector` now *accepts* a trailing readout and a leading
+  reset. Three pre-existing tests encoded the old behaviour and were repointed
+  at the refusal that must survive, not deleted.
+- `SF_CAT_THREADS` is a bound on thread count, not a throughput feature. On 8
+  logical CPUs, capping to one thread made `n=1024` across 8 concurrent
+  processes 9% faster and `n=4096` 8% *slower*; the direction flips with
+  circuit size, and aggregate CPU per circuit rises either way.
+- The stored `ghz:64` number moved 0.20 -> 0.23 ms, which is a 15% step inside
+  a 62.9% seven-run spread (min 0.1124, median 0.1299, max 0.1940 ms). It is
+  not attributable to this release, and the same-window A/B of the two
+  binaries gave 1.01x.
+- The density-matrix lane exists for correctness, not speed. The feasibility
+  probe measured a statistical tie with the routed Aer path, and nothing here
+  changes that: it is not the fast path for a plain unitary circuit.
+- The Python modules this release touches now pass the package's *own*
+  declared ruff rule set (`E,F,I,N,W,UP`), not only the `F`-only gate CI runs:
+  157 diagnostics went to 0 across `superfermion/__init__.py`, `bridge/`,
+  `circuit.py`, `gradient/adjoint.py`, `gradient/parameter_shift.py` and
+  `qasm_roundtrip.py`. That was 16 `typing` generics moved to builtins, ten
+  local gate tables renamed to lowercase, ~100 blank lines that carried
+  indentation, and four over-long lines wrapped. Two imports keep an explicit
+  `noqa` because they are a PennyLane availability probe and a public
+  re-export, and `superfermion/__init__.py` keeps `E402` as a per-file ignore —
+  its imports have to follow the `State` alias or they reintroduce a circular
+  import. The full suite is unchanged (1,112 passed, 2 skipped).
+- Not measured: the modes benchmark notebook was not re-run (only `ghz:64`
+  was refreshed), contention was measured on `brick` only, and every number
+  above is one machine with 8 logical CPUs.
+
 ## [0.1.23] — 2026-10-31
 
 ### Fixed
