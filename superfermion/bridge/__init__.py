@@ -7,11 +7,8 @@ Usage:
 """
 from __future__ import annotations
 
-
-from __future__ import annotations
-
-from typing import Any
 import threading as _threading
+from typing import Any
 
 import superfermion as sf
 
@@ -51,13 +48,13 @@ def _bit_reverse_matrix(matrix, n_qubits: int):
 
 def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
     """Convert a Qiskit QuantumCircuit to a Superfermion Circuit.
-    
+
     Args:
         qiskit_circuit: A qiskit.circuit.QuantumCircuit instance.
-        
+
     Returns:
         Equivalent sf.Circuit.
-        
+
     Example:
         >>> from qiskit import QuantumCircuit
         >>> qc = QuantumCircuit(2)
@@ -68,9 +65,9 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
     n_qubits = qiskit_circuit.num_qubits
     n_cbits = qiskit_circuit.num_clbits
     circuit = sf.Circuit(n_qubits, n_cbits=n_cbits, name=qiskit_circuit.name)
-    
+
     # Gate mapping: Qiskit name -> Superfermion method
-    GATE_MAP = {
+    gate_map = {
         'h': 'h', 'x': 'x', 'y': 'y', 'z': 'z',
         's': 's', 'sdg': 'sdg', 't': 't', 'tdg': 'tdg',
         'sx': 'sx', 'id': 'id',
@@ -88,7 +85,7 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
         'barrier': 'barrier',
         'reset': 'reset',
     }
-    
+
     def convert_instruction(operation, qubits, depth=0):
         """Convert one Qiskit instruction (recursive for composites)."""
         if depth > 8:
@@ -102,7 +99,7 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
             circuit.unitary(_bit_reverse_matrix(matrix, len(qubits)), qubits)
             return
 
-        sf_name = GATE_MAP.get(gate_name)
+        sf_name = gate_map.get(gate_name)
         if sf_name in ("cu", "cu3"):
             # Qiskit order is (theta, phi, lam, gamma) then control/target;
             # SF keeps gamma last (defaulted), so reorder explicitly.
@@ -144,7 +141,7 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
 
         raise ValueError(
             f"Unsupported Qiskit gate: '{operation.name}'. "
-            f"Supported: {list(GATE_MAP.keys()) + ['unitary']}"
+            f"Supported: {list(gate_map.keys()) + ['unitary']}"
         )
 
     for instruction in qiskit_circuit.data:
@@ -157,20 +154,20 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
 
 def to_qiskit(circuit: sf.Circuit) -> Any:
     """Convert a Superfermion Circuit to a Qiskit QuantumCircuit.
-    
+
     Requires qiskit to be installed.
     """
     try:
         from qiskit import QuantumCircuit
     except ImportError:
         raise ImportError("Qiskit is required: pip install qiskit")
-    
+
     qc = QuantumCircuit(circuit.n_qubits, circuit.n_cbits)
 
     # Materialize Rust-stored gates so ``_gates`` is populated.
     circuit._ensure_gates()
 
-    GATE_MAP = {
+    gate_map = {
         'H': 'h', 'X': 'x', 'Y': 'y', 'Z': 'z',
         'S': 's', 'SDG': 'sdg', 'T': 't', 'TDG': 'tdg',
         'SX': 'sx', 'ID': 'id',
@@ -187,7 +184,7 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
         'BARRIER': 'barrier',
         'RESET': 'reset',
     }
-    
+
     for gate in circuit._gates:
         if gate.name.upper() == "UNITARY" and gate.matrix is not None:
             from qiskit.circuit.library import UnitaryGate
@@ -197,15 +194,15 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
             qc.append(UnitaryGate(matrix), list(gate.qubits))
             continue
 
-        qiskit_name = GATE_MAP.get(gate.name.upper())
+        qiskit_name = gate_map.get(gate.name.upper())
         if qiskit_name is None:
             raise ValueError(f"Cannot map gate '{gate.name}' to Qiskit")
-        
+
         method = getattr(qc, qiskit_name)
         # Qubit labels pass through unchanged: SF and Qiskit share the
         # little-endian (q0=LSB) state order.
         mapped_qubits = list(gate.qubits)
-        
+
         if gate.name == "MEASURE":
             cbit = gate.classical_bits[0] if gate.classical_bits else gate.qubits[0]
             method(mapped_qubits[0], cbit)
@@ -220,40 +217,40 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
             method(*gate.params, *mapped_qubits)
         else:
             method(*mapped_qubits)
-    
+
     return qc
 
 
 def from_pennylane(pennylane_circuit: Any, n_qubits: int = None) -> sf.Circuit:
     """Convert a PennyLane tape/circuit to a Superfermion Circuit.
-    
+
     Args:
         pennylane_circuit: A PennyLane QNode or tape.
         n_qubits: Number of qubits (auto-detected if possible).
-        
+
     Returns:
         Equivalent sf.Circuit.
     """
     try:
-        import pennylane as qml
+        import pennylane as qml  # noqa: F401 - probe that PennyLane is importable
     except ImportError:
         raise ImportError("PennyLane is required: pip install pennylane")
-    
+
     # Get the tape from the QNode
     if hasattr(pennylane_circuit, 'tape'):
         tape = pennylane_circuit.tape
     else:
         tape = pennylane_circuit
-    
+
     if n_qubits is None:
         n_qubits = len(tape.wires)
-    
+
     circuit = sf.Circuit(n_qubits)
-    
+
     # Gates absent from this map previously raised; the added entries all
     # flow through the identical generic method(*params, *wires) path the
     # existing entries already use, so they are pure additive coverage.
-    PL_MAP = {
+    pl_map = {
         'Hadamard': 'h', 'PauliX': 'x', 'PauliY': 'y', 'PauliZ': 'z',
         'S': 's', 'T': 't', 'SX': 'sx',
         'RX': 'rx', 'RY': 'ry', 'RZ': 'rz',
@@ -262,32 +259,52 @@ def from_pennylane(pennylane_circuit: Any, n_qubits: int = None) -> sf.Circuit:
         'SWAP': 'swap', 'ISWAP': 'iswap', 'CSWAP': 'cswap',
         'Toffoli': 'ccx',
     }
-    
+
     for op in tape.operations:
-        sf_name = PL_MAP.get(op.name)
+        sf_name = pl_map.get(op.name)
         if sf_name is None:
             raise ValueError(
                 f"Unsupported PennyLane operation: '{op.name}'. "
-                f"Supported: {list(PL_MAP.keys())}"
+                f"Supported: {list(pl_map.keys())}"
             )
-        
+
         method = getattr(circuit, sf_name)
         wires = [int(w) for w in op.wires]
         params = list(op.parameters) if op.parameters else []
-        
+
         if params:
             method(*params, *wires)
         else:
             method(*wires)
-    
+
     return circuit
+
+
+def _looks_like_qasm3(text: str) -> bool:
+    """True when *text* uses OpenQASM 3 declarations the QASM 2 path cannot read.
+
+    ``OPENQASM 3.0;`` headers and the ``qubit[n]``/``bit[n]`` register form are
+    unambiguous: no OpenQASM 2 program contains them. The native parser accepts
+    ``qubit[n]`` but not ``bit[n]``, and the pure-Python fallback is QASM 2 only,
+    so without this check ``from_qasm(circuit.to_qasm3())`` raised on the
+    ``bit[2] c;`` line even though this function documents QASM 3 support.
+    """
+    import re
+
+    return bool(
+        re.search(r"^\s*OPENQASM\s+3", text, re.MULTILINE)
+        or re.search(r"^\s*(?:bit|qubit)\s*\[", text, re.MULTILINE)
+    )
 
 
 def from_qasm(qasm_str: str) -> sf.Circuit:
     """Parse an OpenQASM 2.0/3.0 string into a Superfermion Circuit.
 
     Uses the native Rust parser (6× faster than Qiskit) when available,
-    falling back to the pure-Python parser for unsupported syntax.
+    falling back to the pure-Python parser for unsupported syntax. OpenQASM 3
+    input (``OPENQASM 3.0;``, ``qubit[n] q;``, ``bit[n] c;``) that the native
+    parser rejects is handed to :func:`superfermion.serialization.from_qasm3`,
+    so ``from_qasm(circuit.to_qasm3())`` round-trips.
 
     Both parsers are strict: a gate or statement that cannot be represented
     raises ``ValueError`` instead of being dropped, so a returned circuit is
@@ -362,9 +379,20 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                 raise
             return circ
 
-    from superfermion.circuit import GateRecord as _GateRecord
+    # ── QASM 3 path ───────────────────────────────────────────
+    # Only reached when the native parser could not read the string. If the
+    # string is unmistakably QASM 3, the QASM 3 importer is the right fallback:
+    # the pure-Python parser below understands QASM 2 syntax only and would
+    # reject a ``bit[n] c;`` declaration even though it carries no operation.
+    if _looks_like_qasm3(qasm_str):
+        from superfermion.serialization.qasm_roundtrip import from_qasm3
+
+        return from_qasm3(qasm_str)
+
     import re
-    lines = [l.strip() for l in qasm_str.strip().split('\n') if l.strip()]
+
+    from superfermion.circuit import GateRecord as _GateRecord
+    lines = [ln.strip() for ln in qasm_str.strip().split('\n') if ln.strip()]
     # Carried into fallback errors so a gate this parser cannot map still tells
     # the caller why the native parser was not used.
     _native_hint = (
@@ -373,7 +401,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
     )
 
     # Gate-name → SF method mapping (hoisted outside loop for speed)
-    QASM_MAP = {
+    qasm_map = {
         'h': 'h', 'x': 'x', 'y': 'y', 'z': 'z',
         's': 's', 'sdg': 'sdg', 't': 't', 'tdg': 'tdg',
         'sx': 'sx',
@@ -386,15 +414,15 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
         'swap': 'swap',
         'ccx': 'ccx',
     }
-    
+
     n_qubits = None
     circuit = None
-    
+
     for line in lines:
         # Skip comments and headers
         if line.startswith('//') or line.startswith('OPENQASM') or line.startswith('include'):
             continue
-        
+
         # qubit declaration
         if line.startswith('qubit[') or line.startswith('qreg'):
             # qubit[N] q; OR qreg q[N];
@@ -406,7 +434,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             n_qubits = int(m.group(1))
             circuit = sf.Circuit(n_qubits)
             continue
-        
+
         # Classical register declarations carry no quantum operation.
         if line.startswith('creg'):
             continue
@@ -419,7 +447,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             raise ValueError(
                 f"Could not parse QASM: instruction before any qreg declaration: {line!r}"
             )
-        
+
         # Gate instructions
         # Format: gate_name q[i], q[j]; OR gate_name(param) q[i];
         m = re.match(r'(\w+)(?:\(([^)]*)\))?\s+(.+);', line)
@@ -427,7 +455,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             gate_name = m.group(1).lower()
             params_str = m.group(2)
             qubits_str = m.group(3)
-            
+
             if gate_name == 'barrier':
                 continue
 
@@ -454,7 +482,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                     f"gate {gate_name!r} names a qubit outside the "
                     f"{n_qubits}-qubit circuit: {line!r}"
                 )
-            
+
             # Parse params
             params = []
             if params_str:
@@ -477,17 +505,17 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                                 params.append(eval(p.replace('pi', str(math.pi))))
                             else:
                                 params.append(sf.param(p))
-            
-            # Map gate (QASM_MAP hoisted outside loop)
-            
+
+            # Map gate (qasm_map hoisted outside loop)
+
             # SF and Qiskit/OpenQASM share the little-endian (q0=LSB) order,
             # so qubit labels pass through unchanged -- matching the Rust fast
             # path above and to_qasm below. Reversing here made this fallback
             # disagree with both and broke the SF->QASM->SF round-trip for
             # asymmetric circuits (the old MSB-first comment was wrong).
             mapped_indices = list(qubit_indices)
-            
-            sf_name = QASM_MAP.get(gate_name)
+
+            sf_name = qasm_map.get(gate_name)
             if gate_name == 'u2':
                 # u2(phi, lam) is u3(pi/2, phi, lam).
                 import math
@@ -509,27 +537,27 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                 )
         else:
             raise ValueError(f"Could not parse QASM statement: {line!r}")
-    
+
     if circuit is None:
         raise ValueError("Could not parse QASM: no qubit declaration found")
-    
+
     return circuit
 
 
-def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
+def to_ionq(circuit: sf.Circuit) -> list[dict[str, Any]]:
     """Convert a Superfermion Circuit to IonQ JSON gate format.
-    
+
     Args:
         circuit: Superfermion Circuit.
-        
+
     Returns:
         List of gate dictionaries as required by IonQ API.
     """
     ionq_gates = []
-    
+
     # Mapper for Superfermion gate names to IonQ gate names
     # Note: IonQ gate names are lowercase (e.g., 'h', 'x', 'cnot')
-    GATE_MAP = {
+    gate_map = {
         'H': 'h', 'X': 'x', 'Y': 'y', 'Z': 'z',
         'S': 's', 'SDG': 'si', 'T': 't', 'TDG': 'ti',
         'RX': 'rx', 'RY': 'ry', 'RZ': 'rz',
@@ -558,7 +586,7 @@ def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
 
     for gate in circuit._gates:
         name = gate.name.upper()
-        ionq_name = GATE_MAP.get(name)
+        ionq_name = gate_map.get(name)
 
         # Gates IonQ has no single instruction for, emitted as short exact
         # decompositions (global phase is unobservable on measurement).
@@ -644,11 +672,11 @@ def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
             if gate.name.upper() in ["MEASURE", "BARRIER"]:
                 continue
             raise ValueError(f"Cannot map gate '{gate.name}' to IonQ API")
-            
+
         gate_dict = {
             "gate": ionq_name
         }
-        
+
         # IonQ API v0.3 formatting
         if len(gate.qubits) == 1:
             gate_dict["target"] = gate.qubits[0]
@@ -657,7 +685,7 @@ def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
                 # Control is index 0, target is index 1
                 control = gate.qubits[0]
                 target = gate.qubits[1]
-                
+
                 # IonQ simulator has a bug with cnot where control=1, target=0
                 # in 6-qubit circuits (states collapse to 16/32, q0=q1 correlation).
                 # The root cause is in the IonQ simulator, not our bridge.
@@ -676,14 +704,14 @@ def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
                     # H on target
                     ionq_gates.append({"gate": "h", "target": target})
                     continue  # skip normal gate_dict append below
-                
+
                 gate_dict["control"] = control
                 gate_dict["target"] = target
             elif ionq_name == 'swap':
                 gate_dict["targets"] = [gate.qubits[0], gate.qubits[1]]
             else:
                 gate_dict["targets"] = [gate.qubits[0], gate.qubits[1]]
-            
+
         # Add parameters if they exist
         if gate.params:
             # IonQ expects 'rotation' in radians for rx, ry, rz
@@ -691,9 +719,9 @@ def to_ionq(circuit: sf.Circuit) -> List[Dict[str, Any]]:
                 gate_dict["rotation"] = gate.params[0]
             else:
                 gate_dict["params"] = gate.params
-                
+
         ionq_gates.append(gate_dict)
-        
+
     return ionq_gates
 
 
@@ -708,7 +736,7 @@ def to_braket(circuit: sf.Circuit) -> Any:
 
 def to_qasm(circuit: sf.Circuit) -> str:
     """Convert a Superfermion Circuit to OpenQASM 2.0 string.
-    
+
     Returns:
         String in OpenQASM 2.0 format.
     """
@@ -716,8 +744,8 @@ def to_qasm(circuit: sf.Circuit) -> str:
     qasm.append(f"qreg q[{circuit.n_qubits}];")
     if circuit.n_cbits > 0:
         qasm.append(f"creg c[{circuit.n_cbits}];")
-        
-    GATE_MAP = {
+
+    gate_map = {
         'H': 'h', 'X': 'u3', 'Y': 'u3', 'Z': 'u1',
         'S': 'u1', 'SDG': 'u1', 'T': 'u1', 'TDG': 'u1',
         'RX': 'u3', 'RY': 'u3', 'RZ': 'u1',
@@ -731,11 +759,11 @@ def to_qasm(circuit: sf.Circuit) -> str:
         'P': 'u1', 'CP': 'cu1', 'U': 'u3', 'SX': 'u3', 'RESET': 'reset',
         'ISWAP': 'iswap', 'RXX': 'rxx', 'RYY': 'ryy', 'RZZ': 'rzz',
     }
-    
+
     circuit._ensure_gates()  # no-op for default Python storage
 
     for gate in circuit._gates:
-        qasm_name = GATE_MAP.get(gate.name.upper())
+        qasm_name = gate_map.get(gate.name.upper())
         if not qasm_name:
             # BARRIER has no OpenQASM 2.0 equivalent and is safe to omit.
             # Any *other* unmapped gate must not be silently dropped --
@@ -745,14 +773,14 @@ def to_qasm(circuit: sf.Circuit) -> str:
                 continue
             raise ValueError(
                 f"Cannot map gate '{gate.name}' to OpenQASM 2.0 "
-                f"(supported names: {sorted(set(GATE_MAP.values()))})"
+                f"(supported names: {sorted(set(gate_map.values()))})"
             )
-            
+
         if gate.name == "MEASURE":
             cbit = gate.classical_bits[0] if gate.classical_bits else gate.qubits[0]
             qasm.append(f"measure q[{gate.qubits[0]}] -> c[{cbit}];")
             continue
-            
+
         # Handle Parameters for U Gates
         name_upper = gate.name.upper()
 
@@ -825,10 +853,10 @@ def to_qasm(circuit: sf.Circuit) -> str:
                 params_str = f"({', '.join(map(str, gate.params))})"
         else:
             params_str = f"({', '.join(map(str, gate.params))})" if gate.params else ""
-            
+
         qubits_str = ", ".join([f"q[{i}]" for i in gate.qubits])
         qasm.append(f"{qasm_name}{params_str} {qubits_str};")
-        
+
     return "\n".join(qasm)
 
 
@@ -838,13 +866,13 @@ def to_qasm(circuit: sf.Circuit) -> str:
 
 def from_cirq(cirq_circuit: Any) -> sf.Circuit:
     """Convert a Cirq Circuit to a Superfermion Circuit.
-    
+
     Args:
         cirq_circuit: A cirq.Circuit instance.
-        
+
     Returns:
         Equivalent sf.Circuit.
-        
+
     Example:
         >>> import cirq
         >>> q0, q1 = cirq.LineQubit.range(2)
@@ -858,23 +886,23 @@ def from_cirq(cirq_circuit: Any) -> sf.Circuit:
         import cirq
     except ImportError:
         raise ImportError("Cirq is required: pip install cirq")
-    
+
     # Get qubits from circuit
     qubits = sorted(cirq_circuit.all_qubits(), key=lambda q: q.x if hasattr(q, 'x') else str(q))
     n_qubits = len(qubits)
-    
+
     # Map qubits to indices
     qubit_map = {q: i for i, q in enumerate(qubits)}
-    
+
     circuit = sf.Circuit(n_qubits)
-    
+
     # Gate mapping: Cirq gate -> Superfermion method
-    GATE_MAP = {
+    gate_map = {
         'H': 'h', 'X': 'x', 'Y': 'y', 'Z': 'z',
         'S': 's', 'T': 't',
         'HPowGate': 'h',  # H with exponent
         'XPowGate': 'rx',
-        'YPowGate': 'ry', 
+        'YPowGate': 'ry',
         'ZPowGate': 'rz',
         'CNOT': 'cx', 'CNOTPowGate': 'cx', 'CXPowGate': 'cx',
         'CZ': 'cz', 'CZPowGate': 'cz',
@@ -882,18 +910,18 @@ def from_cirq(cirq_circuit: Any) -> sf.Circuit:
         'MeasurementGate': 'measure',
         'Rx': 'rx', 'Ry': 'ry', 'Rz': 'rz',  # Aliases
     }
-    
+
     for moment in cirq_circuit:
         for op in moment.operations:
             gate = op.gate
             gate_type = type(gate).__name__
-            
+
             # Get qubit indices
             qubit_indices = [qubit_map[q] for q in op.qubits]
-            
+
             # Map gate by exact type first
-            sf_name = GATE_MAP.get(gate_type)
-            
+            sf_name = gate_map.get(gate_type)
+
             if sf_name is None:
                 if hasattr(gate, '_unitary_') or gate_type == 'MatrixGate':
                     import numpy as np
@@ -901,9 +929,9 @@ def from_cirq(cirq_circuit: Any) -> sf.Circuit:
                     circuit.unitary(matrix, qubit_indices)
                     continue
                 raise ValueError(f"Unsupported Cirq gate: {gate_type} ({gate})")
-            
+
             method = getattr(circuit, sf_name)
-            
+
             # Handle parameterized gates
             if gate_type in ('XPowGate', 'YPowGate', 'ZPowGate', 'Rx', 'Ry', 'Rz'):
                 # Cirq uses exponent, need to multiply by pi for rotations
@@ -948,25 +976,25 @@ def from_cirq(cirq_circuit: Any) -> sf.Circuit:
                 method(qubit_indices[0], qubit_indices[1])
             else:
                 method(*qubit_indices)
-    
+
     return circuit
 
 
 def to_cirq(circuit: sf.Circuit) -> Any:
     """Convert a Superfermion Circuit to a Cirq Circuit.
-    
+
     Requires: pip install cirq
     """
     try:
         import cirq
     except ImportError:
         raise ImportError("Cirq is required: pip install cirq")
-    
+
     # Create qubits
     qubits = [cirq.LineQubit(i) for i in range(circuit.n_qubits)]
-    
+
     # Gate mapping
-    GATE_MAP = {
+    gate_map = {
         'H': cirq.H,
         'X': cirq.X,
         'Y': cirq.Y,
@@ -983,9 +1011,9 @@ def to_cirq(circuit: sf.Circuit) -> Any:
         'CZ': cirq.CZ,
         'SWAP': cirq.SWAP,
     }
-    
+
     operations = []
-    
+
     circuit._ensure_gates()  # no-op for default Python storage
 
     for gate in circuit._gates:
@@ -996,19 +1024,19 @@ def to_cirq(circuit: sf.Circuit) -> Any:
             operations.append(cirq.MatrixGate(gate.matrix).on(*target_qubits))
             continue
 
-        cirq_gate = GATE_MAP.get(gate_name)
-        
+        cirq_gate = gate_map.get(gate_name)
+
         if cirq_gate is None:
             raise ValueError(f"Unsupported gate for Cirq conversion: {gate_name}")
-        
+
         target_qubits = [qubits[i] for i in gate.qubits]
-        
+
         if gate_name in ('RX', 'RY', 'RZ'):
             angle = gate.params[0] if gate.params else 0
             operations.append(cirq_gate(angle).on(*target_qubits))
         else:
             operations.append(cirq_gate.on(*target_qubits))
-    
+
     return cirq.Circuit(operations)
 
 
@@ -1018,10 +1046,10 @@ def to_cirq(circuit: sf.Circuit) -> Any:
 
 def to_pennylane(circuit: sf.Circuit) -> Any:
     """Convert a Superfermion Circuit to a PennyLane quantum function.
-    
+
     Returns:
         A callable that can be used as a PennyLane QNode.
-        
+
     Example:
         >>> import pennylane as qml
         >>> sf_circuit = sf.Circuit(2)
@@ -1037,9 +1065,9 @@ def to_pennylane(circuit: sf.Circuit) -> Any:
         import pennylane as qml
     except ImportError:
         raise ImportError("PennyLane is required: pip install pennylane")
-    
+
     # Gate mapping
-    GATE_MAP = {
+    gate_map = {
         'H': qml.Hadamard,
         'X': qml.PauliX,
         'Y': qml.PauliY,
@@ -1057,26 +1085,26 @@ def to_pennylane(circuit: sf.Circuit) -> Any:
         'SWAP': qml.SWAP,
         'MEASURE': None,  # Measurement handled separately
     }
-    
+
     # Store circuit data
     circuit._ensure_gates()  # no-op for default Python storage
     n_qubits = circuit.n_qubits
     gates = list(circuit._gates)
-    
+
     def qfunc():
         """Generated PennyLane quantum function."""
         for gate in gates:
             gate_name = gate.name.upper()
-            pl_gate = GATE_MAP.get(gate_name)
-            
+            pl_gate = gate_map.get(gate_name)
+
             if pl_gate is None:
                 if gate_name == 'MEASURE':
                     # PennyLane measurements are returns
                     continue
                 raise ValueError(f"Unsupported gate for PennyLane: {gate_name}")
-            
+
             wires = gate.qubits
-            
+
             if gate_name in ('RX', 'RY', 'RZ'):
                 angle = gate.params[0] if gate.params else 0
                 pl_gate(angle, wires=wires[0])
@@ -1086,11 +1114,11 @@ def to_pennylane(circuit: sf.Circuit) -> Any:
                 pl_gate(wires=wires)
             else:
                 pl_gate(wires=wires)
-    
+
     # Attach metadata
     qfunc.n_qubits = n_qubits
     qfunc.gates = gates
-    
+
     return qfunc
 
 
@@ -1137,7 +1165,7 @@ def to_stim(circuit: sf.Circuit):
     except ImportError:
         raise ImportError("Stim is required: pip install stim")
 
-    GATE_MAP = {
+    gate_map = {
         'H': 'H', 'X': 'X', 'Y': 'Y', 'Z': 'Z',
         'S': 'S', 'SDG': 'S_DAG', 'SX': 'SX',
         'CX': 'CX', 'CNOT': 'CX',
@@ -1157,16 +1185,16 @@ def to_stim(circuit: sf.Circuit):
         if name == "MEASURE":
             cbits = gate.get("classical_bits", []) or []
             cbit = int(cbits[0]) if cbits else None
-            lines.append("M %d" % qubits[0])
+            lines.append(f"M {qubits[0]}")
             record_cbits.append(cbit)
             continue
-        stim_name = GATE_MAP.get(name)
+        stim_name = gate_map.get(name)
         if stim_name is None:
             raise ValueError(
                 f"Cannot map gate '{gate['name']}' to Stim "
                 "(to_stim supports Clifford circuits only)"
             )
-        lines.append("%s %s" % (stim_name, " ".join(map(str, qubits))))
+        lines.append(f"{stim_name} {' '.join(map(str, qubits))}")
     return stim.Circuit("\n".join(lines)), record_cbits
 
 
