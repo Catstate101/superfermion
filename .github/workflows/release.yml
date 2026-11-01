@@ -54,6 +54,22 @@ jobs:
           print("abi3 feature and requires-python OK")
           PY
 
+      # Fail in minutes, not after the whole wheel matrix: build the tag's own
+      # source and run the gradient gate against the engine it produced. This
+      # is the same script every CI lane runs, so a release cannot ship a
+      # kernel that fails a check the PR lane would have caught.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Gradient gate on the tagged source
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . numpy scipy
+          version=$(python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          python scripts/grad_gate.py \
+            --expect-version "$version" \
+            --expect-engine-root "$GITHUB_WORKSPACE/superfermion"
+
   # ---- Source distribution: complete, self-contained, metadata-resolvable ----
   sdist:
     name: Build and verify sdist
@@ -91,6 +107,8 @@ jobs:
         # abi3 wheel claims to cover, built the slow way.
         python-version: ["3.10", "3.15"]
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
@@ -109,8 +127,16 @@ jobs:
       - name: Import and smoke test
         shell: bash
         run: |
+          # The version comes from the artifact name, not from the installed
+          # package: comparing the package to itself would assert nothing.
+          expected=$(basename dist/*.tar.gz | sed -E 's/^superfermion-([^-]+)\.tar\.gz$/\1/')
           cd "$RUNNER_TEMP"
           python -c "import superfermion as sf; c=sf.Circuit(6).h(0).cx(0,1).cx(1,2); r=sf.run(c, device='cpu', shots=0); assert len(r.statevector) == 64; print('sdist OK on', __import__('sys').version.split()[0])"
+          # The sdist built here must produce a correct gradient kernel, not
+          # just an importable package.
+          python "$GITHUB_WORKSPACE/scripts/grad_gate.py" \
+            --expect-version "$expected" \
+            --json "$RUNNER_TEMP/grad_gate_sdist.json"
 
   # ---- Wheels: one abi3 build per platform/arch ----
   build-linux:
@@ -249,6 +275,8 @@ jobs:
           - os: windows-11-arm
             python-version: "3.12"
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
@@ -264,7 +292,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy
+          python -m pip install numpy scipy
           python -m pip install --no-index --only-binary=:all: --find-links dist superfermion
 
       - name: Import and smoke test from outside the checkout
@@ -274,6 +302,12 @@ jobs:
           python -c "import superfermion as sf; c=sf.Circuit(6).h(0).cx(0,1).cx(1,2); r=sf.run(c,device='cpu',shots=0); assert len(r.statevector)==64; print('abi3 OK', sf.__version__)"
           # Wheel metadata and the importable package must agree on the version.
           python -c "import importlib.metadata as m, superfermion as sf; have, want = sf.__version__, m.version('superfermion'); assert have == want, (have, want)"
+          # Every platform's wheel runs the gradient gate before publish: the
+          # full suite only runs on Linux, so this is the only pre-publish
+          # check of the macOS / Windows / Windows-arm64 kernels.
+          python "$GITHUB_WORKSPACE/scripts/grad_gate.py" \
+            --expect-version "$(python -c 'import importlib.metadata as m; print(m.version("superfermion"))')" \
+            --json "$RUNNER_TEMP/grad_gate_abi3.json"
 
   # ---- Full suite against the shipped wheel on the newest interpreter ----
   test-wheel-suite:

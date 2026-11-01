@@ -138,6 +138,47 @@ assert "if (c[0] == 1) x q[1];" in qasm
 print("qasm3 ok")
 ```
 
+## Using `sf.cat` on a dynamic circuit
+
+`sf.run` replays the circuit shot by shot. `sf.cat` compiles one handle per
+representation, and the lanes differ in what they can hold:
+
+| Shape | `mode="statevector"` | `mode="density_matrix"` |
+|---|---|---|
+| `reset(q)` on a qubit nothing has touched | accepted — a no-op, so it is dropped | accepted |
+| `measure(q, c)` with nothing after it | accepted — the readout is dropped | accepted — the readout dephases |
+| `reset(q)` after the qubit was used | `ValueError` | accepted — the exact mixed state |
+| a gate after a mid-circuit `measure` | `ValueError` | accepted |
+| `c_if` feed-forward | `ValueError` | `ValueError` |
+
+A reset after use and a non-selective readout are *channels*, which one pure
+vector cannot hold and a density matrix can. Feed-forward is the shape that
+needs trajectories either way: the state is a mixture **over branches**, not one
+`rho`.
+
+```python
+qc = sf.Circuit(2).h(0).cnot(0, 1).reset(0)
+
+state = sf.cat(qc, mode="density_matrix").simulate({})
+print([round(p, 3) for p in state.probabilities()])   # [0.5, 0.0, 0.5, 0.0]
+print(round(state.purity(), 3))                       # 0.5 — genuinely mixed
+```
+
+Sampling the same circuit gives the matching distribution, with qubit 0
+always `0`:
+
+```python
+print(sf.run(qc, shots=2000, seed=7).counts)   # {'10': 989, '00': 1011}
+```
+
+Each refusal names its lane and the route out, for example:
+
+```text
+cat: statevector plan: Reset on qubit 0 after it was used; reset means
+collapse-and-reprepare, which this plan does not model - use
+sf.run(circuit, method="statevector", shots=N) from Python
+```
+
 ## See also
 
 - Measurement types: [Variance & Mutual Information](/docs/guides/measurements)

@@ -19,15 +19,37 @@ Usage:
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
-from typing import Union, Any, Optional
+from typing import Any
+
 import numpy as np
 
 from superfermion.parameters import SymbolicParameter
 
-
 # Type alias for parameter values
-ParamValue = Union[float, int, SymbolicParameter]
+ParamValue = float | int | SymbolicParameter
+
+# Glyphs used by :meth:`Circuit.draw` for the optional Unicode rendering.
+_DIAGRAM_GLYPHS = "─●⊕│"
+
+
+def _stdout_supports_unicode() -> bool:
+    """Whether ``sys.stdout`` can encode :data:`_DIAGRAM_GLYPHS`.
+
+    Legacy Windows code pages (cp1252) and ``PYTHONIOENCODING=ascii`` cannot,
+    so ``print(circuit.draw())`` used to die with ``UnicodeEncodeError`` after
+    the circuit had already been built. Returning ``False`` here makes
+    :meth:`Circuit.draw` emit ASCII instead.
+    """
+    encoding = getattr(sys.stdout, "encoding", None)
+    if not encoding:
+        return False
+    try:
+        _DIAGRAM_GLYPHS.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
 
 
 @dataclass(slots=True)
@@ -37,14 +59,28 @@ class GateRecord:
     qubits: list[int]
     params: list[ParamValue] = field(default_factory=list)
     classical_bits: list[int] = field(default_factory=list)
-    condition: Optional[tuple[int, int]] = field(default=None)
-    matrix: Optional[np.ndarray] = field(default=None, repr=False)
+    condition: tuple[int, int] | None = field(default=None)
+    matrix: np.ndarray | None = field(default=None, repr=False)
 
     def to_unitary(self) -> np.ndarray:
         """Convert this specific gate record to a unitary matrix.
 
         If this gate stores an opaque unitary matrix, return it directly.
         Otherwise delegates to ``gate_unitary_matrix``.
+
+        Ordering: the returned matrix is indexed over the gate's own qubits in
+        the order returned by :attr:`qubits`, with ``qubits[0]`` as the *most*
+        significant bit — i.e. the textbook layout ``|q0 q1⟩``. This is the
+        opposite of :meth:`Circuit.to_unitary`, which puts qubit 0 in the least
+        significant bit (the Qiskit convention). For single-qubit gates the two
+        agree; for a multi-qubit record they are bit-reversed with respect to
+        each other, so embed a record matrix into a circuit by bit-reversing it
+        first::
+
+            local = record.to_unitary()
+            k = len(record.qubits)
+            perm = [int(format(i, f"0{k}b")[::-1], 2) for i in range(2**k)]
+            circuit_local = local[np.ix_(perm, perm)]
         """
         if self.matrix is not None:
             return self.matrix
@@ -60,8 +96,8 @@ class GateRecord:
 
 class FunctionalInt(int):
     """An integer that can be called like a method, returning itself.
-    
-    This allows the API to support both `circuit.depth` and `circuit.depth()` 
+
+    This allows the API to support both `circuit.depth` and `circuit.depth()`
     for maximum documentation compatibility.
     """
     def __call__(self) -> int:
@@ -117,7 +153,7 @@ class Circuit:
         self._metadata: dict[str, Any] = {}
         # Classical condition (cbit, value) waiting for the next gate
         # (set by ``c_if``, consumed by the next ``_add_gate`` call).
-        self._pending_condition: Optional[tuple[int, int]] = None
+        self._pending_condition: tuple[int, int] | None = None
         # Set when an opaque unitary spans more than three qubits.  The
         # 0.1.15 Rust statevector kernel applies only arities 1-3; to_ir()
         # returns a compatibility proxy for these circuits (see _fixes.py).
@@ -274,7 +310,11 @@ class Circuit:
             self._ensure_gates()
         if self._use_rust:
             # Push to Rust GateSequence — zero Python GateRecord allocation
-            self._gates_rust.add_gate(name, qubits, [float(p) if not isinstance(p, SymbolicParameter) else 0.0 for p in resolved_params])
+            numeric = [
+                float(p) if not isinstance(p, SymbolicParameter) else 0.0
+                for p in resolved_params
+            ]
+            self._gates_rust.add_gate(name, qubits, numeric)
         else:
             self._gates.append(GateRecord(
                 name=name,
@@ -415,6 +455,15 @@ class Circuit:
         """Phase gate: P(φ) = diag(1, e^{iφ})"""
         return self._add_gate("P", [qubit], [phi])
 
+    def r1(self, phi: ParamValue, qubit: int) -> Circuit:
+        """R1(φ) = diag(1, e^{iφ}) — the OpenQASM ``r1`` gate.
+
+        Numerically identical to :meth:`p` (up to nothing: the IR shares one
+        matrix builder for both); it exists so circuits read out of QASM or
+        written against the Qiskit ``r1`` name need no rewriting.
+        """
+        return self._add_gate("R1", [qubit], [phi])
+
     def u(
         self,
         theta: ParamValue,
@@ -467,6 +516,30 @@ class Circuit:
     ) -> Circuit:
         """Alias for CU (accepts the same optional ``gamma``)."""
         return self.cu(theta, phi, lam, control, target, gamma)
+
+    def crx(self, theta: ParamValue, control: int, target: int) -> Circuit:
+        """Controlled-Rx: applies Rx(θ) on ``target`` if ``control`` is |1⟩."""
+        return self._add_gate("CRX", [control, target], [theta])
+
+    def crz(self, theta: ParamValue, control: int, target: int) -> Circuit:
+        """Controlled-Rz: applies Rz(θ) on ``target`` if ``control`` is |1⟩.
+
+        ``diag(1, 1, e^{-iθ/2}, e^{iθ/2})`` — a *phase* difference between the
+        two control branches, which is why it is not the same as :meth:`cp`
+        (``cp`` is ``diag(1, 1, 1, e^{iφ})``).
+        """
+        return self._add_gate("CRZ", [control, target], [theta])
+
+    def cry(self, theta: ParamValue, control: int, target: int) -> Circuit:
+        """Controlled-Ry: applies Ry(θ) on ``target`` if ``control`` is |1⟩.
+
+        The IR has no dedicated ``CRy`` opcode, so this emits the exact
+        equivalent :meth:`cu` with ``(θ, 0, 0)``: ``U3(θ,0,0) == Ry(θ)``, and
+        a controlled block sees the phase, so the equality is exact — not up
+        to a global phase. Adjoint and parameter-shift treat it as ``CU``,
+        which is fully covered by both rule tables.
+        """
+        return self.cu(theta, 0.0, 0.0, control, target)
 
     # ───────────────────────────────────────────────────────
     # Two-qubit gates
@@ -605,6 +678,17 @@ class Circuit:
         self._validate_qubit(qubit, "measure")
         if cbit is None:
             cbit = qubit
+        # Same guard `c_if` already applies: without it `to_ir()` writes an
+        # out-of-range classical bit and sf-ir *panics*, which surfaces as a
+        # PyO3 PanicException (a BaseException, so `except Exception` misses
+        # it).  Checked here so the failure is a catchable ValueError.
+        if not 0 <= cbit < self._n_cbits:
+            raise ValueError(
+                f"measure() classical bit {cbit} out of range "
+                f"(circuit has {self._n_cbits} cbits).\n"
+                f"  Fix: sf.Circuit(n_qubits, n_cbits=...) or measure(q, c) "
+                f"with 0 <= c < {self._n_cbits}"
+            )
         self._ensure_gates()
         gate = GateRecord(name="MEASURE", qubits=[qubit], classical_bits=[cbit])
         self._gates.append(gate)
@@ -757,6 +841,119 @@ class Circuit:
                 new_circuit._parameters[name] = p
         return new_circuit
 
+    def param_occurrences(self, name: str) -> list[tuple[str, int]]:
+        """Every place one parameter appears, in gate order.
+
+        A single symbol may drive several gates (``ry(t, 0); ry(t, 1)``) or
+        several slots of one gate (``u(t, t, 0.1, 0)``).  Gradient rules
+        must differentiate each occurrence separately, so they need the list
+        rather than the name alone.
+
+        Args:
+            name: Parameter name (or ``SymbolicParameter``).
+
+        Returns:
+            ``[(gate_name, slot), ...]`` — ``slot`` is the index of the
+            parameter inside that gate's parameter vector.  Empty when the
+            name does not occur in the circuit.
+
+        Examples:
+            >>> t = sf.param("t")
+            >>> sf.Circuit(1).ry(t, 0).rz(t, 0).param_occurrences("t")
+            [('RY', 0), ('RZ', 0)]
+        """
+        target = name.name if isinstance(name, SymbolicParameter) else name
+        self._ensure_gates()
+        out: list[tuple[str, int]] = []
+        for gate in self._gates:
+            for slot, p in enumerate(gate.params):
+                if isinstance(p, SymbolicParameter) and p.name == target:
+                    out.append((gate.name, slot))
+        return out
+
+    def bind_occurrence(
+        self,
+        values: dict[str, float],
+        name: str,
+        k: int,
+        value: float | None = None,
+    ) -> Circuit:
+        """Bind parameters like :meth:`bind`, but shift only one occurrence.
+
+        ``bind()`` is name-global: binding ``t`` moves *every* gate that uses
+        ``t`` at once, which silently halves the gradient of a circuit that
+        reuses a name.  This method binds occurrence ``k`` of ``name`` to
+        ``value`` while every other occurrence of ``name`` takes
+        ``values[name]``, so a finite difference or a parameter shift sees
+        one gate move at a time.
+
+        Args:
+            values: Base values (as passed to :meth:`bind`).  ``values[name]``
+                is what every *other* occurrence of ``name`` receives.
+            name: Parameter name whose occurrence is being moved.
+            k: Occurrence index, as returned by :meth:`param_occurrences`.
+            value: Value for occurrence ``k`` (default: ``values[name]``,
+                i.e. identical to :meth:`bind`).
+
+        Returns:
+            New Circuit.
+
+        Raises:
+            IndexError: if occurrence ``k`` does not exist.
+
+        Examples:
+            >>> t = sf.param("t")
+            >>> c = sf.Circuit(1).ry(t, 0).ry(t, 0)
+            >>> c.bind_occurrence({"t": 0.35}, "t", 0, value=0.35 + 1.5)
+        """
+        target = name.name if isinstance(name, SymbolicParameter) else name
+        n_occ = len(self.param_occurrences(target))
+        if not 0 <= k < n_occ:
+            raise IndexError(
+                f"Occurrence {k} of parameter {target!r} does not exist "
+                f"(the circuit has {n_occ} occurrence(s))."
+            )
+        if value is None:
+            value = values.get(target)
+        new_circuit = Circuit(
+            self._n_qubits,
+            self._n_cbits,
+            self._name,
+        )
+        self._ensure_gates()
+        occurrence = 0
+        for gate in self._gates:
+            new_params: list[ParamValue] = []
+            for p in gate.params:
+                if not isinstance(p, SymbolicParameter) or p.name != target:
+                    if isinstance(p, SymbolicParameter) and p.name in values:
+                        new_params.append(values[p.name])
+                    else:
+                        new_params.append(p)
+                    continue
+                if occurrence == k:
+                    new_params.append(p if value is None else value)
+                else:
+                    new_params.append(values[p.name] if p.name in values else p)
+                occurrence += 1
+            new_circuit._gates.append(GateRecord(
+                name=gate.name,
+                qubits=gate.qubits[:],
+                params=new_params,
+                classical_bits=gate.classical_bits[:],
+                condition=gate.condition,
+                matrix=gate.matrix,
+            ))
+        # A name stays free only if some occurrence was left symbolic.
+        for nm, p in self._parameters.items():
+            if nm != target and nm not in values:
+                new_circuit._parameters[nm] = p
+        if target not in values:
+            new_circuit._parameters[target] = self._parameters.get(
+                target, SymbolicParameter(target)
+            )
+        return new_circuit
+
     # ───────────────────────────────────────────────────────
     # Export / Conversion
     # ───────────────────────────────────────────────────────
@@ -847,7 +1044,10 @@ class Circuit:
             elif gate.matrix is not None:
                 dag.add_unitary([int(q) for q in gate.qubits], gate.matrix)
             else:
-                params = [float(p) if not isinstance(p, SymbolicParameter) else str(p.name) for p in gate.params]
+                params = [
+                    float(p) if not isinstance(p, SymbolicParameter) else str(p.name)
+                    for p in gate.params
+                ]
                 if gate.condition is not None:
                     dag.add_gate_cond(
                         str(gate.name), [int(q) for q in gate.qubits], params,
@@ -865,6 +1065,12 @@ class Circuit:
 
         Note: This is exponentially expensive and should only be used
         for small circuits (n_qubits < 12).
+
+        The matrix is little-endian — qubit 0 is the least significant bit of
+        the row/column index, the same convention as Qiskit's ``Operator`` and
+        the same order ``sf.run(...).statevector`` uses. Pauli strings are
+        written the other way round (leftmost character = qubit 0), so
+        ``"XI"`` and the basis index ``0b01`` refer to the same qubit.
         """
         ir_dag = self.to_ir()
         return np.asarray(ir_dag.to_unitary())
@@ -876,6 +1082,7 @@ class Circuit:
     def to_json(self) -> str:
         """Serialize the circuit to a JSON string."""
         import json
+
         from superfermion._fixes import matrix_to_json
         self._ensure_gates()
         data = {
@@ -885,7 +1092,10 @@ class Circuit:
                 {
                     "name": g.name,
                     "qubits": g.qubits,
-                    "params": [float(p) if not isinstance(p, SymbolicParameter) else p.name for p in g.params],
+                    "params": [
+                        float(p) if not isinstance(p, SymbolicParameter) else p.name
+                        for p in g.params
+                    ],
                     **({"matrix": matrix_to_json(g.matrix)} if g.matrix is not None else {}),
                 }
                 for g in self._gates
@@ -909,6 +1119,7 @@ class Circuit:
     def from_json(cls, json_str: str) -> Circuit:
         """Load a circuit from a JSON string."""
         import json
+
         from superfermion._fixes import matrix_from_json
         data = json.loads(json_str)
         circuit = cls(data["n_qubits"], data["n_cbits"])
@@ -952,21 +1163,37 @@ class Circuit:
     def __str__(self) -> str:
         return self.__repr__()
 
-    def draw(self) -> str:
+    def draw(self, ascii_only: bool | None = None) -> str:
         """Draw a text representation of the circuit.
 
+        Args:
+            ascii_only: Restrict the diagram to ASCII characters. ``None``
+                (default) keeps the Unicode box drawing when the current
+                ``sys.stdout`` can encode it and falls back to ASCII when it
+                cannot, so ``print(circuit.draw())`` does not raise
+                ``UnicodeEncodeError`` on a cp1252 console or with
+                ``PYTHONIOENCODING=ascii``. Pass ``True``/``False`` to force it.
+
         Returns:
-            ASCII art circuit diagram.
+            Text circuit diagram.
         """
+        if ascii_only is None:
+            ascii_only = not _stdout_supports_unicode()
+        wire = "---" if ascii_only else "───"
+        link = "-" if ascii_only else "─"
+        ctrl = "o" if ascii_only else "●"
+        target = "+" if ascii_only else "⊕"
+        vbar = " | " if ascii_only else " │ "
+
         self._ensure_gates()
         if not self._gates:
-            lines = [f"q{i}: ─── " for i in range(self._n_qubits)]
+            lines = [f"q{i}: {wire} " for i in range(self._n_qubits)]
             return "\n".join(lines)
 
         # Allocate grid: qubit × time_step
         n_steps = len(self._gates)
         grid: list[list[str]] = [
-            ["───"] * n_steps for _ in range(self._n_qubits)
+            [wire] * n_steps for _ in range(self._n_qubits)
         ]
 
         for step, gate in enumerate(self._gates):
@@ -983,17 +1210,17 @@ class Circuit:
                 grid[q][step] = f"[{label}]"
             elif len(gate.qubits) == 2:
                 q0, q1 = gate.qubits
-                grid[q0][step] = "●" if gname in ("CNOT", "CZ", "CY") else f"[{gate.name}]"
+                grid[q0][step] = ctrl if gname in ("CNOT", "CZ", "CY") else f"[{gate.name}]"
                 if gname == "CNOT":
-                    grid[q1][step] = "⊕"
+                    grid[q1][step] = target
                 elif gname == "CZ":
-                    grid[q1][step] = "●"
+                    grid[q1][step] = ctrl
                 else:
                     grid[q1][step] = f"[{gate.name}]"
                 # Mark vertical connection
                 for q in range(min(q0, q1) + 1, max(q0, q1)):
-                    if grid[q][step] == "───":
-                        grid[q][step] = " │ "
+                    if grid[q][step] == wire:
+                        grid[q][step] = vbar
             elif len(gate.qubits) == 3:
                 for q in gate.qubits:
                     grid[q][step] = f"[{gate.name}]"
@@ -1001,7 +1228,7 @@ class Circuit:
         # Format output
         lines = []
         for q in range(self._n_qubits):
-            parts = "─".join(f"{cell:^7}" for cell in grid[q])
-            lines.append(f"q{q}: ─{parts}─")
+            parts = link.join(f"{cell:^7}" for cell in grid[q])
+            lines.append(f"q{q}: {link}{parts}{link}")
 
         return "\n".join(lines)

@@ -207,6 +207,32 @@ class TestUtilityMethods:
         assert "q0:" in diagram
         assert "q1:" in diagram
 
+    def test_draw_ascii_only_is_pure_ascii(self):
+        """A cp1252 console must be able to print the diagram (defect G)."""
+        diagram = Circuit(3).h(0).cnot(0, 2).crz(0.2, 1, 2).draw(ascii_only=True)
+        diagram.encode("ascii")  # UnicodeEncodeError here was the bug
+        assert "[H]" in diagram
+        assert "q0:" in diagram and "q2:" in diagram
+
+    def test_draw_auto_detects_codec(self, monkeypatch, capsys):
+        """``draw()`` must not raise on a stream that cannot encode the glyphs."""
+        import io
+        import sys as _sys
+
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        monkeypatch.setattr(_sys, "stdout", stream)
+        text = Circuit(2).h(0).cnot(0, 1).draw()
+        text.encode("cp1252")
+        assert "+" in text and "o" in text
+
+        # A UTF-8 stream keeps the box-drawing rendering.
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        monkeypatch.setattr(_sys, "stdout", stream)
+        assert "⊕" in Circuit(2).h(0).cnot(0, 1).draw()
+
+    def test_draw_explicit_unicode(self):
+        assert "⊕" in Circuit(2).h(0).cnot(0, 1).draw(ascii_only=False)
+
     def test_invalid_qubit_for_sdg_raises(self):
         with pytest.raises(IndexError):
             Circuit(1).sdg(3)

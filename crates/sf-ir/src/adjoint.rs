@@ -30,28 +30,482 @@ pub struct AdjointGradResult {
     pub gradients: Vec<f64>,
 }
 
-fn generator_info(op: &OpType) -> Option<(&'static [u8], f64)> {
-    match op {
-        OpType::Rx(_) => Some((&[1], 0.5)),
-        OpType::Ry(_) => Some((&[2], 0.5)),
-        OpType::Rz(_) => Some((&[3], 0.5)),
-        OpType::Rzz(_) => Some((&[3, 3], 0.5)),
-        OpType::Rxx(_) => Some((&[1, 1], 0.5)),
-        OpType::Ryy(_) => Some((&[2, 2], 0.5)),
-        _ => None,
+// ─── Generator table ───────────────────────────────────────────────────
+//
+// The adjoint gradient needs, per parameter slot, the generator G of
+// ∂U/∂θ = −i·G·U.  G is Hermitian, so it always expands in the Pauli
+// basis of the gate's own qubits with real coefficients — and that
+// expansion is all the backward pass needs, it never materialises G.
+//
+// Two sources fill the table:
+//
+//   * `closed_form_generator` — the analytic generators: one term for the
+//     plain rotations (arithmetic unchanged from the historical hot path)
+//     and a short sum for the controlled variants;
+//   * `complex_step_generator` — a universal fallback that differentiates
+//     the gate matrix itself, so a parametric gate can never silently
+//     contribute 0.0 to the gradient again (the 0.1.23 defect: P, U, CP,
+//     Cu, CRx, CRz and R1 had no entry and were dropped without a trace).
+//
+// A parametric gate that neither source resolves is a `MethodError`,
+// never a silent zero.
+
+/// Pauli encoding of a generator factor: 0=I, 1=X, 2=Y, 3=Z.
+const PAULI_I: u8 = 0;
+const PAULI_X: u8 = 1;
+const PAULI_Y: u8 = 2;
+const PAULI_Z: u8 = 3;
+
+/// One term of a generator's Pauli expansion: `coef · P[p₀] ⊗ P[p₁]` on
+/// the gate's qubits (local index 0 pins an identity factor).  Gates here
+/// are at most two-qubit, so the string never needs its own allocation.
+#[derive(Clone, Copy)]
+struct GenTerm {
+    p: [u8; 2],
+    len: u8,
+    coef: f64,
+}
+
+impl GenTerm {
+    #[inline]
+    fn paulis(&self) -> &[u8] {
+        &self.p[..self.len as usize]
     }
 }
 
-fn get_param_name(op: &OpType) -> Option<String> {
-    match op {
-        OpType::Rx(Parameter::Variable { name, .. })
-        | OpType::Ry(Parameter::Variable { name, .. })
-        | OpType::Rz(Parameter::Variable { name, .. })
-        | OpType::Rzz(Parameter::Variable { name, .. })
-        | OpType::Rxx(Parameter::Variable { name, .. })
-        | OpType::Ryy(Parameter::Variable { name, .. }) => Some(name.clone()),
-        _ => None,
+#[inline]
+fn gen1(p: u8, coef: f64) -> GenTerm {
+    GenTerm {
+        p: [p, PAULI_I],
+        len: 1,
+        coef,
     }
+}
+
+#[inline]
+fn gen2(a: u8, b: u8, coef: f64) -> GenTerm {
+    GenTerm {
+        p: [a, b],
+        len: 2,
+        coef,
+    }
+}
+
+/// Complex 2×2 matrix, the local factor of a generator expansion.
+type M2 = [[Complex64; 2]; 2];
+
+#[inline]
+fn m2_pauli(p: u8) -> M2 {
+    let zero = Complex64::new(0.0, 0.0);
+    let one = Complex64::new(1.0, 0.0);
+    match p {
+        PAULI_X => [[zero, one], [one, zero]],
+        PAULI_Y => [
+            [zero, Complex64::new(0.0, -1.0)],
+            [Complex64::new(0.0, 1.0), zero],
+        ],
+        PAULI_Z => [[one, zero], [zero, -one]],
+        _ => [[one, zero], [zero, one]],
+    }
+}
+
+/// Expand a Hermitian 2×2 matrix as Σ cₐ·Pₐ with cₐ = Tr(Pₐ·G)/2.
+///
+/// The identity component is dropped: it contributes 2c·Im⟨φ|ψ_after⟩,
+/// and φ is constructed so that ⟨φ|ψ_after⟩ = ⟨O⟩ is real, so the identity
+/// part of *any* generator is an exactly-zero gradient.  That is what
+/// keeps the controlled-rotation generators at two terms instead of
+/// three.  Terms under the 1e-12 floor are dropped as well (they are
+/// rounding residue from the complex-step fallback).
+fn pauli_decompose_1q(g: &M2) -> Vec<GenTerm> {
+    let mut out = Vec::with_capacity(3);
+    for p in [PAULI_X, PAULI_Y, PAULI_Z] {
+        let m = m2_pauli(p);
+        // Tr(P·G) = Σᵢⱼ Pᵢⱼ·Gⱼᵢ.
+        let mut tr = Complex64::new(0.0, 0.0);
+        for i in 0..2 {
+            for j in 0..2 {
+                tr += m[i][j] * g[j][i];
+            }
+        }
+        let coef = tr.re * 0.5;
+        if coef.abs() > 1e-12 {
+            out.push(gen1(p, coef));
+        }
+    }
+    out
+}
+
+/// Two-qubit counterpart of `pauli_decompose_1q`: c_ab = Tr((Pₐ⊗P_b)·G)/4
+/// with local basis index `2·b(q₀)+b(q₁)` (the first qubit argument is the
+/// high bit, matching `ops::to_unitary_matrix` and `inplace_2q_general`).
+///
+/// Here the identity factors are *kept* — I⊗Z and Z⊗I are not the identity
+/// and do carry gradient — and only the all-identity term is dropped, for
+/// the same reason as in the 1-qubit case.
+fn pauli_decompose_2q(g: &nalgebra::DMatrix<Complex64>) -> Vec<GenTerm> {
+    let mut out = Vec::with_capacity(15);
+    for a in [PAULI_I, PAULI_X, PAULI_Y, PAULI_Z] {
+        for b in [PAULI_I, PAULI_X, PAULI_Y, PAULI_Z] {
+            if a == PAULI_I && b == PAULI_I {
+                continue;
+            }
+            let ma = m2_pauli(a);
+            let mb = m2_pauli(b);
+            let mut tr = Complex64::new(0.0, 0.0);
+            for i in 0..4 {
+                for j in 0..4 {
+                    tr += ma[i >> 1][j >> 1] * mb[i & 1][j & 1] * g[(j, i)];
+                }
+            }
+            let coef = tr.re * 0.25;
+            if coef.abs() > 1e-12 {
+                out.push(gen2(a, b, coef));
+            }
+        }
+    }
+    out
+}
+
+/// Generator matrices of `U(θ,φ,λ)` by slot, in the `∂U/∂θ = −i·G·U`
+/// convention, derived from `U·U† = I`:
+///
+/// * θ: `∂θU·U† = ½[[0, −e^{−iφ}], [e^{iφ}, 0]]` (φ=0 gives Y/2, i.e. Ry);
+/// * φ: `∂φU·U† = i·|1⟩⟨1|` ⇒ `G = −|1⟩⟨1|`;
+/// * λ: `G = −[[s², −e^{−iφ}sc], [−e^{iφ}sc, c²]]`, `s/c = sin/cos(θ/2)`.
+///
+/// These are the *full* generators, identity component included — the
+/// decomposition drops it, and it must be dropped at the final matrix
+/// width, not here: `Cu` embeds the 2×2 block into `diag(0, ·)` and a
+/// constant that is identity on 2 dimensions is not identity on 4.
+///
+/// They stay matrix-valued because the axis depends on the other angles.
+/// `None` for a slot this gate does not have.
+fn u3_generator(theta: f64, phi: f64, slot: usize) -> Option<M2> {
+    let zero = Complex64::new(0.0, 0.0);
+    let half = |re: f64, im: f64| Complex64::new(re * 0.5, im * 0.5);
+    Some(match slot {
+        0 => {
+            let (sp, cp) = phi.sin_cos();
+            [[zero, half(-sp, -cp)], [half(-sp, cp), zero]]
+        }
+        1 => [[zero, zero], [zero, Complex64::new(-1.0, 0.0)]],
+        2 => {
+            let (sp, cp) = phi.sin_cos();
+            let (sh, ch) = (theta * 0.5).sin_cos();
+            let off = sh * ch;
+            [
+                [
+                    Complex64::new(-sh * sh, 0.0),
+                    Complex64::new(off * cp, -off * sp),
+                ],
+                [
+                    Complex64::new(off * cp, off * sp),
+                    Complex64::new(-ch * ch, 0.0),
+                ],
+            ]
+        }
+        _ => return None,
+    })
+}
+
+/// Generator matrices of `Cu(θ,φ,λ,γ)` by slot.  `Cu = diag(I₂, e^{iγ}·U3)`
+/// and both the control-0 block and the `e^{iγ}` phase are constant in
+/// θ/φ/λ, so slots 0-2 carry exactly the `U3` generator embedded in the
+/// control-1 block (the phase cancels against `U†`).  Slot 3 (γ) is
+/// handled by the closed-form table, not here.
+fn cu_generator(theta: f64, phi: f64, slot: usize) -> Option<nalgebra::DMatrix<Complex64>> {
+    let u = u3_generator(theta, phi, slot)?;
+    let mut g = nalgebra::DMatrix::<Complex64>::zeros(4, 4);
+    for i in 0..2 {
+        for j in 0..2 {
+            g[(2 + i, 2 + j)] = u[i][j];
+        }
+    }
+    Some(g)
+}
+
+/// Analytic generator for slot `slot` of `op`, as a Pauli expansion of
+/// `G` in `∂U/∂θ = −i·G·U`.  `None` means "not in the closed-form table"
+/// — the caller falls back to the numerical generator.
+///
+/// Every entry below is verified against the matrices in
+/// `ops::to_unitary_matrix` by `test_every_parametric_gate_has_generator`.
+fn closed_form_generator(op: &OpType, slot: usize) -> Option<Vec<GenTerm>> {
+    let angle = |i: usize| op.parameters().get(i).and_then(|p| p.try_evaluate());
+    Some(match op {
+        OpType::Rx(_) if slot == 0 => vec![gen1(PAULI_X, 0.5)],
+        OpType::Ry(_) if slot == 0 => vec![gen1(PAULI_Y, 0.5)],
+        OpType::Rz(_) if slot == 0 => vec![gen1(PAULI_Z, 0.5)],
+        OpType::Rxx(_) if slot == 0 => vec![gen2(PAULI_X, PAULI_X, 0.5)],
+        OpType::Ryy(_) if slot == 0 => vec![gen2(PAULI_Y, PAULI_Y, 0.5)],
+        OpType::Rzz(_) if slot == 0 => vec![gen2(PAULI_Z, PAULI_Z, 0.5)],
+        // P(φ) = diag(1, e^{iφ}) = e^{iφ/2}·Rz(φ): the global phase is
+        // unitary, so it cancels out of G — identical derivative to Rz.
+        OpType::P(_) | OpType::R1(_) if slot == 0 => vec![gen1(PAULI_Z, 0.5)],
+        // CP(φ) = diag(1,1,1,e^{iφ}) has G = −|11⟩⟨11| = −¼(I−Z)⊗(I−Z);
+        // dropping the identity component leaves ¼(I⊗Z + Z⊗I − Z⊗Z).
+        OpType::CP(_) if slot == 0 => vec![
+            gen2(PAULI_I, PAULI_Z, 0.25),
+            gen2(PAULI_Z, PAULI_I, 0.25),
+            gen2(PAULI_Z, PAULI_Z, -0.25),
+        ],
+        // CRx(θ) = diag(1,1,Rx(θ)) has G = ½|1⟩⟨1|⊗X = ¼(I⊗X − Z⊗X).
+        OpType::CRx(_) if slot == 0 => {
+            vec![gen2(PAULI_I, PAULI_X, 0.25), gen2(PAULI_Z, PAULI_X, -0.25)]
+        }
+        // CRz(θ) = diag(1,1,Rz(θ)) has G = ½|1⟩⟨1|⊗Z.
+        OpType::CRz(_) if slot == 0 => {
+            vec![gen2(PAULI_I, PAULI_Z, 0.25), gen2(PAULI_Z, PAULI_Z, -0.25)]
+        }
+        // Cu(…, γ) = diag(1,1,e^{iγ}·U3) has G = −|1⟩⟨1|⊗I = ½(Z⊗I − I⊗I);
+        // identity dropped → ½·Z⊗I.
+        OpType::Cu(..) if slot == 3 => vec![gen2(PAULI_Z, PAULI_I, 0.5)],
+        // U(θ,φ,λ) and Cu(θ,φ,λ,·) slots 0-2: matrix generator → Pauli.
+        OpType::U(..) => pauli_decompose_1q(&u3_generator(angle(0)?, angle(1)?, slot)?),
+        OpType::Cu(..) => pauli_decompose_2q(&cu_generator(angle(0)?, angle(1)?, slot)?),
+        _ => return None,
+    })
+}
+
+/// Replace parameter `slot` of `op` with a constant.  Also the canonical
+/// slot ordering: `slot < op.parameters().len()` always resolves.
+fn op_with_slot(op: &OpType, slot: usize, value: f64) -> Option<OpType> {
+    let p = Parameter::Const(value);
+    Some(match op {
+        OpType::Rx(_) if slot == 0 => OpType::Rx(p),
+        OpType::Ry(_) if slot == 0 => OpType::Ry(p),
+        OpType::Rz(_) if slot == 0 => OpType::Rz(p),
+        OpType::R1(_) if slot == 0 => OpType::R1(p),
+        OpType::P(_) if slot == 0 => OpType::P(p),
+        OpType::Rxx(_) if slot == 0 => OpType::Rxx(p),
+        OpType::Ryy(_) if slot == 0 => OpType::Ryy(p),
+        OpType::Rzz(_) if slot == 0 => OpType::Rzz(p),
+        OpType::CRx(_) if slot == 0 => OpType::CRx(p),
+        OpType::CRz(_) if slot == 0 => OpType::CRz(p),
+        OpType::CP(_) if slot == 0 => OpType::CP(p),
+        OpType::U(_, b, c) if slot == 0 => OpType::U(p, b.clone(), c.clone()),
+        OpType::U(a, _, c) if slot == 1 => OpType::U(a.clone(), p, c.clone()),
+        OpType::U(a, b, _) if slot == 2 => OpType::U(a.clone(), b.clone(), p),
+        OpType::Cu(_, b, c, d) if slot == 0 => OpType::Cu(p, b.clone(), c.clone(), d.clone()),
+        OpType::Cu(a, _, c, d) if slot == 1 => OpType::Cu(a.clone(), p, c.clone(), d.clone()),
+        OpType::Cu(a, b, _, d) if slot == 2 => OpType::Cu(a.clone(), b.clone(), p, d.clone()),
+        OpType::Cu(a, b, c, _) if slot == 3 => OpType::Cu(a.clone(), b.clone(), c.clone(), p),
+        _ => return None,
+    })
+}
+
+/// Short gate name for error messages and tests.
+fn op_label(op: &OpType) -> &'static str {
+    match op {
+        OpType::Rx(_) => "Rx",
+        OpType::Ry(_) => "Ry",
+        OpType::Rz(_) => "Rz",
+        OpType::R1(_) => "R1",
+        OpType::P(_) => "P",
+        OpType::Rxx(_) => "Rxx",
+        OpType::Ryy(_) => "Ryy",
+        OpType::Rzz(_) => "Rzz",
+        OpType::CRx(_) => "CRx",
+        OpType::CRz(_) => "CRz",
+        OpType::CP(_) => "CP",
+        OpType::U(..) => "U",
+        OpType::Cu(..) => "Cu",
+        _ => "gate",
+    }
+}
+
+/// Safety net for a parametric gate that is not in the closed-form table:
+/// `G = i·(∂U/∂θ)·U†` from the gate matrix itself, by a 5-point central
+/// difference of `to_matrix()`.
+///
+/// A complex step would be exact here (every entry is sin/cos/exp of the
+/// angle), but `Parameter::Const` is a real `f64`, so there is no way to
+/// ask the IR for `U(θ + ih)`.  A 5-point stencil is the best available:
+/// truncation is O(h⁴) and round-off ~1e-16/h, so h = 1e-4 lands near
+/// 1e-12 — far inside the 1e-8 gradient tolerance, and this path is only
+/// reached by gates the table does not know.
+///
+/// `None` when the gate exposes no parameter at `slot`, or when the whole
+/// generator vanishes (an op whose matrix is not implemented returns the
+/// identity from `to_matrix()`, which differentiates to zero).
+fn finite_difference_generator(op: &OpType, slot: usize) -> Option<Vec<GenTerm>> {
+    const H: f64 = 1e-4;
+    let theta = op.parameters().get(slot)?.try_evaluate()?;
+    let at = |d: f64| op_with_slot(op, slot, theta + d).map(|o| o.to_matrix());
+    let (u, um1, up1) = (op.to_matrix(), at(-H)?, at(H)?);
+    let (um2, up2) = (at(-2.0 * H)?, at(2.0 * H)?);
+    let dim = u.nrows();
+    if !matches!(dim, 2 | 4)
+        || up1.nrows() != dim
+        || um1.nrows() != dim
+        || up2.nrows() != dim
+        || um2.nrows() != dim
+    {
+        return None;
+    }
+    // ∂U/∂θ = [8(U₊ − U₋) − (U₂ − U₂₋)]/(12h), then G = i·(∂U/∂θ)·U†.
+    let mut g = nalgebra::DMatrix::<Complex64>::zeros(dim, dim);
+    for i in 0..dim {
+        for j in 0..dim {
+            let mut acc = Complex64::new(0.0, 0.0);
+            for k in 0..dim {
+                let du = (up1[(i, k)] - um1[(i, k)]) * 8.0 - (up2[(i, k)] - um2[(i, k)]);
+                acc += du * u[(j, k)].conj();
+            }
+            g[(i, j)] = Complex64::new(0.0, 1.0) * acc / (12.0 * H);
+        }
+    }
+    let terms = if dim == 2 {
+        pauli_decompose_1q(&[[g[(0, 0)], g[(0, 1)]], [g[(1, 0)], g[(1, 1)]]])
+    } else {
+        pauli_decompose_2q(&g)
+    };
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms)
+    }
+}
+
+/// One gradient contribution of one gate: the parameter it differentiates
+/// (index into `param_names`), its generator, and the chain-rule factor
+/// from the parameter expression (1.0 for a plain variable).
+struct Contribution {
+    idx: usize,
+    terms: Vec<GenTerm>,
+    scale: f64,
+}
+
+/// Chain-rule factor ∂f/∂v of a single-variable parameter expression.
+/// Central difference on the expression tree itself — exact for the affine
+/// forms the IR emits (θ/2, 2·φ, θ+π/4), O(h²) otherwise.
+fn expr_scale(
+    p: &Parameter,
+    var: &str,
+    param_values: &std::collections::HashMap<String, f64>,
+) -> Result<f64, MethodError> {
+    let v = *param_values.get(var).ok_or_else(|| {
+        MethodError(format!(
+            "no value provided for parameter(s): {var}. Pass all parameter \
+             values via param_values= (the dag itself stays unbound)"
+        ))
+    })?;
+    let h = 1e-6 * v.abs().max(1.0);
+    let at = |x: f64| -> Option<f64> {
+        let mut m = param_values.clone();
+        m.insert(var.to_string(), x);
+        p.bind(&m).try_evaluate()
+    };
+    match (at(v + h), at(v - h)) {
+        (Some(hi), Some(lo)) => Ok((hi - lo) / (2.0 * h)),
+        _ => Err(MethodError(format!(
+            "adjoint: cannot differentiate parameter expression of `{var}`; \
+             the expression must depend on that variable alone"
+        ))),
+    }
+}
+
+/// Plan every gradient contribution of one gate.
+///
+/// A `Variable` slot contributes with scale 1, a single-variable `Expr`
+/// with its chain-rule factor, a `Const` not at all.  A slot whose
+/// generator cannot be resolved — including an expression over more than
+/// one free variable, where no per-variable gradient exists — is an error:
+/// that is the invariant that makes the 0.1.23 silent-zero class of bug
+/// unrepeatable.
+fn plan_contributions(
+    orig: &OpType,
+    bound: &OpType,
+    param_idx: &std::collections::HashMap<&str, usize>,
+    param_values: &std::collections::HashMap<String, f64>,
+) -> Result<Vec<Contribution>, MethodError> {
+    let mut out: Vec<Contribution> = Vec::new();
+    for (slot, p) in orig.parameters().into_iter().enumerate() {
+        let (idx, scale) = match p {
+            Parameter::Const(_) => continue,
+            Parameter::Variable { name, .. } => match param_idx.get(name.as_str()) {
+                Some(&i) => (i, 1.0),
+                None => continue,
+            },
+            Parameter::Expr(_) => {
+                let mut names = p.variable_names();
+                names.sort();
+                names.dedup();
+                match names.len() {
+                    0 => continue,
+                    1 => match param_idx.get(names[0].as_str()) {
+                        Some(&i) => (i, expr_scale(p, &names[0], param_values)?),
+                        None => continue,
+                    },
+                    n => {
+                        return Err(MethodError(format!(
+                            "adjoint: parameter expression of `{}` slot {} depends on {} \
+                             free variables; a gradient is only defined per variable — \
+                             split it into one expression per variable",
+                            op_label(bound),
+                            slot,
+                            n
+                        )))
+                    }
+                }
+            }
+        };
+        let terms = closed_form_generator(bound, slot)
+            .or_else(|| finite_difference_generator(bound, slot))
+            .ok_or_else(|| {
+                MethodError(format!(
+                    "adjoint: no generator for `{}` slot {}; add it to the generator \
+                     table (`closed_form_generator` / `op_with_slot`) in sf-ir/src/adjoint.rs",
+                    op_label(bound),
+                    slot
+                ))
+            })?;
+        out.push(Contribution { idx, terms, scale });
+    }
+    Ok(out)
+}
+
+/// ⟨φ|P|src⟩ for one Pauli term over `qubits` (local ids, 0 = identity).
+///
+/// Identity factors are stripped so the hot path keeps the allocation-free
+/// `gen_dot`; an all-identity term degenerates to the plain inner product.
+fn term_dot(
+    phi: &[Complex64],
+    src: &[Complex64],
+    paulis: &[u8],
+    qubits: &[usize],
+    n_qubits: usize,
+    par: bool,
+    scratch: &mut Vec<Complex64>,
+) -> Complex64 {
+    let mut sub = [PAULI_I; 4];
+    let mut qsub = [0usize; 4];
+    let mut n = 0usize;
+    for (i, &p) in paulis.iter().enumerate() {
+        if p != PAULI_I && i < qubits.len() && n < sub.len() {
+            sub[n] = p;
+            qsub[n] = qubits[i];
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return phi.iter().zip(src.iter()).map(|(a, b)| a.conj() * b).sum();
+    }
+    if let Some(ip) = gen_dot(phi, src, &sub[..n], &qsub[..n], n_qubits, par) {
+        return ip;
+    }
+    if scratch.is_empty() {
+        *scratch = vec![Complex64::new(0.0, 0.0); phi.len()];
+    }
+    scratch.copy_from_slice(src);
+    for i in 0..n {
+        apply_pauli_1q_inplace(scratch, sub[i], qsub[i], n_qubits);
+    }
+    phi.iter()
+        .zip(scratch.iter())
+        .map(|(a, b)| a.conj() * b)
+        .sum()
 }
 
 // ─── In-place gate application (no allocation) ─────────────────────────
@@ -636,17 +1090,33 @@ pub fn adjoint_grad(
     // gradient inner product) — the back-walk itself never reads the cache.
     // Caching just those states shrinks the buffer 25-50% on HE circuits
     // and keeps n=18 d=3 under the cap.
+    // Plan every gradient contribution once, up front: which parameter
+    // each gate slot differentiates (index + chain-rule factor) and what
+    // its generator is.  The cache layout and the backward pass are both
+    // derived from this one plan, so they cannot disagree — the pre-0.1.24
+    // code re-derived the parameter name in each place and silently
+    // dropped every gate the two helpers did not know about.
+    let contribs: Vec<Vec<Contribution>> = ops
+        .iter()
+        .zip(orig_ops.iter())
+        .map(|(bound, orig)| {
+            plan_contributions(
+                &orig.original_op_type,
+                &bound.op_type,
+                &param_idx,
+                param_values,
+            )
+        })
+        .collect::<Result<Vec<_>, MethodError>>()?;
     let mut param_slot: Vec<Option<usize>> = Vec::with_capacity(ops.len());
     let mut n_slots = 0usize;
-    for op in &orig_ops {
-        let slot = get_param_name(&op.original_op_type)
-            .filter(|nm| param_idx.contains_key(nm.as_str()))
-            .map(|_| {
-                let s = n_slots;
-                n_slots += 1;
-                s
-            });
-        param_slot.push(slot);
+    for c in &contribs {
+        if c.is_empty() {
+            param_slot.push(None);
+        } else {
+            param_slot.push(Some(n_slots));
+            n_slots += 1;
+        }
     }
     let cache_bytes = (n_slots as u64)
         .saturating_mul(dim as u64)
@@ -815,7 +1285,6 @@ pub fn adjoint_grad(
 
     for k in (0..ops.len()).rev() {
         let gate_op = &ops[k];
-        let orig_op = &orig_ops[k];
 
         if !use_cache {
             let t0 = std::time::Instant::now();
@@ -842,82 +1311,67 @@ pub fn adjoint_grad(
             }
         }
 
-        // Gradient contribution: <phi | G_k | psi_after_k>.
-        let gen_info = generator_info(&orig_op.original_op_type);
-        let param_name = get_param_name(&orig_op.original_op_type);
-
-        if let (Some(gen_info), Some(param_name)) = (gen_info, param_name) {
-            if let Some(&idx) = param_idx.get(param_name.as_str()) {
-                let (gen_paulis, alpha) = gen_info;
-
-                // grad = 2α·Im⟨φ|G_k|ψ_after_k⟩. `gen_dot` applies the
-                // generator inline (exact ±1/±i phases + index permutation)
-                // without materializing G|ψ⟩ — bit-identical to the old
-                // scratch path, minus the per-parameter copy + pauli pass.
-                let t0 = std::time::Instant::now();
-                let src: &[Complex64] = if use_cache {
-                    // Invariant: the enclosing guards (get_param_name hit +
-                    // param_idx hit) are exactly the predicate that produced
-                    // param_slot[k] = Some, so the expect cannot fire.
-                    let slot = param_slot[k].expect("cached gradient gate has no cache slot");
-                    &cache[slot * dim..(slot + 1) * dim]
-                } else {
-                    // Recomputed ψ_k: re-apply U_k into a preallocated
-                    // buffer (no per-parameter allocation).
-                    copy_slice_par(&mut g_psi, &psi, par);
-                    match gate_op.qubits.len() {
-                        1 => apply_1q_inplace(
-                            &mut g_psi,
-                            fwd_matrices_1q[k].unwrap(),
-                            gate_op.qubits[0],
+        // Gradient contributions: 2·scale·Im⟨φ|G_k|ψ_after_k⟩, summed
+        // over the generator's Pauli terms and over every slot of this
+        // gate (a shared parameter name on several gates, or several slots
+        // of one gate, each add their own term).
+        let t0 = std::time::Instant::now();
+        if !contribs[k].is_empty() {
+            let src: &[Complex64] = if use_cache {
+                // Invariant: `param_slot[k].is_some()` iff `contribs[k]`
+                // is non-empty — both are derived from the same plan, so
+                // the expect cannot fire.
+                let slot = param_slot[k].expect("cached gradient gate has no cache slot");
+                &cache[slot * dim..(slot + 1) * dim]
+            } else {
+                // Recomputed ψ_k: re-apply U_k into a preallocated buffer
+                // (no per-parameter allocation).
+                copy_slice_par(&mut g_psi, &psi, par);
+                match gate_op.qubits.len() {
+                    1 => apply_1q_inplace(
+                        &mut g_psi,
+                        fwd_matrices_1q[k].unwrap(),
+                        gate_op.qubits[0],
+                        n_qubits,
+                        par,
+                    ),
+                    2 => apply_2q_inplace(
+                        &mut g_psi,
+                        fwd_matrices_2q[k].unwrap(),
+                        gate_op.qubits[0],
+                        gate_op.qubits[1],
+                        n_qubits,
+                    ),
+                    _ => {}
+                }
+                &g_psi[..]
+            };
+            if adj_trace {
+                t_ip_prep += t0.elapsed().as_secs_f64() * 1e3;
+            }
+            let t0 = std::time::Instant::now();
+            for c in &contribs[k] {
+                // `term_dot` applies the generator's Paulis inline (exact
+                // ±1/±i phases + index permutation) without materializing
+                // G|ψ⟩; only terms with three or more non-identity factors
+                // reach the scratch buffer.
+                let mut ip = Complex64::new(0.0, 0.0);
+                for term in &c.terms {
+                    ip += term.coef
+                        * term_dot(
+                            phi.as_slice(),
+                            src,
+                            term.paulis(),
+                            &gate_op.qubits,
                             n_qubits,
                             par,
-                        ),
-                        2 => apply_2q_inplace(
-                            &mut g_psi,
-                            fwd_matrices_2q[k].unwrap(),
-                            gate_op.qubits[0],
-                            gate_op.qubits[1],
-                            n_qubits,
-                        ),
-                        _ => {}
-                    }
-                    &g_psi[..]
-                };
-                if adj_trace {
-                    t_ip_prep += t0.elapsed().as_secs_f64() * 1e3;
+                            &mut scratch,
+                        );
                 }
-                let t0 = std::time::Instant::now();
-                let ip: Complex64 = match gen_dot(
-                    phi.as_slice(),
-                    src,
-                    gen_paulis,
-                    &gate_op.qubits,
-                    n_qubits,
-                    par,
-                ) {
-                    Some(ip) => ip,
-                    None => {
-                        // >2-pauli generator (not emitted by
-                        // generator_info today): historical scratch path.
-                        if scratch.is_empty() {
-                            scratch = vec![Complex64::new(0.0, 0.0); dim];
-                        }
-                        scratch.copy_from_slice(src);
-                        for (q_local, &pauli_id) in gen_paulis.iter().enumerate() {
-                            let qubit = gate_op.qubits[q_local];
-                            apply_pauli_1q_inplace(&mut scratch, pauli_id, qubit, n_qubits);
-                        }
-                        phi.iter()
-                            .zip(scratch.iter())
-                            .map(|(a, b)| a.conj() * b)
-                            .sum()
-                    }
-                };
-                if adj_trace {
-                    t_ip_dot += t0.elapsed().as_secs_f64() * 1e3;
-                }
-                grad[idx] += 2.0 * alpha * ip.im;
+                grad[c.idx] += 2.0 * c.scale * ip.im;
+            }
+            if adj_trace {
+                t_ip_dot += t0.elapsed().as_secs_f64() * 1e3;
             }
         }
 
@@ -1169,5 +1623,253 @@ mod tests {
         let result = adjoint_grad(&dag, &obs, &params).unwrap();
         let expected = -theta.sin();
         assert!((result.gradients[0] - expected).abs() < 1e-10);
+    }
+
+    // ─── Generator-table tests ─────────────────────────────────────────
+
+    /// Every parametric `OpType` in `ops.rs`, with distinct angles so a
+    /// slot mix-up cannot hide behind two equal values.
+    fn parametric_ops() -> Vec<OpType> {
+        let c = |v: f64| Parameter::Const(v);
+        vec![
+            OpType::Rx(c(0.3)),
+            OpType::Ry(c(0.4)),
+            OpType::Rz(c(0.5)),
+            OpType::R1(c(0.6)),
+            OpType::P(c(0.7)),
+            OpType::Rxx(c(0.8)),
+            OpType::Ryy(c(0.9)),
+            OpType::Rzz(c(1.0)),
+            OpType::CRx(c(1.1)),
+            OpType::CRz(c(1.2)),
+            OpType::CP(c(1.3)),
+            OpType::U(c(0.31), c(0.32), c(0.33)),
+            OpType::Cu(c(0.41), c(0.42), c(0.43), c(0.44)),
+        ]
+    }
+
+    fn bound_values() -> std::collections::HashMap<String, f64> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("theta".to_string(), 0.9);
+        m.insert("phi".to_string(), 0.4);
+        m
+    }
+
+    /// `G = i·(∂U/∂θ)·U†` computed straight from the gate matrix by a
+    /// 5-point central difference — independent of the generator table,
+    /// which is what makes the comparison a real check.
+    fn reference_generator(op: &OpType, slot: usize) -> nalgebra::DMatrix<Complex64> {
+        const H: f64 = 1e-4;
+        let theta = op.parameters()[slot].try_evaluate().unwrap();
+        let at = |d: f64| op_with_slot(op, slot, theta + d).unwrap().to_matrix();
+        let (u, um1, up1, um2, up2) = (op.to_matrix(), at(-H), at(H), at(-2.0 * H), at(2.0 * H));
+        let d = u.nrows();
+        let mut g = nalgebra::DMatrix::<Complex64>::zeros(d, d);
+        for i in 0..d {
+            for j in 0..d {
+                let mut acc = Complex64::new(0.0, 0.0);
+                for k in 0..d {
+                    let du = (up1[(i, k)] - um1[(i, k)]) * 8.0 - (up2[(i, k)] - um2[(i, k)]);
+                    acc += du * u[(j, k)].conj();
+                }
+                g[(i, j)] = Complex64::new(0.0, 1.0) * acc / (12.0 * H);
+            }
+        }
+        g
+    }
+
+    /// Rebuild a generator matrix from its Pauli expansion.
+    fn expand_terms(terms: &[GenTerm], dim: usize) -> nalgebra::DMatrix<Complex64> {
+        let mut m =
+            nalgebra::DMatrix::<Complex64>::from_element(dim, dim, Complex64::new(0.0, 0.0));
+        for t in terms {
+            let local: Vec<M2> = t.paulis().iter().map(|&p| m2_pauli(p)).collect();
+            for i in 0..dim {
+                for j in 0..dim {
+                    let v = if local.len() == 2 {
+                        local[0][i >> 1][j >> 1] * local[1][i & 1][j & 1]
+                    } else {
+                        local[0][i][j]
+                    };
+                    m[(i, j)] += t.coef * v;
+                }
+            }
+        }
+        m
+    }
+
+    /// The exhaustiveness gate: every parametric gate, every slot, a
+    /// generator that matches the matrix derivative. Adding a parametric
+    /// `OpType` without wiring it up fails here instead of returning 0.0.
+    #[test]
+    fn test_every_parametric_gate_has_generator() {
+        for op in parametric_ops() {
+            let label = op_label(&op);
+            let n_slots = op.parameters().len();
+            let dim = 1 << op.n_qubits();
+            assert!(n_slots >= 1, "{label} lost its parameters");
+            assert!(matches!(dim, 2 | 4), "{label} is not a 1- or 2-qubit gate");
+            // Slot coverage: every declared slot resolves, the one past the
+            // end does not (catches an off-by-one in `op_with_slot`).
+            for slot in 0..n_slots {
+                assert!(
+                    op_with_slot(&op, slot, 0.0).is_some(),
+                    "{label} slot {slot} has no substitution arm"
+                );
+            }
+            assert!(op_with_slot(&op, n_slots, 0.0).is_none());
+
+            for slot in 0..n_slots {
+                let terms = closed_form_generator(&op, slot)
+                    .or_else(|| finite_difference_generator(&op, slot))
+                    .unwrap_or_else(|| panic!("{label} slot {slot}: no generator"));
+                assert!(!terms.is_empty(), "{label} slot {slot}: empty generator");
+
+                let got = expand_terms(&terms, dim);
+                let want = reference_generator(&op, slot);
+                // The expansion may drop the identity component (it is an
+                // exactly-zero gradient), so the residual has to be a
+                // multiple of the identity.  Tolerance is set by the
+                // reference stencil, not by the table.
+                const TOL: f64 = 1e-9;
+                let mut resid_diag: Option<Complex64> = None;
+                for i in 0..dim {
+                    for j in 0..dim {
+                        let r = got[(i, j)] - want[(i, j)];
+                        if i == j {
+                            match resid_diag {
+                                None => resid_diag = Some(r),
+                                Some(v) => assert!(
+                                    (r - v).norm() < TOL,
+                                    "{label} slot {slot}: identity residual not constant: \
+                                     {r:?} vs {v:?}"
+                                ),
+                            }
+                        } else {
+                            assert!(
+                                r.norm() < TOL,
+                                "{label} slot {slot}: G[{i},{j}] off by {r:?}"
+                            );
+                        }
+                    }
+                }
+                // G = i·(∂U)·U† is Hermitian for any unitary U.
+                for i in 0..dim {
+                    for j in 0..dim {
+                        assert!(
+                            (got[(i, j)] - got[(j, i)].conj()).norm() < 1e-12,
+                            "{label} slot {slot}: generator is not Hermitian"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The closed-form table must cover every parametric slot — the hot
+    /// path never rides on a numerical derivative, and a new parametric
+    /// `OpType` cannot slip in without an analytic generator.
+    #[test]
+    fn test_closed_form_covers_every_parametric_slot() {
+        let mut covered = Vec::new();
+        for op in parametric_ops() {
+            for slot in 0..op.parameters().len() {
+                if closed_form_generator(&op, slot).is_some() {
+                    covered.push(format!("{}[{slot}]", op_label(&op)));
+                }
+            }
+        }
+        assert_eq!(
+            covered,
+            vec![
+                "Rx[0]", "Ry[0]", "Rz[0]", "R1[0]", "P[0]", "Rxx[0]", "Ryy[0]", "Rzz[0]", "CRx[0]",
+                "CRz[0]", "CP[0]", "U[0]", "U[1]", "U[2]", "Cu[0]", "Cu[1]", "Cu[2]", "Cu[3]",
+            ]
+        );
+    }
+
+    /// The numerical safety net must reproduce a known generator when a
+    /// gate reaches it, so a future parametric `OpType` degrades to a
+    /// slightly-less-precise gradient instead of a silent 0.0.
+    #[test]
+    fn test_numerical_fallback_matches_closed_form() {
+        for op in [
+            OpType::Rz(Parameter::Const(0.7)),
+            OpType::Rx(Parameter::Const(-1.1)),
+        ] {
+            let label = op_label(&op);
+            let fd = finite_difference_generator(&op, 0).expect("fallback produced nothing");
+            let cf = closed_form_generator(&op, 0).unwrap();
+            assert_eq!(fd.len(), cf.len(), "{label}: term count differs");
+            for (a, b) in fd.iter().zip(cf.iter()) {
+                assert_eq!(a.paulis(), b.paulis(), "{label}: term order differs");
+                assert!(
+                    (a.coef - b.coef).abs() < 1e-9,
+                    "{label}: coefficient {} vs {} (want)",
+                    a.coef,
+                    b.coef
+                );
+            }
+        }
+        // A gate with no parameters yields nothing at all.
+        assert!(finite_difference_generator(&OpType::H, 0).is_none());
+    }
+
+    /// A gate with no generator is an error, never a silent `Ok(0)`.
+    #[test]
+    fn test_unknown_parametric_gate_is_an_error() {
+        // Neither source may invent a generator for a gate it cannot read.
+        assert!(closed_form_generator(&OpType::H, 0).is_none());
+        assert!(finite_difference_generator(&OpType::H, 0).is_none());
+
+        let mut param_idx = std::collections::HashMap::new();
+        param_idx.insert("theta", 0usize);
+        param_idx.insert("phi", 1usize);
+        let bound = OpType::Rx(Parameter::Const(0.0));
+        let values = bound_values();
+
+        // An expression over two free variables has no per-variable
+        // gradient: hard error naming the cause.
+        let two_var = Parameter::Expr(Box::new(crate::ops::ParameterExpr::Add(
+            Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            },
+            Parameter::Variable {
+                name: "phi".into(),
+                id: 1,
+            },
+        )));
+        let err = plan_contributions(&OpType::Rx(two_var), &bound, &param_idx, &values)
+            .err()
+            .expect("a two-variable expression must not yield a contribution");
+        assert!(
+            err.0.contains("free variables"),
+            "unexpected error text: {}",
+            err.0
+        );
+
+        // A single-variable expression is differentiated by the chain rule:
+        // ∂(θ/2)/∂θ = 0.5, with the Rx generator scaled by the same factor.
+        let half = Parameter::Expr(Box::new(crate::ops::ParameterExpr::Div(
+            Parameter::Variable {
+                name: "theta".into(),
+                id: 0,
+            },
+            Parameter::Const(2.0),
+        )));
+        let mut one = std::collections::HashMap::new();
+        one.insert("theta", 0usize);
+        let contribs = plan_contributions(&OpType::Rx(half), &bound, &one, &values).unwrap();
+        assert_eq!(contribs.len(), 1);
+        assert_eq!(contribs[0].idx, 0);
+        assert!(
+            (contribs[0].scale - 0.5).abs() < 1e-9,
+            "scale = {}",
+            contribs[0].scale
+        );
+        assert_eq!(contribs[0].terms.len(), 1);
+        assert_eq!(contribs[0].terms[0].paulis(), &[PAULI_X]);
+        assert!((contribs[0].terms[0].coef - 0.5).abs() < 1e-12);
     }
 }

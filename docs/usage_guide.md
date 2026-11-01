@@ -33,8 +33,14 @@ qc = sf.Circuit(2).h(0).cnot(0, 1)
 print(qc.n_qubits)     # 2
 print(qc.gate_count)    # 2
 print(qc.depth)         # 2
-print(qc.draw())        # ASCII diagram
+print(qc.draw())        # text diagram
+print(qc.draw(ascii_only=True))   # force `-`, `o`, `+` (cp1252-safe)
 ```
+
+`draw()` picks the Unicode box drawing when the target stream can encode it and
+falls back to plain ASCII when it cannot (a cp1252 Windows console,
+`PYTHONIOENCODING=ascii`, a redirected stream), so `print(qc.draw())` does not
+raise `UnicodeEncodeError`.
 
 ### Available Gates
 
@@ -265,6 +271,51 @@ grads = state.grad(obs, dag, params)
 print(grads)  # {"theta": -0.23..., "phi": 0.41...}
 ```
 
+### Supported Gradient Gates
+
+Adjoint differentiation (Rust, `O(M+N)·2ⁿ`) is the default on statevector; the
+parameter-shift rule covers every device and every method. Both are exact and
+both are anchored to central finite differences in
+`tests/domain/test_gradient_regressions.py`:
+
+| Gate | Parameters | Adjoint | Parameter-shift | Buildable from `Circuit` |
+|---|---|---|---|---|
+| `rx`, `ry`, `rz`, `rxx`, `ryy`, `rzz` | θ | ✓ | ½[f(θ+π/2) − f(θ−π/2)] | yes |
+| `p`, `r1`, `cp` | φ | ✓ | same (generator spectrum {0, ±1}) | yes |
+| `u` / `u3` | θ, φ, λ | ✓ (each slot) | same, per slot | yes |
+| `cu` | θ, φ, λ, γ | ✓ (each slot) | θ needs the extra π shift; φ, λ, γ use the π/2 rule | yes |
+| `crx`, `cry`, `crz` | θ | ✓ | π/2 plus π shift for the controlled rotations | yes |
+
+Two conveniences, both exact rather than approximate: `r1(φ)` is the same
+matrix as `p(φ)` and exists so that QASM or Qiskit-style code ports over
+unchanged; `cry(θ)` has no dedicated IR opcode and is emitted as
+`cu(θ, 0, 0)`, which is *exactly* `CRy` because `U3(θ,0,0) == Ry(θ)` and a
+controlled block keeps the phase.
+
+Cross-framework status: for every gate in the table, the adjoint
+gradient agrees with PennyLane's reverse-mode autodiff and with its
+parameter-shift to **2.8e-16**, and with central finite differences on Qiskit's
+`Statevector` to **1.7e-11** (the finite-difference floor), with the expectation
+value itself matching to **2.2e-16** across all three frameworks. The
+`r1`/`crx`/`cry`/`crz` builders specifically were checked the same way: 0.0
+against Qiskit's `Statevector` and ≤4.4e-16 against PennyLane on ⟨O⟩, and
+≤8.3e-17 against PennyLane's gradient.
+
+Three rules keep the numbers honest:
+
+- **A name reused across gates is one term per occurrence.** `ry(t); ry(t)`
+  returns the full derivative (both gates move), not half of it.
+- **Nothing is silently zero.** A gate outside the shift-rule table raises
+  `ValueError` naming it, and a parametric gate without a generator raises
+  from the Rust kernel instead of contributing 0.
+- **Pass the unbound circuit.** `adjoint_grad(circuit.bind(params), …)` raises
+  with a hint: binding folds the symbols into constants, so the DAG can no
+  longer differentiate them.
+
+Adjoint is statevector-only. Density-matrix, MPS and stabilizer states raise
+`MethodError` for adjoint and use parameter-shift, which works everywhere
+(`method="density_matrix"` included).
+
 ---
 
 ## 8. VQE Optimization Loop
@@ -417,6 +468,14 @@ sf_circuit = from_qasm(qasm_str)      # Rust-accelerated parser
 qasm3_str = sf_circuit.to_qasm3()
 sf_circuit = from_qasm3(qasm3_str)
 
+# ``from_qasm3`` is strict: a statement it cannot represent raises ValueError
+# naming it, instead of being skipped. The old skip behaviour is opt-in:
+lossy = from_qasm3(qasm3_str, strict=False)   # may be missing operations
+
+# ``from_qasm`` takes both versions: QASM 3 input the native parser rejects is
+# routed to ``from_qasm3``, so this works too.
+sf_circuit = from_qasm(sf_circuit.to_qasm3())
+
 # JSON round-trip
 json_str = sf_circuit.to_json()
 sf_circuit = sf.Circuit.from_json(json_str)
@@ -428,13 +487,28 @@ sf_circuit = sf.Circuit.from_json(json_str)
 
 ```python
 # Unitary matrix (small circuits only, exponential cost)
-U = qc.to_unitary()
+U = qc.to_unitary()   # little-endian: qubit 0 is the least significant bit
 
 # Gate list
 gates = qc.to_gate_list()   # [{"name": "h", "qubits": [0], "params": []}, ...]
 
 # Rust IR (for gradient computation)
 dag = qc.to_ir()            # QuantumDAG object
+```
+
+Ordering matters when you compare matrices: `qc.to_unitary()` puts qubit 0 in the
+least significant bit (the Qiskit `Operator` convention, the same order the
+statevector uses), while a single gate record, `qc._gates[i].to_unitary()`,
+returns the textbook matrix with the record's first qubit *most* significant.
+Bit-reverse the record to compare the two:
+
+```python
+import numpy as np
+
+record = qc._gates[0]
+k = len(record.qubits)
+perm = [int(format(i, f"0{k}b")[::-1], 2) for i in range(1 << k)]
+local = record.to_unitary()[np.ix_(perm, perm)]   # same order as qc.to_unitary()
 ```
 
 ---

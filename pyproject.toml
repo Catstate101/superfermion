@@ -18,7 +18,7 @@ include = [
 
 [project]
 name = "superfermion"
-version = "0.1.23"
+version = "0.1.24"
 description = "High-performance quantum computing framework with a Python API and Rust simulation core"
 readme = "README.md"
 license = "Apache-2.0"
@@ -157,6 +157,13 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# The package `__init__` installs the `State` alias and the Rust method shims
+# before importing the submodules, because those submodules import
+# `superfermion` themselves. Hoisting the imports reintroduces a circular
+# import, so E402 is a deliberate ordering, not an oversight.
+"superfermion/__init__.py" = ["E402"]
 
 [tool.cibuildwheel]
 # The extension is built against the CPython stable ABI (pyo3/abi3-py310), so one

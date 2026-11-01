@@ -20,7 +20,7 @@ grads = state.grad(obs, dag, params)
 print(grads)
 ```
 
-Observable labels are q0-leftmost: `"ZI"` means Z on qubit 0 (first character = qubit 0). All gradient paths — `State.grad()`, adjoint, parameter-shift — agree with each other and with finite differences of `sf.expval()` on the same convention.
+Observable labels are q0-leftmost: `"ZI"` means Z on qubit 0 (first character = qubit 0). All gradient paths — `State.grad()`, adjoint, parameter-shift — agree with each other and with central finite differences of `sf.expval()` on the same convention, for every gate in the [coverage table](#gate-coverage-and-correctness) below.
 
 **Framework path** — through PyTorch, JAX, or TensorFlow autograd (see [ML Frameworks](/docs/guides/ml-frameworks)).
 
@@ -107,6 +107,70 @@ grad = adjoint_grad_vector(ansatz, H, ["t0", "t1"], np.array([params["t0"], para
 natural_grad = riemannian_gradient(grad, metric)
 print(natural_grad)
 ```
+
+## Gate Coverage and Correctness
+
+Every gate that takes a symbolic parameter is differentiable on both exact
+paths. The table is the complete list: a parametric gate outside it raises
+instead of contributing a plausible zero.
+
+| Gate | Parameters | Adjoint | Parameter-shift |
+|------|------------|---------|-----------------|
+| `rx` `ry` `rz` `rxx` `ryy` `rzz` | θ | yes | ½[f(θ+π/2) − f(θ−π/2)] |
+| `p`, `r1` | φ | yes | same rule |
+| `cp` | φ | yes | same rule |
+| `u` / `u3` | θ, φ, λ | yes, each slot | same rule, per slot |
+| `cu` | θ, φ, λ, γ | yes, each slot | θ needs an extra π shift; φ, λ, γ use π/2 |
+| `crx` `cry` `crz` | θ | yes | π/2 plus a π shift |
+
+Two of them are conveniences, both exact rather than approximate:
+
+- `r1(φ)` builds the same matrix as `p(φ)` — it exists so QASM- and
+  Qiskit-style code ports over unchanged.
+- `cry(θ)` has no dedicated opcode in the IR, so it is emitted as
+  `cu(θ, 0, 0)`. That is *exactly* `CRy`, because `U3(θ,0,0) == Ry(θ)` and a
+  controlled block keeps the phase.
+
+```python
+ansatz = sf.Circuit(2).h(0).crx(sf.param("t"), 0, 1)
+grads = sf.simulate(ansatz, params={"t": 0.3}).grad(
+    [([3, 3], 1.0, 0.0)], ansatz.to_ir(), {"t": 0.3}
+)
+```
+
+### What the coverage was verified against
+
+- **Against other frameworks.** For every gate in the table, adjoint matches
+  PennyLane's reverse-mode autodiff to 2.8e-16 and central finite differences
+  on Qiskit's `Statevector` to 1.7e-11 (the finite-difference floor); the
+  expectation value itself matches to 2.2e-16. For `r1`/`crx`/`cry`/`crz`
+  specifically: 0.0 against Qiskit, ≤4.4e-16 against PennyLane on ⟨O⟩ and
+  ≤8.3e-17 on the PennyLane gradient.
+- **Without any framework at all.** `tests/domain/test_gate_unitary_oracle.py`
+  re-derives all 37 gate builders from their mathematical definition (Pauli
+  exponentials, controlled blocks, basis permutations) and compares them
+  element for element with `Circuit.to_unitary()`, including a check that every
+  parameter slot actually reaches the matrix. No Qiskit, PennyLane or qulacs
+  is imported, so it runs on every install lane.
+- **Against finite differences, per defect.**
+  `tests/domain/test_gradient_regressions.py` anchors each historical failure
+  to its own finite-difference number, and `scripts/grad_gate.py` re-runs the
+  same checks against whichever engine the current interpreter can import in
+  about twenty seconds.
+
+### Not covered
+
+- **Adjoint is statevector-only.** `method="density_matrix"`, `method="mps"`
+  and `method="stabilizer"` raise `MethodError` for adjoint and fall back to
+  parameter-shift, which works everywhere.
+- **Gradients are of expectation values**, not of individual measurement
+  probabilities or of a QNode's arbitrary post-processing.
+- **A bound circuit cannot be differentiated.** `bind()` folds the symbols
+  into constants, so the DAG no longer knows the names; passing a bound
+  circuit raises instead of returning zeros.
+- **SPSA is an estimator.** Its output is stochastic and depends on `seed`,
+  `delta` and the shift schedule; it is not comparable to adjoint at the
+  1e-16 level.
 
 ## VQE — Variational Quantum Eigensolver
 

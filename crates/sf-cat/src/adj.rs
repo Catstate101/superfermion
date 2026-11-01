@@ -105,13 +105,46 @@ impl AdjProgram {
             .map(|(i, s)| (s.as_str(), i as u32))
             .collect();
         let mut gates: Vec<AdjGate> = Vec::new();
+        // A `Reset` on a qubit nothing has touched yet is the identity on |0>,
+        // so it must not disqualify an otherwise differentiable circuit -- the
+        // stabilizer/clifford lanes already skip exactly those.  A reset *after*
+        // use is a real collapse and stays refused, so `from_dag` remains safe
+        // for callers that do not run `reject_dynamic_ops` first (it is public
+        // and the benchmark example calls it directly).
+        let nq = dag.n_qubits;
+        let mut touched = vec![false; nq];
+        let mut measured = vec![false; nq];
         for &node in dag.topological_order().iter() {
             let op = &dag.graph()[node];
-            if op.op_type.is_boundary()
-                || op.op_type == OpType::Barrier
-                || op.op_type.is_measurement()
-            {
+            if op.op_type.is_boundary() || op.op_type == OpType::Barrier {
                 continue;
+            }
+            if op.op_type.is_measurement() {
+                for &q in op.qubits.iter() {
+                    if q < nq {
+                        measured[q] = true;
+                    }
+                }
+                continue;
+            }
+            if op.op_type == OpType::Reset {
+                for &q in op.qubits.iter() {
+                    if q < nq && (touched[q] || measured[q]) {
+                        return Err(format!(
+                            "cat: adjoint plan: Reset on qubit {q} after it was used; \
+                             reset means collapse-and-reprepare, which the adjoint \
+                             program does not model - use sf.run(circuit, \
+                             method=\"statevector\", shots=N) for a trajectory gradient"
+                        ));
+                    }
+                }
+                // Leading reset: no tombstone, no gate -- exactly the identity.
+                continue;
+            }
+            for &q in op.qubits.iter() {
+                if q < nq {
+                    touched[q] = true;
+                }
             }
             match &op.op_type {
                 OpType::Ry(param) => gates.push(AdjGate::Ry {
@@ -133,8 +166,10 @@ impl AdjProgram {
                 }
                 other => {
                     return Err(format!(
-                        "cat adj: unsupported gate {} (only RY/RZ with variable \
-                         parameters and CNOT are supported)",
+                        "cat: adjoint plan: unsupported gate {}; the adjoint lane \
+                         differentiates RY/RZ with variable parameters and CNOT only, \
+                         so it has no derivative for this gate - rewrite the circuit \
+                         to that gate set",
                         other.name()
                     ))
                 }
@@ -644,5 +679,36 @@ mod tests {
         let mut cst = QuantumDAG::new(1, 0);
         cst.add_op(OpType::Ry(Parameter::Const(0.4)), &[0]);
         assert!(AdjProgram::from_dag(&cst).is_err());
+    }
+
+    /// `reset(0)` on a fresh qubit is |0> -> |0>, so it must not disqualify a
+    /// differentiable circuit.  The gradient has to be *identical* to the same
+    /// circuit without the reset -- not merely close.
+    #[test]
+    fn cat_adj_skips_a_leading_reset_and_refuses_a_real_one() {
+        let build = |with_reset: bool| {
+            let mut dag = QuantumDAG::new(2, 0);
+            if with_reset {
+                dag.add_op(OpType::Reset, &[0]);
+            }
+            dag.add_op(OpType::Ry(var("t")), &[0]);
+            dag.add_op(OpType::CNOT, &[0, 1]);
+            dag
+        };
+
+        let terms = z_terms(2);
+        let mut plain = AdjProgram::from_dag(&build(false)).unwrap();
+        let mut reset = AdjProgram::from_dag(&build(true))
+            .expect("a leading reset is the identity, not a collapse");
+        let a = plain.grad(&[0.7], &terms).unwrap();
+        let b = reset.grad(&[0.7], &terms).unwrap();
+        assert_eq!(a, b, "leading reset must not change the gradient");
+
+        // A reset *after* use is still a collapse and still refused.
+        let mut bad = QuantumDAG::new(2, 0);
+        bad.add_op(OpType::Ry(var("t")), &[0]);
+        bad.add_op(OpType::Reset, &[0]);
+        let err = AdjProgram::from_dag(&bad).err().unwrap();
+        assert!(err.contains("Reset on qubit 0 after it was used"), "{err}");
     }
 }

@@ -14,7 +14,9 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod adj;
+pub mod colbuild;
 pub mod dispatch;
+pub mod dmlane;
 pub mod kernels;
 pub mod paulframe;
 pub mod plan;
@@ -22,6 +24,7 @@ pub mod router;
 
 pub use adj::AdjProgram;
 pub use dispatch::{run, run_gradient, Exec};
+pub use dmlane::DmProgram;
 pub use paulframe::{FrameTableau, PEntry};
 pub use plan::{CatPlan, Mode};
 pub use router::{classify, select, CircuitProfile, Representation};

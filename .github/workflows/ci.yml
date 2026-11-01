@@ -132,6 +132,24 @@ jobs:
           maturin sdist --out dist
       - name: Every crate, path dependency and include asset must be inside
         run: python scripts/check_sdist.py dist
+      # The sdist is the only path no other lane covers end to end: pip builds
+      # it whenever a wheel is missing for the platform, so it has to produce a
+      # working gradient kernel, not merely install.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Gradient gate on an sdist-built install
+        shell: bash
+        run: |
+          version=$(python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          python -m venv "$RUNNER_TEMP/sdist-venv"
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m pip install --upgrade pip numpy scipy
+          # The tarball by path, not by name: --no-index would also block the
+          # maturin build backend the sdist declares.
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m pip install --no-deps dist/superfermion-*.tar.gz
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/sdist-venv/bin/python" "$GITHUB_WORKSPACE/scripts/grad_gate.py" \
+            --expect-version "$version" \
+            --expect-engine-root "$RUNNER_TEMP/sdist-venv" \
+            --json "$RUNNER_TEMP/grad_gate_sdist.json"
 
   wheel:
     name: Wheel is one stable-ABI artifact
@@ -160,22 +178,47 @@ jobs:
         shell: bash
         run: |
           python -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/python" -m pip install --upgrade pip numpy
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --upgrade pip numpy scipy
           "$RUNNER_TEMP/venv/bin/python" -m pip install --no-index --only-binary=:all: --find-links dist superfermion
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/venv/bin/python" -c "import superfermion as sf; s=sf.simulate(sf.Circuit(4).h(0).cx(0,1)); assert len(s.numpy())==16"
           # The metadata and the importable package must not disagree.
           "$RUNNER_TEMP/venv/bin/python" -c "import importlib.metadata as m, superfermion as sf; assert sf.__version__ == m.version('superfermion'), (sf.__version__, m.version('superfermion')); print('runtime version OK:', sf.__version__)"
+      # The reviewer's exact install path, before merge: a clean venv holding
+      # nothing but the freshly built wheel. Run from $RUNNER_TEMP so no
+      # superfermion/ directory in the checkout can satisfy the import, and
+      # assert the engine is the one inside that venv.
+      - name: Gradient gate on the installed wheel
+        shell: bash
+        run: |
+          version=$(python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/venv/bin/python" "$GITHUB_WORKSPACE/scripts/grad_gate.py" \
+            --expect-version "$version" \
+            --expect-engine-root "$RUNNER_TEMP/venv" \
+            --json "$RUNNER_TEMP/grad_gate_wheel.json"
 
   # ── Python checks ────────────────────────────────────────
   python:
     name: Python ${{ matrix.python-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Every test run states which engine it exercised. The editable install
+    # builds into the checkout, so the engine must live there; a wheel from
+    # another environment on PATH fails the provenance test instead of
+    # silently producing numbers for a different build.
+    env:
+      SF_EXPECT_ENGINE_ROOT: ${{ github.workspace }}/superfermion
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+        # One macOS row: the suite has no macOS coverage outside chemistry, and
+        # the gradient kernels are the part of the codebase where a
+        # platform-specific bug is least likely to be caught by reading.
+        include:
+          - os: macos-15
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -304,6 +347,12 @@ jobs:
         run: |
           cd "$RUNNER_TEMP"
           python -c "import sys, superfermion as sf; assert sys._is_gil_enabled() is False; s=sf.simulate(sf.Circuit(4).h(0).cx(0,1)); assert len(s.numpy())==16; print('free-threaded OK', sys.version.split()[0])"
+          # Same gate as every other lane, so a GIL-free-only regression in the
+          # adjoint or parameter-shift kernel cannot pass silently. scipy has no
+          # free-threaded wheel, so the VQE check reports itself skipped.
+          python "$GITHUB_WORKSPACE/scripts/grad_gate.py" \
+            --expect-engine-root "$(python -c 'import sysconfig; print(sysconfig.get_paths()["platlib"])')" \
+            --json "$RUNNER_TEMP/grad_gate_free_threaded.json"
 
   # ── Benchmark smoke test ─────────────────────────────────
   benchmarks:
