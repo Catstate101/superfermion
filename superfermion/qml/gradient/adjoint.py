@@ -15,6 +15,15 @@ Observable convention (verified to ~1e-16 vs parameter-shift):
     4-qubit circuit ``"ZIII"`` measures Z on qubit 0.  ``params_dict`` must
     bind *every* circuit parameter (trainable + embedding values alike).
 
+Supported gates: every parametric gate in the IR — ``rx``, ``ry``, ``rz``,
+    ``rxx``, ``ryy``, ``rzz``, ``r1``/``p``, ``cp``, ``crx``, ``crz``,
+    ``u``/``u3`` (all three angles) and ``cu`` (all four).  The generators
+    live in one table in ``crates/sf-ir/src/adjoint.rs``; a parametric gate
+    missing from it raises ``MethodError`` rather than returning 0.0.  All of
+    them are reachable from the Python fluent API: ``r1``, ``crx`` and ``crz``
+    map to their own opcodes, and ``cry`` is emitted as the exact equivalent
+    ``cu(θ, 0, 0)`` (the IR has no dedicated ``CRy`` opcode).
+
 Example:
     >>> from superfermion.qml.gradient.adjoint import adjoint_grad
     >>> g = adjoint_grad(circuit, "ZIII", {"t0": 0.5, "x0": 0.2, ...})
@@ -22,24 +31,24 @@ Example:
 """
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Union
+from collections.abc import Sequence
 
 import numpy as np
 
 from superfermion.circuit import Circuit
-from superfermion.parameters import SymbolicParameter
-
+from superfermion.parameters import SymbolicParameter  # noqa: F401 - public re-export
 
 _PAULI_MAP = {"I": 0, "X": 1, "Y": 2, "Z": 3}
 
 
 def _observable_to_rust_terms(
     obs, n_qubits: int
-) -> List[tuple]:
+) -> list[tuple]:
     """Convert an observable to Rust's [(paulis_u8, coef_re, coef_im)] format.
 
     Supports:
       - str: single Pauli string like "ZZI"
+      - Sequence[str]: several Pauli strings, summed with unit weight
       - dict: {"ZI": 0.5, "IX": 0.3}
       - Hamiltonian / SparsePauliOp with .terms attribute
       - Any object with .terms returning list of PauliString-like objects
@@ -49,6 +58,9 @@ def _observable_to_rust_terms(
     if isinstance(obs, str):
         paulis = [_PAULI_MAP[ch] for ch in obs.upper()]
         return [(paulis, 1.0, 0.0)]
+
+    if isinstance(obs, (list, tuple)) and all(isinstance(o, str) for o in obs):
+        return [([_PAULI_MAP[ch] for ch in o.upper()], 1.0, 0.0) for o in obs]
 
     if isinstance(obs, dict):
         terms = []
@@ -76,7 +88,32 @@ def _observable_to_rust_terms(
 
     raise TypeError(
         f"Cannot convert observable of type {type(obs).__name__} to Rust format. "
-        f"Expected str, dict, SparsePauliOp, or Hamiltonian."
+        f"Expected str, Sequence[str], dict, SparsePauliOp, or Hamiltonian."
+    )
+
+
+def _check_param_names(circuit: Circuit, param_names: Sequence[str]) -> None:
+    """Reject names that are not (still) parameters of ``circuit``.
+
+    A circuit that has already been through ``Circuit.bind(...)`` no longer
+    knows its parameter names: every ``SymbolicParameter`` became a float,
+    so the DAG reports no parameters and every derivative is structurally
+    zero.  That silently returned all-zeros before 0.1.24 — this guard is
+    what turns it into an error naming the cause.
+    """
+    known = set(circuit.parameters)
+    missing = [nm for nm in param_names if nm not in known]
+    if not missing:
+        return
+    raise ValueError(
+        "adjoint_grad: "
+        + ", ".join(repr(m) for m in missing)
+        + (" is" if len(missing) == 1 else " are")
+        + " not a parameter of this circuit (circuit parameters: "
+        + (", ".join(repr(p) for p in sorted(known)) or "none")
+        + "). Pass the unbound circuit (circuit.to_ir()), not "
+        "circuit.bind(...): binding folds the parameters into constants, "
+        "so the DAG no longer knows them and every derivative is 0."
     )
 
 
@@ -103,19 +140,33 @@ def adjoint_grad_vector(
     Returns an array of shape ``(len(param_names),)`` with d<O>/d(theta_k).
     """
     params_dict = {nm: float(v) for nm, v in zip(param_names, param_values)}
+    _check_param_names(circuit, param_names)
     rust_obs = _observable_to_rust_terms(observable, circuit.n_qubits)
 
     dag = circuit.to_ir()
     grad_dict = dag.adjoint_grad(rust_obs, params_dict)
 
-    return np.array([grad_dict.get(nm, 0.0) for nm in param_names])
+    # No default: a name the engine did not answer for is a bug, and the
+    # historical `grad_dict.get(nm, 0.0)` is exactly how all-zero gradients
+    # used to ship unnoticed.
+    out = np.empty(len(param_names), dtype=float)
+    for k, nm in enumerate(param_names):
+        try:
+            out[k] = float(grad_dict[nm])
+        except KeyError:  # pragma: no cover - engine/IR mismatch only
+            raise ValueError(
+                f"adjoint engine returned no gradient for {nm!r} "
+                f"(got {sorted(grad_dict)}); this is an engine bug, not a "
+                f"parameter error"
+            ) from None
+    return out
 
 
 def adjoint_grad(
     circuit: Circuit,
     observable,
-    params: Dict[str, float],
-) -> Dict[str, float]:
+    params: dict[str, float],
+) -> dict[str, float]:
     """Dict-form adjoint gradient (analogue of ``parameter_shift_grad``).
 
     ``params`` must bind every circuit parameter (trainable + embedding);
