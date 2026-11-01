@@ -157,3 +157,43 @@ class TestEdgeCases:
         gates = c.to_gate_list()
         assert gates[-1]["name"] == "MEASURE"
         assert gates[-1]["classical_bits"] == [0]
+
+
+class TestClassicalRegisterBounds:
+    """A narrow classical register must fail as ValueError, never as a panic.
+
+    `measure_all()` used to emit `measure(q, q)` for every qubit without
+    consulting `n_cbits`, so `Circuit(2, n_cbits=1).measure_all().to_ir()`
+    asserted inside sf-ir and surfaced as a PyO3 ``PanicException`` -- a
+    ``BaseException``, so even ``except Exception`` did not catch it.  These
+    tests pin the catchable behaviour.
+    """
+
+    def test_measure_rejects_out_of_range_cbit(self):
+        c = Circuit(2, n_cbits=1)
+        with pytest.raises(ValueError, match="out of range"):
+            c.measure(1, 1)
+
+    def test_measure_rejects_default_cbit_that_exceeds_register(self):
+        # `measure(q)` defaults the cbit to q, which is out of range here.
+        c = Circuit(2, n_cbits=1)
+        with pytest.raises(ValueError, match="out of range"):
+            c.measure(1)
+
+    def test_measure_all_rejects_a_narrow_register(self):
+        c = Circuit(2, n_cbits=1)
+        with pytest.raises(ValueError, match="classical bit 1 out of range"):
+            c.measure_all()
+
+    def test_measure_all_accepts_a_matching_register(self):
+        c = Circuit(2, n_cbits=2).h(0).cx(0, 1)
+        c.measure_all()
+        # to_ir() is where the old panic happened, so exercise it explicitly.
+        dag = c.to_ir()
+        assert dag.n_qubits() == 2
+
+    def test_measure_into_a_wider_register_still_works(self):
+        c = Circuit(2, n_cbits=4)
+        c.measure(0, 3)
+        gates = c.to_gate_list()
+        assert gates[-1]["classical_bits"] == [3]
