@@ -39,7 +39,8 @@ qc = sf.Circuit(2).h(0).cnot(0, 1)
 print(qc.n_qubits)     # 2
 print(qc.gate_count)   # 2
 print(qc.depth)        # 2
-print(qc.draw())       # ASCII diagram
+print(qc.draw())       # text diagram (ASCII automatically on cp1252 stdout)
+print(qc.draw(ascii_only=True))   # force `-`, `o`, `+`
 ```
 
 ### Available Gates
@@ -47,12 +48,18 @@ print(qc.draw())       # ASCII diagram
 | Category | Gates |
 |----------|-------|
 | 1Q Clifford | `h`, `x`, `y`, `z`, `s`, `sdg`, `t`, `tdg`, `sx`, `id` |
-| 1Q Parametric | `rx(theta, q)`, `ry(theta, q)`, `rz(theta, q)`, `p(phi, q)`, `u(theta, phi, lam, q)` |
+| 1Q Parametric | `rx(theta, q)`, `ry(theta, q)`, `rz(theta, q)`, `p(phi, q)`, `r1(phi, q)`, `u(theta, phi, lam, q)` / `u3(...)` |
 | 2Q | `cnot(c, t)` / `cx(c, t)`, `cz`, `cy`, `swap`, `iswap`, `ecr` |
-| 2Q Parametric | `cp`, `cu`, `rzz`, `rxx`, `ryy` |
+| 2Q Parametric | `cp`, `cu(theta, phi, lam, c, t, gamma=0)` / `cu3`, `crx`, `cry`, `crz`, `rzz`, `rxx`, `ryy` |
 | 3Q | `ccx` / `toffoli`, `cswap` / `fredkin` |
 | Custom | `unitary(matrix, *qubits)` |
-| Special | `measure(q)`, `measure_all()`, `barrier(*qubits)`, `reset(q)` |
+| Special | `measure(q)`, `measure_all()`, `barrier(*qubits)`, `reset(q)`, `c_if(cbit, value)` |
+
+`r1(phi, q)` builds the same matrix as `p(phi, q)`. `cry(theta, c, t)` has no
+dedicated IR opcode and is emitted as the exact equivalent
+`cu(theta, 0, 0, c, t)`. Every gate above is differentiable on both exact
+gradient paths — see the
+[gate coverage table](/docs/guides/gradients#gate-coverage-and-correctness).
 
 `unitary(matrix, *qubits)` is stored as a single opaque gate. Up to three
 qubits it runs on every method. Above three qubits `to_ir()` returns a
@@ -79,9 +86,9 @@ than dropping the gate.
 | `.to_ir()` | `QuantumDAG` | Export to Rust IR |
 | `.to_qasm3()` | `str` | Export to OpenQASM 3.0 |
 | `.to_json()` | `str` | Export to JSON |
-| `.to_unitary()` | `ndarray` | Unitary matrix (exponential cost) |
+| `.to_unitary()` | `ndarray` | Unitary matrix (exponential cost); little-endian, qubit 0 = LSB |
 | `.to_gate_list()` | `list` | Export as gate list |
-| `.draw()` | `str` | ASCII visualization |
+| `.draw(ascii_only=None)` | `str` | Text diagram; auto-ASCII when the stream cannot encode the box glyphs |
 | `.count_ops()` | `dict` | Count gates by type |
 | `.from_json(s)` | `Circuit` | Import from JSON (classmethod) |
 
@@ -275,7 +282,51 @@ print(stab.sample(1000, seed=7))               # little-endian counts
 # {'00': 502, '11': 498}
 ```
 
-Modes: `statevector` → `.simulate(values)`; `adjoint` → `.run_gradient(pauli, theta)` returns one `d⟨P⟩/dθ` per parameter (Pauli string `"IXYZ…"`, character `i` acts on qubit `i`); `stabilizer` / `clifford` → `.sample(shots, seed=…)`. The handle also exposes `.n_qubits` and `.parameter_names`. `density_matrix` is not implemented and raises `ValueError` at construction rather than returning wrong numbers; a build that does not export `CatCircuit` makes `sf.cat()` raise a clear `ImportError`.
+Modes, all live:
+
+| `mode` | Call | Returns |
+|---|---|---|
+| `statevector` | `.simulate(values)` | a pure `State` (`state.method == "statevector"`) |
+| `density_matrix` (alias `dm`) | `.simulate(values)` | a density-matrix `State` (`state.method == "density_matrix"`) |
+| `adjoint` | `.run_gradient(pauli, theta)` | one `d⟨P⟩/dθ` per parameter (Pauli string `"IXYZ…"`, character `i` acts on qubit `i`) |
+| `stabilizer` / `clifford` | `.sample(shots, seed=…)` | little-endian counts |
+
+The handle also exposes `.n_qubits` and `.parameter_names`. A build that does not export `CatCircuit` makes `sf.cat()` raise a clear `ImportError`.
+
+#### Density-matrix mode
+
+`mode="density_matrix"` carries `rho`, so it returns the mixed state a reset or a mid-circuit readout actually produces instead of sampling it:
+
+```python
+qc = sf.Circuit(2).h(0).cnot(0, 1).reset(0)
+state = sf.cat(qc, mode="density_matrix").simulate({})
+
+print(state.method)                                    # density_matrix
+print([round(p, 3) for p in state.probabilities()])     # [0.5, 0.0, 0.5, 0.0]
+print(round(state.purity(), 3))                        # 0.5 — genuinely mixed
+print(round(state.expectation([([3, 0], 1.0, 0.0)]), 3))  # 1.0 — q0 is |0>
+```
+
+`state.numpy()` is the flat little-endian buffer (length `4**n`) that `sf.run(..., method="density_matrix")` also returns; call `state.shape` for `[2**n, 2**n]`. Every `State` readout works on it (`probabilities`, `purity`, `entropy`, `expectation`, `partial_trace`, `fidelity`), and the lane reuses the vetted `sf-ir` density-matrix kernels, so a plain unitary circuit matches `sf.run(..., method="density_matrix")` exactly. Gates wider than two qubits (Toffoli, CSWAP) are applied axis-by-axis by the lane itself; `sf.run(..., method="density_matrix")` still panics on those.
+
+#### What each mode accepts
+
+A pure vector cannot hold a collapse, and a tableau cannot hold a non-Clifford gate. Each lane therefore refuses only the shapes it cannot answer, and every refusal names the lane plus the route out (`sf.run(circuit, method="statevector", shots=N)` or `QuantumDAG.simulate_dynamic`).
+
+| Circuit shape | `statevector` | `density_matrix` | `adjoint` | `stabilizer` / `clifford` |
+|---|---|---|---|---|
+| plain unitary | accept | accept | accept¹ | accept |
+| terminal measurement | accept — readout dropped | accept — dephased | accept — ignored | accept |
+| leading `reset` on a fresh qubit | accept — dropped | accept | accept | accept |
+| `reset` after the qubit was used | **reject** | accept | **reject** | **reject** |
+| gate on a qubit already measured | **reject** | accept | **reject** | **reject** |
+| feed-forward (`c_if`) | **reject** | **reject** | **reject** | **reject** |
+
+¹ Within the adjoint gate set (`RY`/`RZ` with variable parameters and `CNOT`). A shape built from `H` is refused there for that reason, not because of anything dynamic.
+
+The first four columns follow from what the representation can hold: a reset after use and a non-selective readout are *channels*, so the density matrix answers them exactly, while the pure and tableau lanes refuse them rather than return the pre-collapse state. Feed-forward is refused everywhere because the state becomes a mixture over branches — one `rho` does not hold it; sample the trajectories with `sf.run(..., shots=N)` instead.
+
+`density_matrix` mode used to raise `ValueError` at construction; that error is gone, and `Mode::Dm` is now compiled by the same `CatPlan` as every other mode.
 
 One circuit shape is refused: if an opaque `unitary()` spans more than three
 qubits, `Circuit.to_ir()` returns the compatibility DAG described under
@@ -663,7 +714,12 @@ sf_circuit = from_qasm(qasm_str)      # Rust-accelerated parser
 
 # OpenQASM 3.0
 qasm3_str = sf_circuit.to_qasm3()
-sf_circuit = from_qasm3(qasm3_str)
+sf_circuit = from_qasm3(qasm3_str)     # strict: unrepresentable -> ValueError
+lenient = from_qasm3(qasm3_str, strict=False)   # old skip-unknown behaviour
+
+# ``from_qasm`` accepts both versions; QASM 3 text the native parser rejects
+# (e.g. ``bit[n] c;``) is routed to ``from_qasm3``.
+sf_circuit = from_qasm(sf_circuit.to_qasm3())
 
 # Braket + IonQ export
 braket_circuit = to_braket(sf_circuit)
@@ -767,7 +823,10 @@ See the **[ML Integration Guide](/docs/guides/ml-frameworks)** for complete exam
 sf.Circuit(n)                     Circuit builder
   .h(q) .x(q) .cnot(c,t) ...     Gate methods (fluent, chainable)
   .rx(theta, q) .ry .rz .p .u    Parametric gates
+  .r1(phi, q) .crx .cry .crz     QASM-style rotations (native opcodes)
+  .cu(theta,phi,lam,c,t,gamma)    Controlled-U3 with Qiskit's gamma
   .measure(q) .measure_all()      Measurement
+  .c_if(cbit, value)              Classical condition for the next gate
   .bind(params) -> Circuit        Parameter binding
   .n_qubits -> int                Qubit count
   .gate_count -> int              Total gate count
@@ -775,11 +834,11 @@ sf.Circuit(n)                     Circuit builder
   .n_parameters -> int            Number of unbound parameters
   .parameters -> list[str]        Parameter names
   .to_qasm3() -> str              Export to OpenQASM 3.0
-  .to_unitary() -> ndarray        Export to unitary matrix
+  .to_unitary() -> ndarray        Export to unitary matrix (qubit 0 = LSB)
   .to_ir() -> QuantumDAG          Export to Rust IR
   .to_json() -> str               Export to JSON
   .to_gate_list() -> list         Export to gate list
-  .draw() -> str                  ASCII visualization
+  .draw(ascii_only=None) -> str   Text diagram (auto-ASCII on cp1252)
   .from_json(s) -> Circuit        Import from JSON (classmethod)
 
 sf.run(circuit, ...) -> RunResult   Universal execution

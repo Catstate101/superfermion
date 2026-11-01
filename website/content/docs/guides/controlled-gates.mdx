@@ -1,10 +1,11 @@
 ---
-title: "Controlled Gates: CU & CP"
-description: "Native controlled-U3 (cu/cu3) and controlled-phase (cp) gates: exact simulation, compilation and JSON round-trips that preserve them."
+title: "Controlled Gates"
+description: "Native controlled gates: cu/cu3, cp, crx, cry, crz and r1 — exact simulation, gradients, serialization and QASM round-trips, with no decomposition."
 ---
 
-`cu`, `cu3` and `cp` are native IR gates in Superfermion — they
-simulate, differentiate and serialize exactly, without decomposition.
+`cu`, `cu3`, `cp`, `crx`, `cry`, `crz` and `r1` are native IR gates in
+Superfermion — they simulate, differentiate and serialize exactly, without
+decomposition.
 
 ## Controlled-U3: cu / cu3
 
@@ -66,6 +67,57 @@ sv = sf.run(qc3, shots=0).statevector
 print(sv[3])   # ~ (0.764842+0.644218j) = e^(i*0.7) on |11>
 ```
 
+## Controlled rotations: crx, cry, crz
+
+`circuit.crx(theta, control, target)`, `cry(...)` and `crz(...)` apply the
+rotation on the target only when the control is |1⟩:
+
+**`crx/cry/crz = diag(1, 1) ⊕ R(θ)`** — *not* the same as `cp`:
+
+```python
+import superfermion as sf
+import numpy as np
+
+qc = sf.Circuit(2).x(0).crz(0.4, 0, 1)
+print(np.round(sf.run(qc, shots=0).statevector, 4))
+# [0.+0.j  0.9801-0.1987j  0.+0.j  0.+0.j] -> e^{-iθ/2}
+# (index 1 is the state whose qubit 0 — the control — is set)
+```
+
+`crx` and `crz` map to their own opcodes. The IR has no `CRy` opcode, so
+`cry(θ)` is emitted as `cu(θ, 0, 0)`, which is *exactly* `CRy`: `U3(θ,0,0)`
+is `Ry(θ)` and a controlled block keeps the phase.
+
+```python
+# These two produce the identical statevector, bit for bit
+sf.Circuit(2).x(0).cry(0.4, 0, 1).to_unitary()
+sf.Circuit(2).x(0).cu(0.4, 0.0, 0.0, 0, 1).to_unitary()
+```
+
+The difference from `cp` matters: `crz(θ) = diag(1, 1, e^{-iθ/2}, e^{iθ/2})`
+while `cp(θ) = diag(1, 1, 1, e^{iθ})`. They differ by a relative phase on the
+`|10>` branch, so do not substitute one for the other.
+
+All four are differentiable on both exact paths (adjoint and
+parameter-shift) — see the [gate coverage table](/docs/guides/gradients#gate-coverage-and-correctness).
+
+## Phase gates: p and r1
+
+`circuit.p(phi, qubit)` and `circuit.r1(phi, qubit)` build the **same matrix**,
+`diag(1, e^{iφ})`. `r1` exists so that OpenQASM and Qiskit-style code ports over
+unchanged; the IR stores it under its own opcode and both differentiate
+identically.
+
+```python
+np.allclose(
+    sf.Circuit(1).p(0.7, 0).to_unitary(),
+    sf.Circuit(1).r1(0.7, 0).to_unitary(),
+)   # True
+```
+
+Neither is `rz`: `rz(φ) = diag(e^{-iφ/2}, e^{iφ/2})` differs by a global phase,
+which is invisible in a statevector but *is* visible if you compare unitaries.
+
 ## Serialization round-trips
 
 DAG serialization preserves every controlled gate, including `CP` and
@@ -83,7 +135,8 @@ print(max(abs(a - b) for a, b in zip(sv1, sv2)))   # 0.0
 
 Earlier builds of the Rust IR silently **dropped** `CP` gates on this
 round-trip (and `cu` was rejected with "Unknown gate: cu"); both now
-survive unchanged.
+survive unchanged. The same holds for `crx`, `cry`, `crz` and `r1` through
+OpenQASM 3 — see [Framework Interop](/docs/guides/interop#openqasm-30).
 
 ## See also
 

@@ -217,6 +217,74 @@ from superfermion.serialization import from_qasm3
 sf_qc = from_qasm3(qasm3_str)
 ```
 
+`to_qasm3()` writes the gate's own name (`cnot` becomes `cx`), the `qubit[n] q;`
+and `bit[n] c;` registers, `c[j] = measure q[i];` and, for a conditioned gate,
+`if (c[j] == v) <gate>;`. `from_qasm3` reads all of it back, so a round trip is
+bit-exact rather than approximate:
+
+```python
+import numpy as np
+import superfermion as sf
+from superfermion.serialization import from_qasm3
+
+c = sf.Circuit(2).h(0).crx(0.3, 0, 1).cp(0.2, 0, 1)
+back = from_qasm3(c.to_qasm3())
+print(np.max(np.abs(sf.simulate(c).numpy() - sf.simulate(back).numpy())))  # 0.0
+```
+
+**Every gate `to_qasm3` emits is imported**: `h`, `x`, `y`, `z`, `s`, `sdg`,
+`t`, `tdg`, `sx`, `id`, `rx`, `ry`, `rz`, `p`/`u1`, `r1`, `u`/`u3`/`u2`,
+`rxx`, `ryy`, `rzz`, `cx`/`cnot`, `cz`, `cy`, `swap`, `iswap`, `ecr`, `cp`,
+`crx`, `cry`, `crz`, `cu`/`cu3`, `ccx`/`toffoli`, `cswap`, `barrier`, `reset`,
+`measure` and `if`.
+
+### Import is strict
+
+A statement the parser cannot represent raises `ValueError` naming the
+statement, instead of being skipped. Earlier builds dropped `r1`, `cp`/`cr1`,
+`cu`/`cu3`, `crx`, `cry`, `crz` and `u`/`u3` silently, returning a circuit with
+the right qubit count and **missing operations**:
+
+```python
+from superfermion.serialization import from_qasm3
+
+try:
+    from_qasm3('OPENQASM 3.0;\nqubit[1] q;\nfoo q[0];\n')
+except ValueError as exc:
+    print(exc)  # ... cannot represent this statement: 'foo q[0]' ...
+
+# Opt back in to skipping, only if the dropped statements are known to be
+# irrelevant to you:
+lossy = from_qasm3(text, strict=False)
+```
+
+`while` loops are rejected; `if (c[k] == v)` conditions are preserved on the
+gate and re-emitted verbatim.
+
+### One parameter comes first in QASM
+
+`cu`'s `gamma` is the fourth parameter inside the parentheses in OpenQASM but
+the last argument in Python, after the qubits. The importer routes it
+correctly, so a `gamma` never lands on a qubit index:
+
+```python
+c = sf.Circuit(2).h(0).cu(0.4, 0.3, 0.2, 0, 1, 0.7)   # theta, phi, lam, control, target, gamma
+assert 'cu(0.4, 0.3, 0.2, 0.7) q[0], q[1];' in c.to_qasm3()
+```
+
+### `from_qasm` reads both versions
+
+`from_qasm` documents OpenQASM 2.0/3.0. When the native parser rejects a
+string that is unmistakably QASM 3 (`OPENQASM 3.0;`, or a `bit[n]`/`qubit[n]`
+declaration), it now hands the text to `from_qasm3` instead of failing on a
+register declaration that carries no operation:
+
+```python
+from superfermion.bridge import from_qasm
+
+sf_qc = from_qasm(sf.Circuit(2).h(0).cnot(0, 1).to_qasm3())   # works
+```
+
 ## AWS Braket
 
 ```python
@@ -271,4 +339,5 @@ print(qc.gate_count)  # 2
 
 - **Gate mappings are best-effort** — framework-specific gates (e.g., PennyLane's `qml.QubitUnitary`) may not have a direct Superfermion equivalent
 - **Parameter expressions** — Qiskit's `ParameterExpression` is converted to symbolic parameters; complex expressions may be approximated
-- **Classical control** — OpenQASM 3's `if`/`while` statements are parsed but not executed; use Superfermion's Python API for classical logic
+- **Classical control** — OpenQASM 3's `if (c[k] == v)` is stored on the gate and
+  round-trips exactly; `while` is rejected rather than ignored

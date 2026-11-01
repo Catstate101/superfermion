@@ -42,8 +42,10 @@ qc = sf.Circuit(1)
 qc = qc.rx(0.5, 0)                       # RX rotation
 qc = qc.ry(pi / 2, 0)                    # RY rotation
 qc = qc.rz(0.3, 0)                       # RZ rotation
-qc = qc.p(pi / 4, 0)                     # Phase gate
+qc = qc.p(pi / 4, 0)                     # Phase gate (same matrix as r1)
+qc = qc.r1(pi / 4, 0)                    # OpenQASM-style phase — diag(1, e^{iφ})
 qc = qc.u(0.5, 0.3, 0.2, 0)              # Arbitrary U(2) — u(theta, phi, lam, q)
+qc = qc.u3(0.5, 0.3, 0.2, 0)             # Alias for u
 ```
 
 ### Two-Qubit
@@ -64,11 +66,18 @@ qc = qc.ecr(0, 1)         # Echoed Cross-Resonance
 ```python
 qc = sf.Circuit(2)
 qc = qc.cp(0.5, 0, 1)             # Controlled phase — cp(phi, control, target)
-qc = qc.cu(0.5, 0.3, 0.2, 0, 1)  # Controlled U3 — cu(theta, phi, lam, c, t)
+qc = qc.cu(0.5, 0.3, 0.2, 0, 1)  # Controlled U3 — cu(theta, phi, lam, c, t, gamma=0)
+qc = qc.crx(0.5, 0, 1)           # Controlled RX
+qc = qc.cry(0.5, 0, 1)           # Controlled RY (emitted as cu(theta, 0, 0))
+qc = qc.crz(0.5, 0, 1)           # Controlled RZ — not the same as cp
 qc = qc.rzz(0.5, 0, 1)           # ZZ rotation
 qc = qc.rxx(0.3, 0, 1)           # XX rotation
 qc = qc.ryy(0.4, 0, 1)           # YY rotation
 ```
+
+`crz(θ)` is `diag(1, 1, e^{-iθ/2}, e^{iθ/2})`, while `cp(θ)` is
+`diag(1, 1, 1, e^{iθ})` — they differ by a relative phase, so do not swap them.
+See [Controlled Gates](/docs/guides/controlled-gates).
 
 ### Three-Qubit
 
@@ -103,6 +112,22 @@ qc = qc.measure_all()      # Measure all qubits
 qc = qc.barrier(0, 1, 2)   # Compilation barrier (no optimization across)
 qc = qc.reset(0)            # Reset qubit to |0⟩
 ```
+
+`measure_all()` writes classical bit `q` for every qubit `q`, so it needs a
+register at least as wide as the circuit. A narrower one is refused where the
+measurement is recorded — with the bit, the width, and a fix — instead of
+failing inside the simulator:
+
+```python
+sf.Circuit(2, n_cbits=1).measure_all()
+# ValueError: measure() classical bit 1 out of range (circuit has 1 cbits).
+#   Fix: sf.Circuit(n_qubits, n_cbits=...) or measure(q, c) with 0 <= c < 1
+
+sf.Circuit(2, n_cbits=2).measure_all()      # fine
+```
+
+Before this check the same circuit panicked inside Rust (`PanicException`,
+which `except Exception` does not catch) from every entry point.
 
 ## Symbolic Parameters
 

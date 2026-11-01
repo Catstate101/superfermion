@@ -477,10 +477,11 @@ of bank so that a large request fails loudly instead of swapping.
 CatPlan
   n_qubits
   parameter_names
-  mode        Sv | Adj | Stab | Cliff | Dm
+  mode        Sv | Dm | Adj | Stab | Cliff
   sv          Option<PreparedStatevector>
   adj         Option<AdjProgram>
   stab        Option<FrameTableau>
+  dm          Option<DmProgram>
 ```
 
 Then each call rebinds and executes without rebuilding a DAG, re-parsing gate
@@ -493,15 +494,25 @@ Mode availability is deliberately uneven:
 | Mode | Executes | Path |
 |---|---|---|
 | `statevector` | yes | `CatPlan.simulate(values)` |
+| `density_matrix` | yes | `CatPlan.simulate(values)`; `rho` through the `sf-ir` DM kernels |
 | `adjoint` | yes | `run_gradient(pauli, theta)` |
 | `stabilizer` | yes | Pauli-frame tableau, `sample(shots, seed)` |
 | `clifford` | yes | same tableau pipeline as `stabilizer` |
-| `density_matrix` | **no** | explicit `ValueError` at construction |
 
-Density matrix is the one deliberate hold-out. The feasibility probe measured
+Density matrix was the hold-out through 0.1.23: the feasibility probe measured
 a statistical tie with the routed Aer path, so under a keep-only-if-win rule it
-stays an explicit, non-silent error rather than an implementation that returns
-a slightly worse number under a faster-looking name.
+stayed an explicit, non-silent error rather than an implementation that returns
+a slightly worse number under a faster-looking name. It is kept now for the one
+thing a speed argument cannot answer — a `Reset` after use or a mid-circuit
+readout is a *channel*, and a pure vector cannot hold the result. The lane
+exists for what it can represent, not for a benchmark win; it is still not the
+fast path for a plain unitary circuit.
+
+It is also the only lane that applies gates wider than two qubits:
+`DensityMatrixState::apply_unitary` panics above two, so the lane transforms the
+ket axis by `U` and the bra axis by `U†` itself (Toffoli, CSWAP, opaque
+three-qubit unitaries). `sf.run(..., method="density_matrix")` is unchanged and
+still panics on those.
 
 ### The representation router
 
