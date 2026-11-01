@@ -83,6 +83,8 @@ than dropping the gate.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `.bind(params)` | `Circuit` | Bind symbolic parameters |
+| `.param_occurrences(name)` | `list[tuple[str, int]]` | Every `(gate_name, slot)` where one parameter appears, in gate order |
+| `.bind_occurrence(values, name, k, value=None)` | `Circuit` | Bind every occurrence normally except occurrence `k` of `name`, which takes `value` |
 | `.to_ir()` | `QuantumDAG` | Export to Rust IR |
 | `.to_qasm3()` | `str` | Export to OpenQASM 3.0 |
 | `.to_json()` | `str` | Export to JSON |
@@ -91,6 +93,28 @@ than dropping the gate.
 | `.draw(ascii_only=None)` | `str` | Text diagram; auto-ASCII when the stream cannot encode the box glyphs |
 | `.count_ops()` | `dict` | Count gates by type |
 | `.from_json(s)` | `Circuit` | Import from JSON (classmethod) |
+
+#### Per-occurrence binding
+
+`bind()` is name-global: binding `t` moves *every* gate that uses `t` at once.
+For a circuit that reuses one symbol that is wrong for a finite difference or a
+parameter shift, which must move one gate at a time — a shift of a name driving
+`m` gates changes all `m` of them and silently reports `1/m` of the derivative.
+The occurrence pair exists for that case:
+
+```python
+t = sf.param("t")
+qc = sf.Circuit(1).ry(t, 0).rz(t, 0)
+
+qc.param_occurrences("t")                          # [('RY', 0), ('RZ', 0)]
+shifted = qc.bind_occurrence({"t": 0.4}, "t", 1, 0.4 + 1e-6)   # new Circuit
+```
+
+`param_occurrences` also sees several slots of one gate (`u(t, t, 0.1, 0)`
+returns `[('U', 0), ('U', 1)]`). `bind_occurrence` returns a **new** circuit —
+it does not mutate in place — and raises `IndexError` when occurrence `k` does
+not exist. Both are read-only over the symbolic circuit, so they work on a
+circuit that has not been bound yet.
 
 ---
 

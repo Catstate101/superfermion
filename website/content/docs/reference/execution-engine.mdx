@@ -423,7 +423,16 @@ be re-measured is a threshold you have to trust.
 | `SF_PHASE_TABLE=0` | reference phase sweep instead of table lookups |
 | `SF_F32=1` | f32 statevector lane |
 | `SF_ADJ_PAR_MIN` | adjoint parallel threshold |
+| `SF_CAT_THREADS`, `SF_THREADS` | cap this crate's rayon pool (read once, at first use) |
 | `SF_PLAN_DUMP=1` | instruction census to stderr |
+
+`SF_CAT_THREADS` — or the workspace-wide `SF_THREADS` — is the one entry that
+is a *bound* rather than a switch. It caps the rayon pool `sf-cat` owns without
+touching the host application's global pool, so a batch host running several
+Python workers per machine stops paying for `workers x cores` runnable threads.
+Capping is not a throughput feature: on 8 logical CPUs, one thread made
+`n=1024` across 8 concurrent processes 9% faster and `n=4096` 8% *slower*. The
+direction flips with circuit size, so measure before pinning it.
 
 ## The API layer
 
@@ -630,7 +639,11 @@ plainly:
   that PennyLane wins at n >= 18 came from a 0.1.x build; the
   [gradient grid](/docs/reference/performance#adjoint-differentiation) has the
   current numbers.
-- **`cat` has no density-matrix mode.** That is intentional and documented.
+- **`cat` does have a density-matrix mode** since 0.1.24, and it is kept for
+  the shapes a pure vector cannot hold: a `Reset` after use and a
+  non-selective mid-circuit readout are channels. It is a coverage lane, not a
+  speed claim — on a plain unitary circuit the statevector path is still the
+  one to take.
 - **A single n=12 Qulacs data point is not an SF win.** It is a threading
   pathology in the comparator at that exact size (0.12 ms at 1 thread, 4.4 ms
   at 4), and it is reported as a defect, not as a result.
