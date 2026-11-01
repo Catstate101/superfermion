@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -11,6 +12,31 @@ import superfermion as sf
 from superfermion.circuit import Circuit
 from superfermion.parameters import param
 from superfermion.experiment.protocols import TrackerProtocol
+
+
+def pytest_report_header(config):
+    """Record which engine binary is running this suite.
+
+    Every result is only as meaningful as the install that produced it; the
+    header makes the identity (package, engine, hash, interpreter) visible in
+    the log of every run, and ``SF_EXPECT_ENGINE_ROOT`` turns it into an
+    assertion in ``tests/domain/test_engine_provenance.py``.
+    """
+    import hashlib
+    import sys
+
+    lines = [f"superfermion {getattr(sf, '__version__', '?')} ({Path(sf.__file__).resolve()})"]
+    try:
+        engine = Path(sf._sf_core.__file__).resolve()
+        digest = hashlib.sha256(engine.read_bytes()).hexdigest()[:16]
+        lines.append(f"engine       {engine}")
+        lines.append(f"engine sha256[:16] {digest}  python {sys.executable}")
+    except Exception as exc:  # pragma: no cover - broken install
+        lines.append(f"engine       <unavailable: {exc!r}>")
+    expected_root = os.environ.get("SF_EXPECT_ENGINE_ROOT")
+    if expected_root:
+        lines.append(f"engine root  expect {expected_root}")
+    return lines
 
 
 # ── Circuit fixtures ──────────────────────────────────────────────────
