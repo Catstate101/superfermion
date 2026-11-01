@@ -5,8 +5,9 @@
 //! rebuilding a DAG or re-parsing gates.  Live modes: `statevector`
 //! ([`PyCatCircuit::simulate`]), `adjoint` ([`PyCatCircuit::run_gradient`]),
 //! and `stabilizer`/`clifford` ([`PyCatCircuit::sample`]).  Density-matrix
-//! mode surfaces `sf_cat`'s explicit "not yet implemented" error at
-//! `new(...)` time rather than returning wrong numbers.
+//! mode is served by the same [`PyCatCircuit::simulate`] call and returns a
+//! density-matrix `State`, so `simulate` reports which lane produced it rather
+//! than the caller having to remember.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -15,7 +16,8 @@ use num_complex::Complex64;
 use pyo3::prelude::*;
 use sf_cat::{CatPlan, Mode};
 use sf_ir::adjoint::PauliTerm;
-use sf_ir::state::StatevectorState;
+use sf_ir::dm::DensityMatrixState;
+use sf_ir::state::{DensityMatrixStateWrapper, StatevectorState};
 
 use crate::{PyQuantumDAG, PyState};
 
@@ -104,14 +106,31 @@ impl PyCatCircuit {
         self.parameter_names.clone()
     }
 
-    /// Execute the statevector handle and return a State (GIL released).
+    /// Execute the handle and return a `State` (GIL released).
+    ///
+    /// `statevector` plans return a pure `State`; `density_matrix` plans
+    /// return a density-matrix `State` (reset-after-use and non-selective
+    /// readouts included).  The plan owns the routing so the two lanes cannot
+    /// drift apart here.
     fn simulate(&self, py: Python<'_>, values: HashMap<String, f64>) -> PyResult<PyState> {
-        let data = py
-            .detach(|| {
+        let (is_dm, data) = py
+            .detach(|| -> Result<(bool, Vec<Complex64>), String> {
                 let plan = self.lock_plan()?;
-                plan.execute_statevector(&values)
+                let is_dm = plan.mode() == Mode::Dm;
+                let data = if is_dm {
+                    plan.execute_density_matrix(&values)?
+                } else {
+                    plan.execute_statevector(&values)?
+                };
+                Ok((is_dm, data))
             })
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        if is_dm {
+            let dm = DensityMatrixState::from_data(data, self.n_qubits);
+            return Ok(PyState::new(Box::new(DensityMatrixStateWrapper::new(
+                dm, "cat",
+            ))));
+        }
         Ok(PyState::new(Box::new(StatevectorState::new(
             data,
             self.n_qubits,

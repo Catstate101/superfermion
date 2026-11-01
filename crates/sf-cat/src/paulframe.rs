@@ -135,10 +135,208 @@ fn row(arr: &[u64], i: usize, words: usize) -> &[u64] {
     &arr[i * words..(i + 1) * words]
 }
 
+/// Bit `r` of the returned bitset is `x[r][q]` for `r` in `0..rows`: one packed
+/// column of the row-major `x` tableau.  What the AG plan pass needs per
+/// measure is exactly one column, so this replaces the old "materialise all 64
+/// columns of the word" gather (`SF_CAT_PLAN_TRACE=1` attributed roughly 40%
+/// of the randcliff n=1024 plan to that over-build).
+fn column_bits(x: &[u64], q: usize, words: usize, rows: usize, nw: usize) -> Vec<u64> {
+    let (w, bit, _) = bit_pos(q);
+    let mut out = vec![0u64; nw];
+    for (k, dst) in out.iter_mut().enumerate() {
+        let base = k * 64;
+        let end = (base + 64).min(rows);
+        let mut m = 0u64;
+        for r in base..end {
+            m |= ((x[r * words + w] >> bit) & 1) << (r - base);
+        }
+        *dst = m;
+    }
+    out
+}
+
+/// All 64 columns of one tableau word: `cols[c][r >> 6]` bit `r & 63` is
+/// `x[r][64*w + c]`.  One block serves up to 64 consecutive measures, which is
+/// exactly the deterministic regime (GHZ: after the single random outcome every
+/// remaining measure is determined, and the rows never move again).
+fn column_block(x: &[u64], w: usize, words: usize, rows: usize, nw: usize) -> Vec<Vec<u64>> {
+    let mut cols = vec![vec![0u64; nw]; 64];
+    for r in 0..rows {
+        let mut b = x[r * words + w];
+        while b != 0 {
+            let c = b.trailing_zeros() as usize;
+            b &= b - 1;
+            cols[c][r >> 6] |= 1u64 << (r & 63);
+        }
+    }
+    cols
+}
+
+/// Column cache feeding the AG plan pass.
+///
+/// Which shape pays depends on the circuit's measurement regime, measured with
+/// `SF_CAT_PLAN_TRACE=1`:
+///
+/// * mostly-random measures (brick, randcliff) invalidate the cache after every
+///   measure, so a block would be thrown away before it was reused — one
+///   [`column_bits`] gather is ~64x cheaper there;
+/// * mostly-determined measures (GHZ) reuse a whole [`column_block`] across the
+///   word, and single-column gathers cost 64x more row scans.
+///
+/// The regime is inferred from the previous measure's outcome, which is exact
+/// for both shapes of interest and costs one bool.
+enum ColCache {
+    /// No usable column (nothing built yet, or rows were restructured).
+    Stale,
+    /// One column: `(q, bit r of the bitset = x[r][q])`.
+    One(usize, Vec<u64>),
+    /// Every column of one word: `(w, cols)`.
+    Wide(usize, Vec<Vec<u64>>),
+}
+
+impl ColCache {
+    /// The cached bitset for column `q`, if it is already materialised.
+    #[inline]
+    fn column(&self, q: usize) -> Option<&[u64]> {
+        match self {
+            ColCache::Stale => None,
+            ColCache::One(cq, bits) if *cq == q => Some(bits),
+            ColCache::Wide(cw, cols) if *cw == q / 64 => Some(&cols[q & 63]),
+            _ => None,
+        }
+    }
+
+    /// Move column `q`'s bitset out of the cache (the hit list needs to own it
+    /// while `tab` is mutated).
+    #[inline]
+    fn take_column(&mut self, q: usize) -> Vec<u64> {
+        match self {
+            ColCache::Stale => Vec::new(),
+            ColCache::One(cq, bits) if *cq == q => std::mem::take(bits),
+            ColCache::Wide(cw, cols) if *cw == q / 64 => std::mem::take(&mut cols[q & 63]),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// One AG row update folded into a single pass over row `i`: accumulate
+/// `phase_of_product(row_i, row_p)` into `phase` (same word test as
+/// [`phase_of_product`]), XOR row `p`'s random-variable mask into `rm_i` when it
+/// is non-zero, and XOR the product row into row `i`.
+///
+/// These ran as three separate passes; fusing them cuts the row traffic 3x,
+/// which `SF_CAT_PLAN_TRACE=1` showed to be the plan-build hotspot at n >= 1024.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fold_hit(
+    xi: &mut [u64],
+    zi: &mut [u64],
+    rm_i: &mut [u64],
+    xp: &[u64],
+    zp: &[u64],
+    rp_mask: &[u64],
+    rp_nz: bool,
+    phase: &mut u32,
+    n: usize,
+    words: usize,
+) {
+    let tail = if n.is_multiple_of(64) {
+        u64::MAX
+    } else {
+        (1u64 << (n % 64)) - 1
+    };
+    let last = words.saturating_sub(1);
+    let mut acc: u32 = 0;
+    for w in 0..words {
+        let xw1 = xi[w];
+        let zw1 = zi[w];
+        let xw2 = xp[w];
+        let zw2 = zp[w];
+        // A zero word in either row contributes no phase terms.
+        if (xw1 | zw1) != 0 && (xw2 | zw2) != 0 {
+            let c1 =
+                (!xw1 & zw1 & xw2 & zw2) | (xw1 & !zw1 & !xw2 & zw2) | (xw1 & zw1 & xw2 & !zw2);
+            let c3 =
+                (!xw1 & zw1 & xw2 & !zw2) | (xw1 & !zw1 & xw2 & zw2) | (xw1 & zw1 & !xw2 & zw2);
+            let mask = if w == last { tail } else { u64::MAX };
+            acc = acc.wrapping_add((c1 & mask).count_ones() + 3 * (c3 & mask).count_ones());
+        }
+        xi[w] = xw1 ^ xw2;
+        zi[w] = zw1 ^ zw2;
+    }
+    *phase = (*phase + acc) & 3;
+    if rp_nz {
+        for (dst, src) in rm_i.iter_mut().zip(rp_mask.iter()) {
+            *dst ^= *src;
+        }
+    }
+}
+
+/// Apply the AG hit loop to the bitset words in `ks`, writing into the row chunk
+/// that starts at global row `base` (`xs`/`zs`/`rms`/`rcs`/`nzs` are that
+/// chunk).  Returns the number of rows updated.
+///
+/// Called once with the whole range (sequential) or once per 64-row-aligned
+/// chunk from a rayon split — the arithmetic per row is identical either way.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn apply_hits_range(
+    ks: std::ops::Range<usize>,
+    base: usize,
+    bs_hits: &[u64],
+    p: usize,
+    xp: &[u64],
+    zp: &[u64],
+    rp_mask: &[u64],
+    rp_nz: bool,
+    rp_const: u8,
+    xs: &mut [u64],
+    zs: &mut [u64],
+    rms: &mut [Vec<u64>],
+    rcs: &mut [u8],
+    nzs: &mut [bool],
+    n: usize,
+    words: usize,
+) -> usize {
+    let mut applied = 0usize;
+    for k in ks {
+        let mut m = bs_hits[k];
+        while m != 0 {
+            let i = k * 64 + m.trailing_zeros() as usize;
+            m &= m - 1;
+            if i == p {
+                continue;
+            }
+            let li = i - base;
+            let o = li * words;
+            let mut phase: u32 = 0;
+            fold_hit(
+                &mut xs[o..o + words],
+                &mut zs[o..o + words],
+                &mut rms[li],
+                xp,
+                zp,
+                rp_mask,
+                rp_nz,
+                &mut phase,
+                n,
+                words,
+            );
+            rcs[li] ^= rp_const ^ ((phase as u8 >> 1) & 1);
+            if rp_nz {
+                nzs[li] = true;
+            }
+            applied += 1;
+        }
+    }
+    applied
+}
+
 /// Flat typed Clifford op for the fused row-major build.  CZ/CY/SX/SXDG are
 /// expanded into these primitives at flatten time (mirrors sf-ir's `COp`).
+/// The same list drives the column-major builder in `crate::colbuild`.
 #[derive(Clone, Copy)]
-enum COp {
+pub(crate) enum COp {
     H(u32),
     S(u32),
     Sdg(u32),
@@ -153,6 +351,87 @@ const PAR_MIN_DEFAULT: usize = 1 << 18;
 const SAMPLE_PAR_MIN: usize = 1 << 20;
 
 static PAR_MIN: OnceLock<usize> = OnceLock::new();
+
+/// Fused tableau-build path (`SF_CAT_BUILD=rows` keeps the row-major builder,
+/// the always-available reference; the column-major builder is the default).
+#[inline]
+fn column_build_enabled() -> bool {
+    static COL: OnceLock<bool> = OnceLock::new();
+    *COL.get_or_init(|| std::env::var("SF_CAT_BUILD").ok().as_deref() != Some("rows"))
+}
+
+/// Crate-private rayon pool, built only when a thread cap is requested.
+///
+/// rayon sizes its global pool to the whole machine, which is the right
+/// default for one process.  Batch hosts that run several Python workers at
+/// once end up with `workers x cores` runnable threads and pay for the
+/// context switches; `SF_CAT_THREADS` (or the workspace-wide `SF_THREADS`)
+/// caps this crate's parallelism without touching the host application's
+/// global rayon setup.  Unset, `0` or unparsable keeps the global pool, so
+/// the default path is unchanged.
+#[inline]
+fn thread_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let raw = std::env::var("SF_CAT_THREADS")
+            .ok()
+            .or_else(|| std::env::var("SF_THREADS").ok())?;
+        let threads: usize = raw.trim().parse().ok()?;
+        if threads == 0 {
+            return None;
+        }
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// Run `f` on the capped pool when one is configured, else inline.
+///
+/// Every parallel region in this crate is reached through one of the public
+/// entry points (`from_cops`, `build_plan`, `sample_packed`, `sample`), so
+/// wrapping those is enough for `rayon::current_num_threads()` — and the
+/// work-vs-threshold decisions that read it — to see the capped width.
+#[inline]
+pub(crate) fn install<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    match thread_pool() {
+        Some(pool) => pool.install(f),
+        None => f(),
+    }
+}
+
+/// Parallel threshold for the tableau build (`SF_CAT_STAB_PAR_MIN`).
+#[inline]
+fn par_min() -> usize {
+    *PAR_MIN.get_or_init(|| {
+        std::env::var("SF_CAT_STAB_PAR_MIN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(PAR_MIN_DEFAULT)
+    })
+}
+
+/// Split one measure's AG hit loop across threads?  Work proxy = `hits * words`
+/// (`SF_CAT_PLAN_PAR_MIN`, default 32 Ki).  Rows are independent inside a
+/// measure — every hit reads only row `p` and mutates row `i` — so the split is
+/// bit-exact; the threshold keeps rayon's per-measure overhead off the small
+/// rungs, where a 4-way split of a ~30 us measure costs more than it saves.
+///
+/// Calibrated on the modes rungs (4 threads, ABBA, same window): 16 Ki of
+/// per-measure work lost 6-8% (randcliff/brick n=1024), 32 Ki broke even to
+/// +20%, and 128 Ki won 1.8x (randcliff n=4096).
+#[inline]
+fn plan_par_min() -> usize {
+    static PLAN_PAR_MIN: OnceLock<usize> = OnceLock::new();
+    *PLAN_PAR_MIN.get_or_init(|| {
+        std::env::var("SF_CAT_PLAN_PAR_MIN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1 << 15)
+    })
+}
 
 /// Parallel threshold for the bulk sampler (env-overridable once, for
 /// calibration: `SF_CAT_SAMPLE_PAR_MIN`).  Work proxy = `shots * n`.
@@ -572,6 +851,24 @@ impl FrameTableau {
     }
 
     fn from_cops(n: usize, cops: &[COp]) -> Self {
+        install(|| Self::from_cops_inner(n, cops))
+    }
+
+    fn from_cops_inner(n: usize, cops: &[COp]) -> Self {
+        if column_build_enabled() {
+            // Column-major fused build (see `crate::colbuild`): same tableau,
+            // `2n * |ops|` bit updates turned into word-wide column passes.
+            let (x, z, r) =
+                crate::colbuild::build(n, cops, rayon::current_num_threads(), par_min());
+            return Self {
+                n,
+                words: n.div_ceil(64),
+                x,
+                z,
+                r,
+                plan: OnceLock::new(),
+            };
+        }
         let mut tab = Self::new(n);
         tab.apply_cops(cops);
         tab
@@ -631,6 +928,10 @@ impl FrameTableau {
     /// order `q = 0..n`.  Structure mirrors sf-ir's `build_sample_plan` step
     /// for step, but emits sparse variable lists for determined outcomes.
     fn build_plan(&self) -> Vec<PEntry> {
+        install(|| self.build_plan_inner())
+    }
+
+    fn build_plan_inner(&self) -> Vec<PEntry> {
         let n = self.n;
         let words = self.words;
         let mwords = n.div_ceil(64).max(1);
@@ -648,14 +949,15 @@ impl FrameTableau {
         let mut r_const: Vec<u8> = self.r.iter().map(|&v| v & 1).collect();
         let mut var_count: u32 = 0;
         let mut plan: Vec<PEntry> = Vec::with_capacity(n);
-        // Column index: `colidx[w][c]` is the bitmask over rows (bit r =
-        // row r) of x's column q = 64*w + c, built lazily per word from the
-        // current tableau and invalidated en masse after every measure that
-        // restructures rows.  Column queries then iterate set bits instead of
-        // scanning one cache line per row (the measured plan bottleneck:
-        // trace `scan_ms`/`det_ms` at n >= 1024).  Purely advisory: the
-        // row-major tableau stays the single source of truth.
-        let mut colidx: Vec<Option<Vec<Vec<u64>>>> = vec![None; words];
+        // Column cache: one column per gather in the random regime, the whole
+        // 64-column block of a word in the deterministic regime (see
+        // [`ColCache`]).  Dropped after every restructure, so the row-major
+        // tableau stays the single source of truth.
+        let mut col = ColCache::Stale;
+        // Whether the previous measure was determined (rows did not move), used
+        // to pick between the one-column and the block gather.
+        let mut prev_det = false;
+        let col_nw = (2 * n).div_ceil(64);
         if trace_on {
             tr.init_ms = t_init.elapsed().as_secs_f64() * 1e3;
         }
@@ -663,19 +965,13 @@ impl FrameTableau {
         for q in 0..n {
             let (w, _, qmask) = bit_pos(q);
             let t_q = trace_on.then(std::time::Instant::now);
-            if colidx[w].is_none() {
+            if col.column(q).is_none() {
                 let t_g = trace_on.then(std::time::Instant::now);
-                let nw = (2 * n).div_ceil(64);
-                let mut cols = vec![vec![0u64; nw]; 64];
-                for r in 0..2 * n {
-                    let mut b = tab.x[r * words + w];
-                    while b != 0 {
-                        let c = b.trailing_zeros() as usize;
-                        b &= b - 1;
-                        cols[c][r >> 6] |= 1u64 << (r & 63);
-                    }
-                }
-                colidx[w] = Some(cols);
+                col = if prev_det {
+                    ColCache::Wide(w, column_block(&tab.x, w, words, 2 * n, col_nw))
+                } else {
+                    ColCache::One(q, column_bits(&tab.x, q, words, 2 * n, col_nw))
+                };
                 if let Some(t) = t_g {
                     tr.gather_ms += t.elapsed().as_secs_f64() * 1e3;
                 }
@@ -684,7 +980,7 @@ impl FrameTableau {
             // Random branch: first row p >= n with x[p][q] = 1 (bit index
             // q&63 of the column index for word w).
             let p_rand: Option<usize> = {
-                let bs = &colidx[w].as_ref().unwrap()[q & 63];
+                let bs = col.column(q).unwrap_or(&[]);
                 let mut found = None;
                 for (k, &word) in bs.iter().enumerate() {
                     if k < n / 64 {
@@ -710,59 +1006,74 @@ impl FrameTableau {
                 let xp = row(&tab.x, p, words).to_vec();
                 let zp = row(&tab.z, p, words).to_vec();
 
-                let bs_hits: Vec<u64> = std::mem::take(&mut colidx[w].as_mut().unwrap()[q & 63]);
-                for (k, &word) in bs_hits.iter().enumerate() {
-                    let mut m = word;
-                    while m != 0 {
-                        let i = k * 64 + m.trailing_zeros() as usize;
-                        m &= m - 1;
-                        if i == p {
-                            continue;
-                        }
-                        let tp = trace_on.then(std::time::Instant::now);
-                        let popp = phase_of_product(
-                            row(&tab.x, i, words),
-                            row(&tab.z, i, words),
-                            &xp,
-                            &zp,
-                            n,
-                            words,
-                        );
-                        if let Some(t) = tp {
-                            let e = t.elapsed().as_secs_f64() * 1e3;
-                            tr.phase_ms += e;
-                            hit_ms += e;
-                            tr.phase_calls += 1;
-                        }
-                        let tm = trace_on.then(std::time::Instant::now);
-                        if rp_nz {
-                            for k in 0..mwords {
-                                r_mask[i][k] ^= rp_mask[k];
-                            }
-                            r_mask_nz[i] = true;
-                        }
-                        r_const[i] ^= rp_const ^ ((popp >> 1) & 1);
-                        if let Some(t) = tm {
-                            let e = t.elapsed().as_secs_f64() * 1e3;
-                            tr.mask_ms += e;
-                            hit_ms += e;
-                        }
-                        let tx = trace_on.then(std::time::Instant::now);
-                        for ww in 0..words {
-                            let (xw, zw) = (xp[ww], zp[ww]);
-                            if (xw | zw) == 0 {
-                                continue;
-                            }
-                            tab.x[i * words + ww] ^= xw;
-                            tab.z[i * words + ww] ^= zw;
-                        }
-                        if let Some(t) = tx {
-                            let e = t.elapsed().as_secs_f64() * 1e3;
-                            tr.xor_ms += e;
-                            hit_ms += e;
-                            tr.hits += 1;
-                        }
-                    }
+                let bs_hits: Vec<u64> = col.take_column(q);
+                let hits: usize = bs_hits.iter().map(|w| w.count_ones() as usize).sum();
+                let threads = rayon::current_num_threads();
+                let tp = trace_on.then(std::time::Instant::now);
+                let applied = if threads > 1 && hits.saturating_mul(words) >= plan_par_min() {
+                    // 64-row-aligned chunks so each chunk maps onto whole
+                    // bitset words; `zip_eq` keeps the five per-row views in
+                    // lockstep.
+                    let per = (2 * n).div_ceil(threads).max(64).div_ceil(64) * 64;
+                    let nw_per = per / 64;
+                    use rayon::prelude::*;
+                    tab.x
+                        .par_chunks_mut(per * words)
+                        .zip_eq(tab.z.par_chunks_mut(per * words))
+                        .zip_eq(r_mask.par_chunks_mut(per))
+                        .zip_eq(r_const.par_chunks_mut(per))
+                        .zip_eq(r_mask_nz.par_chunks_mut(per))
+                        .enumerate()
+                        .map(|(bi, ((((xs, zs), rms), rcs), nzs))| {
+                            let base = bi * per;
+                            let k_end = ((bi + 1) * nw_per).min(bs_hits.len());
+                            apply_hits_range(
+                                (base / 64)..k_end,
+                                base,
+                                &bs_hits,
+                                p,
+                                &xp,
+                                &zp,
+                                &rp_mask,
+                                rp_nz,
+                                rp_const,
+                                xs,
+                                zs,
+                                rms,
+                                rcs,
+                                nzs,
+                                n,
+                                words,
+                            )
+                        })
+                        .sum()
+                } else {
+                    apply_hits_range(
+                        0..bs_hits.len(),
+                        0,
+                        &bs_hits,
+                        p,
+                        &xp,
+                        &zp,
+                        &rp_mask,
+                        rp_nz,
+                        rp_const,
+                        &mut tab.x,
+                        &mut tab.z,
+                        &mut r_mask,
+                        &mut r_const,
+                        &mut r_mask_nz,
+                        n,
+                        words,
+                    )
+                };
+                if let Some(t) = tp {
+                    // `phase_ms`/`hits` now cover the whole fused update.
+                    let e = t.elapsed().as_secs_f64() * 1e3;
+                    tr.phase_ms += e;
+                    hit_ms += e;
+                    tr.phase_calls += applied as u64;
+                    tr.hits += applied as u64;
                 }
 
                 // Copy old row p into the destabilizer slot p-n, then set the
@@ -786,11 +1097,10 @@ impl FrameTableau {
                 r_mask[p][(var as usize) / 64] = 1u64 << ((var as usize) % 64);
                 r_mask_nz[p] = true;
                 r_const[p] = 0;
-                // The measure restructured rows; every word's column index is
-                // stale from here (lazily rebuilt on next use).
-                for c in colidx.iter_mut() {
-                    *c = None;
-                }
+                // The measure restructured rows; the cached column is stale
+                // from here (rebuilt lazily for the next `q`).
+                col = ColCache::Stale;
+                prev_det = false;
                 tr.rand_q += 1;
                 if let Some(t) = t_q {
                     let e = t.elapsed().as_secs_f64() * 1e3 - hit_ms;
@@ -810,7 +1120,7 @@ impl FrameTableau {
                     tr.sub_alloc_ms += t.elapsed().as_secs_f64() * 1e3;
                 }
                 let t_scan = trace_on.then(std::time::Instant::now);
-                let det_bs = &colidx[w].as_ref().unwrap()[q & 63];
+                let det_bs = col.column(q).unwrap_or(&[]);
                 let k_last = n / 64;
                 let tail_mask = if !n.is_multiple_of(64) {
                     (1u64 << (n % 64)) - 1
@@ -888,6 +1198,7 @@ impl FrameTableau {
                     tr.sub_push_ms += t.elapsed().as_secs_f64() * 1e3;
                 }
                 tr.det_q += 1;
+                prev_det = true;
                 if let Some(t) = t_q {
                     let e = t.elapsed().as_secs_f64() * 1e3 - hit_ms;
                     tr.det_ms += e;
@@ -936,6 +1247,10 @@ impl FrameTableau {
     /// Sample `shots` bitstrings, shot i packed into `words` little-endian
     /// words at `[i*words, (i+1)*words)`: bit `q` = outcome of qubit `q`.
     pub fn sample_packed(&self, shots: usize, seed: Option<u64>) -> Vec<u64> {
+        install(|| self.sample_packed_inner(shots, seed))
+    }
+
+    fn sample_packed_inner(&self, shots: usize, seed: Option<u64>) -> Vec<u64> {
         if shots == 0 {
             return Vec::new();
         }
@@ -1032,6 +1347,10 @@ impl FrameTableau {
     /// (LE string, leftmost char = highest qubit).  Strings are materialized
     /// once per *distinct* key.
     pub fn sample(&self, shots: usize, seed: Option<u64>) -> HashMap<String, usize> {
+        install(|| self.sample_inner(shots, seed))
+    }
+
+    fn sample_inner(&self, shots: usize, seed: Option<u64>) -> HashMap<String, usize> {
         if shots == 0 {
             return HashMap::new();
         }
@@ -1395,6 +1714,247 @@ mod tests {
         }
         let counts = tab.sample(shots, Some(17));
         assert_eq!(counts, manual);
+    }
+
+    /// Build the same tableau through the row-major reference builder.
+    fn rows_built(n: usize, cops: &[COp]) -> FrameTableau {
+        let mut tab = FrameTableau::new(n);
+        tab.apply_cops(cops);
+        tab
+    }
+
+    fn flatten(n: usize, gates: &[(String, Vec<usize>)]) -> Vec<COp> {
+        let mut cops = Vec::new();
+        for (name, qubits) in gates {
+            FrameTableau::flatten_gate(name, qubits, &mut cops).unwrap();
+        }
+        for cop in &cops {
+            let q = match *cop {
+                COp::H(q) | COp::S(q) | COp::Sdg(q) | COp::X(q) | COp::Y(q) | COp::Z(q) => q,
+                COp::Cnot(a, b) | COp::Swap(a, b) => a.max(b),
+            } as usize;
+            assert!(q < n, "flatten produced qubit {q} >= n={n}");
+        }
+        cops
+    }
+
+    #[test]
+    fn column_build_matches_row_build() {
+        // The column-major fused build is the default path, so it must
+        // reproduce the row-major reference bit for bit: every COp arm, every
+        // word/tile boundary, and both the sequential and the row-block
+        // parallel split (work override forces the parallel branch).
+        for &n in &[1usize, 2, 3, 5, 63, 64, 65, 70, 127, 128, 129, 192, 256] {
+            let mut gates = brick(n, 2, 31);
+            gates.push(("SX".into(), vec![0]));
+            gates.push(("SXDG".into(), vec![n - 1]));
+            gates.push(("SDG".into(), vec![n / 2]));
+            gates.push(("X".into(), vec![0]));
+            gates.push(("Y".into(), vec![n - 1]));
+            gates.push(("Z".into(), vec![n / 2]));
+            if n >= 2 {
+                gates.push(("CZ".into(), vec![0, n - 1]));
+                gates.push(("CY".into(), vec![n - 1, 0]));
+                gates.push(("SWAP".into(), vec![0, n / 2]));
+                gates.push(("CX".into(), vec![n / 2, n - 1]));
+            }
+            let cops = flatten(n, &gates);
+            let want = rows_built(n, &cops);
+            for &(threads, par_min) in &[(1usize, usize::MAX), (4, 0)] {
+                let (x, z, r) = crate::colbuild::build(n, &cops, threads, par_min);
+                assert_eq!(x, want.x, "x mismatch n={n} threads={threads}");
+                assert_eq!(z, want.z, "z mismatch n={n} threads={threads}");
+                assert_eq!(r, want.r, "r mismatch n={n} threads={threads}");
+            }
+        }
+    }
+
+    #[test]
+    fn column_build_sampling_is_bit_identical() {
+        // Same tableau => same cached plan => identical counts, so the build
+        // swap can never move a sampled number (only the clock).
+        for &n in &[5usize, 64, 70, 128] {
+            let gates = brick(n, 2, 17);
+            let cops = flatten(n, &gates);
+            let want = rows_built(n, &cops);
+            let (x, z, r) = crate::colbuild::build(n, &cops, 4, 0);
+            let got = FrameTableau {
+                n,
+                words: n.div_ceil(64),
+                x,
+                z,
+                r,
+                plan: OnceLock::new(),
+            };
+            assert_eq!(got.sample(2_000, Some(5)), want.sample(2_000, Some(5)));
+            assert_eq!(got.random_var_count(), want.random_var_count());
+        }
+    }
+
+    #[test]
+    fn fold_hit_matches_three_pass_reference() {
+        // The fused AG update (phase + random-mask + row XOR in one pass) must
+        // agree word-for-word with the three-pass reference it replaced.
+        let mut st = 0x0bad_f00d_dead_beefu64;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        for &(n, words) in &[
+            (1usize, 1usize),
+            (64, 1),
+            (65, 2),
+            (127, 2),
+            (128, 2),
+            (200, 4),
+        ] {
+            let mwords = n.div_ceil(64).max(1);
+            for _ in 0..8 {
+                let xi0: Vec<u64> = (0..words).map(|_| next()).collect();
+                let zi0: Vec<u64> = (0..words).map(|_| next()).collect();
+                let xp: Vec<u64> = (0..words).map(|_| next()).collect();
+                let zp: Vec<u64> = (0..words).map(|_| next()).collect();
+                let want_phase = phase_of_product(&xi0, &zi0, &xp, &zp, n, words);
+
+                for &rp_nz in &[false, true] {
+                    let mut xi = xi0.clone();
+                    let mut zi = zi0.clone();
+                    let mut rm = vec![0xA5A5_5A5A_A5A5_5A5Au64; mwords];
+                    let rp_mask: Vec<u64> = (0..mwords).map(|_| next()).collect();
+                    let rm_before = rm.clone();
+                    let mut phase: u32 = 0;
+                    fold_hit(
+                        &mut xi, &mut zi, &mut rm, &xp, &zp, &rp_mask, rp_nz, &mut phase, n, words,
+                    );
+                    assert_eq!(phase as u8, want_phase, "phase n={n} rp_nz={rp_nz}");
+                    for w in 0..words {
+                        assert_eq!(xi[w], xi0[w] ^ xp[w], "x n={n} w={w}");
+                        assert_eq!(zi[w], zi0[w] ^ zp[w], "z n={n} w={w}");
+                    }
+                    for k in 0..mwords {
+                        let want = if rp_nz {
+                            rm_before[k] ^ rp_mask[k]
+                        } else {
+                            rm_before[k]
+                        };
+                        assert_eq!(rm[k], want, "r_mask n={n} k={k} rp_nz={rp_nz}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hit_split_matches_whole_range() {
+        // Splitting one measure's hit loop across 64-row-aligned chunks (what
+        // the rayon path does) must be bit-identical to running it in one go.
+        let n = 600usize;
+        let words = n.div_ceil(64);
+        let rows = 2 * n;
+        let nw = rows.div_ceil(64);
+        let mut st = 0xdead_beef_cafe_1234u64;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let tail = if n.is_multiple_of(64) {
+            u64::MAX
+        } else {
+            (1u64 << (n % 64)) - 1
+        };
+        let mut x: Vec<u64> = (0..rows * words).map(|_| next()).collect();
+        let mut z: Vec<u64> = (0..rows * words).map(|_| next()).collect();
+        for r in 0..rows {
+            x[r * words + words - 1] &= tail;
+            z[r * words + words - 1] &= tail;
+        }
+        let p = n + 7;
+        let xp = x[p * words..(p + 1) * words].to_vec();
+        let zp = z[p * words..(p + 1) * words].to_vec();
+        let mwords = n.div_ceil(64).max(1);
+        let rp_mask: Vec<u64> = (0..mwords).map(|_| next()).collect();
+        let r_mask: Vec<Vec<u64>> = (0..rows)
+            .map(|_| (0..mwords).map(|_| next()).collect())
+            .collect();
+        let r_const: Vec<u8> = (0..rows).map(|_| (next() & 1) as u8).collect();
+        let r_mask_nz: Vec<bool> = (0..rows).map(|_| next() & 1 == 1).collect();
+        // Every third row is a hit.
+        let mut bs_hits = vec![0u64; nw];
+        for r in (0..rows).step_by(3) {
+            bs_hits[r >> 6] |= 1u64 << (r & 63);
+        }
+
+        let run = |chunked: bool| {
+            let mut ax = x.clone();
+            let mut az = z.clone();
+            let mut arm = r_mask.clone();
+            let mut arc = r_const.clone();
+            let mut anz = r_mask_nz.clone();
+            let hits = if chunked {
+                let threads = 4usize;
+                let per = rows.div_ceil(threads).max(64).div_ceil(64) * 64;
+                let nw_per = per / 64;
+                let mut acc = 0usize;
+                for bi in 0..rows.div_ceil(per) {
+                    let base = bi * per;
+                    let rows_b = (rows - base).min(per);
+                    let k_end = ((bi + 1) * nw_per).min(bs_hits.len());
+                    acc += apply_hits_range(
+                        (base / 64)..k_end,
+                        base,
+                        &bs_hits,
+                        p,
+                        &xp,
+                        &zp,
+                        &rp_mask,
+                        true,
+                        1,
+                        &mut ax[base * words..(base + rows_b) * words],
+                        &mut az[base * words..(base + rows_b) * words],
+                        &mut arm[base..base + rows_b],
+                        &mut arc[base..base + rows_b],
+                        &mut anz[base..base + rows_b],
+                        n,
+                        words,
+                    );
+                }
+                acc
+            } else {
+                apply_hits_range(
+                    0..bs_hits.len(),
+                    0,
+                    &bs_hits,
+                    p,
+                    &xp,
+                    &zp,
+                    &rp_mask,
+                    true,
+                    1,
+                    &mut ax,
+                    &mut az,
+                    &mut arm,
+                    &mut arc,
+                    &mut anz,
+                    n,
+                    words,
+                )
+            };
+            (hits, ax, az, arm, arc, anz)
+        };
+
+        let (hits_w, xw, zw, rmw, rcw, nzw) = run(false);
+        let (hits_c, xc, zc, rmc, rcc, nzc) = run(true);
+        assert_eq!(hits_w, hits_c, "hit counts");
+        assert!(hits_w > 0);
+        assert_eq!(xw, xc, "x");
+        assert_eq!(zw, zc, "z");
+        assert_eq!(rmw, rmc, "r_mask");
+        assert_eq!(rcw, rcc, "r_const");
+        assert_eq!(nzw, nzc, "r_mask_nz");
     }
 
     #[test]

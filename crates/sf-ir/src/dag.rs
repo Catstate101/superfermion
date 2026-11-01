@@ -5061,7 +5061,10 @@ impl PreparedStatevector {
                 || op.op_type.is_measurement()
                 || matches!(op.op_type, OpType::Reset | OpType::Custom(_, _))
             {
-                return Err("prepare() supports unitary circuits without measurements, resets, or classical conditions".into());
+                // `prepare` builds a unitary, so it cannot host a collapse.  A
+                // *terminal* measurement is still legal sampling and is served by
+                // `simulate_dynamic`; name that route so the caller is not stuck.
+                return Err("prepare() supports unitary circuits without measurements, resets, or classical conditions; to sample a circuit that has them use sf.run(circuit, method=\"statevector\", shots=N) or QuantumDAG.simulate_dynamic(shots, seed)".into());
             }
             let is_fixed = op
                 .op_type
