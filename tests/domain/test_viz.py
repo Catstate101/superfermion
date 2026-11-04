@@ -7,6 +7,16 @@ import superfermion as sf
 
 pytestmark = pytest.mark.domain
 
+# The figures these tests build are never shown, so pin a backend that needs no
+# windowing system.  Left alone, matplotlib picks TkAgg on a Windows desktop and
+# every plt.subplots() then goes through Tk: on an interpreter whose Tcl data is
+# incomplete (no tcl8.6/init.tcl) that raises _tkinter.TclError, which made this
+# file pass or fail from one run to the next depending on window state.  Agg is
+# what a headless CI box uses anyway, so the assertions below then mean the same
+# thing everywhere.
+matplotlib = pytest.importorskip("matplotlib", reason="matplotlib unavailable")
+matplotlib.use("Agg", force=True)
+
 viz = pytest.importorskip("superfermion.viz", reason="viz module unavailable")
 
 

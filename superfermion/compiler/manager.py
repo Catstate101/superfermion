@@ -98,7 +98,10 @@ def compile(circuit: Circuit, level: int = 1, target: Optional[HardwareSpec] = N
         target: Optional hardware target specification.
 
     Returns:
-        Compiled and optimized circuit for the target.
+        Compiled and optimized circuit for the target. The returned circuit has
+        the same width as ``circuit`` even when the target is wider, and carries
+        the layout it was compiled under in ``circuit._metadata["layout"]``
+        (see :func:`superfermion.compiler.layout.get_layout`).
     """
     if level == 0 and not target:
         return circuit
@@ -129,17 +132,45 @@ def compile(circuit: Circuit, level: int = 1, target: Optional[HardwareSpec] = N
         rust_input_basis = list(_RUST_KNOWN_GATES)
         circuit = BasisTranslationPass(rust_input_basis).run(circuit)
 
+    # Layout: the Rust pipeline routes onto the device and then throws the
+    # resulting ``QubitMapping`` away, which silently permutes the wires
+    # (``cx(0,2)`` came back as ``CX(1,2)``) and rebuilds the result on the
+    # device's width instead of the circuit's. Routing here keeps the
+    # permutation known and undone, so the compiled unitary equals the input's
+    # and the register keeps its size (HW-2, HW-4, HW-5).
+    layout_report: Optional[dict] = None
+    if target is not None and getattr(target, "coupling_map", None):
+        from superfermion.compiler.layout import route_with_layout
+
+        circuit, layout_report = route_with_layout(circuit, target)
+
     if target:
-        return _rust_compile(circuit, level=level, target=target)
+        compiled = _rust_compile(
+            circuit,
+            level=level,
+            target=target,
+            skip_routing=bool(layout_report and layout_report.get("routed")),
+        )
+    else:
+        # No target: hardware-neutral optimization only
+        compiled = _rust_compile(circuit, level=level, target=None)
 
-    # No target: hardware-neutral optimization only
-    return _rust_compile(circuit, level=level, target=None)
+    if layout_report is not None:
+        compiled._metadata["layout"] = layout_report
+        compiled._metadata["target"] = getattr(target, "name", None)
+        compiled._metadata["level"] = level
+    return compiled
 
 
-def _rust_compile(circuit: Circuit, level: int, target: Optional[HardwareSpec]) -> Circuit:
+def _rust_compile(
+    circuit: Circuit,
+    level: int,
+    target: Optional[HardwareSpec],
+    skip_routing: bool = False,
+) -> Circuit:
     """Delegate to the Rust compilation pipeline."""
     from superfermion.compiler.rust_bridge import compile_rust
-    return compile_rust(circuit, level=level, target=target)
+    return compile_rust(circuit, level=level, target=target, skip_routing=skip_routing)
 
 
 def apply_noise_suppression(

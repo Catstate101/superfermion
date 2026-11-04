@@ -88,6 +88,7 @@ def sqd_energy(
     k: int = 1,
     return_vector: bool = False,
     max_seniority: Optional[int] = None,
+    nuclear_repulsion: float = 0.0,
 ) -> Dict[str, Any]:
     """Sample-based quantum diagonalization for an explicit determinant set.
 
@@ -101,9 +102,19 @@ def sqd_energy(
             diagonalising. Sampled pools routinely contain high-seniority
             determinants that carry no weight; removing them shrinks the matrix
             without moving the energy. ``None`` keeps every determinant.
+        nuclear_repulsion: Nuclear repulsion energy of the molecule. The
+            Hamiltonian built from ``h1``/``h2`` is purely electronic, so the
+            number that comes out is the **electronic** energy. The old
+            signature had no way to add the nuclear term and the docstring did
+            not say which energy it was, so ``sqd_energy`` returned
+            ``hf_energy - nuclear_repulsion`` with no indication that the
+            difference was not an error (CH-14).
 
     Returns:
-        Dict with ``energy`` (lowest), ``energies`` (all ``k``),
+        Dict with ``energy_electronic`` (lowest eigenvalue of the electronic
+        Hamiltonian), ``energy`` (the same value, kept for backward
+        compatibility), ``total_energy`` (``energy_electronic +
+        nuclear_repulsion``), ``nuclear_repulsion``, ``energies`` (all ``k``),
         ``n_determinants``, ``determinants`` (the sorted, deduplicated list),
         ``n_dropped`` and optionally ``vector``.
     """
@@ -122,8 +133,12 @@ def sqd_energy(
     else:
         n_dropped = 0
     energies, vectors = subspace_energy(h1, h2, dets, k=k)
+    electronic = float(energies[0])
     result: Dict[str, Any] = {
-        "energy": float(energies[0]),
+        "energy": electronic,
+        "energy_electronic": electronic,
+        "total_energy": electronic + float(nuclear_repulsion),
+        "nuclear_repulsion": float(nuclear_repulsion),
         "energies": np.asarray(energies, dtype=float),
         "n_determinants": len(dets),
         "n_dropped": n_dropped,

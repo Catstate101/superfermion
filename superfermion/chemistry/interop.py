@@ -8,20 +8,29 @@ expectation estimation -- takes a ``qiskit.quantum_info.SparsePauliOp``.  This
 is the adapter, and it is deliberately the only conversion in the package so
 there is one place for the ordering convention to be right.
 
-**Ordering.**  A superfermion Pauli string is indexed by qubit:
-``pauli_str[q]`` is the operator on qubit ``q``, and
-:func:`~superfermion.chemistry.subspace.pauli_matrix` builds
-``kron(str[0], str[1], ...)``.  Qiskit's ``SparsePauliOp`` uses exactly the
-same rule -- character ``q`` is qubit ``q`` and ``to_matrix()`` is the
-Kronecker product in character order -- so the labels transfer verbatim, with
-no reversal.
+**Ordering.**  Superfermion does *not* have a single Pauli ordering, and the
+earlier claim that both sides agree verbatim was wrong (INT-1):
 
-That is worth stating because a reversal would *not* be caught by an energy
-check: relabelling qubits is a permutation similarity, so the spectrum comes
-out identical either way while every expectation value against a
-superfermion-prepared circuit is wrong.  The tests therefore compare the dense
-matrices elementwise, which is the only check that distinguishes the two
-conventions.
+* :func:`~superfermion.chemistry.subspace.pauli_matrix` builds
+  ``kron(str[0], str[1], ...)``, so character 0 is the **leftmost Kronecker
+  factor** -- the same order ``SparsePauliOp.to_matrix()`` uses.
+* ``RunResult.expectation`` reads character ``q`` as the operator on **qubit
+  ``q``** (``x(0)`` samples ``'01'`` while ``expval('ZI') == -1``).
+
+Qiskit indexes the other way round: character ``i`` of a label is qubit
+``n-1-i``, so character 0 is the *highest* wire.  The two conventions are
+therefore only interchangeable for symmetric labels.  This module exposes the
+choice instead of guessing:
+
+* ``reverse=False`` (default, unchanged) keeps the **matrix** identical:
+  ``to_qiskit_op(h).to_matrix()`` reproduces ``pauli_matrix(h)`` elementwise.
+* ``reverse=True`` keeps the **qubit assignment** identical: a Qiskit
+  expectation value against a superfermion-prepared circuit then measures the
+  operator superfermion meant by the label.
+
+Pick by what is being checked.  A reordering is invisible to an energy or
+spectrum check -- relabelling qubits is a permutation similarity -- which is
+exactly why it has to be asked for explicitly rather than assumed.
 
 Coefficients transfer as ``complex``: ``SparsePauliOp`` accepts complex
 coefficients and rounds nothing, so the round trip is exact rather than
@@ -89,7 +98,10 @@ def _pauli_terms(hamiltonian: Any) -> List[Tuple[str, complex]]:
 
 
 def to_qiskit_labels(
-    hamiltonian: Any, *, n_qubits: Optional[int] = None
+    hamiltonian: Any,
+    *,
+    n_qubits: Optional[int] = None,
+    reverse: bool = False,
 ) -> Tuple[List[str], List[complex]]:
     """``(labels, coefficients)`` with every label padded to one width.
 
@@ -98,6 +110,15 @@ def to_qiskit_labels(
     input.  Padding is appended on the right, i.e. identity on the *higher*
     qubits, which is what a shorter string means under the qubit-indexed
     convention above.
+
+    Args:
+        hamiltonian: A superfermion ``Hamiltonian`` or ``SparsePauliOp``.
+        n_qubits: Width of the emitted labels; defaults to the widest label.
+        reverse: Flip each padded label so Qiskit's character ``i`` = qubit
+            ``n-1-i`` matches superfermion's character ``q`` = qubit ``q``.
+            Leave ``False`` to compare dense matrices; set ``True`` to compare
+            expectation values against a superfermion circuit.  See the
+            module docstring for why both exist.
 
     Raises:
         ValueError: if a label is wider than ``n_qubits``, or is empty.
@@ -119,31 +140,40 @@ def to_qiskit_labels(
             raise ValueError(
                 f"label {label!r} is wider than n_qubits={width}"
             )
-        labels.append(label.ljust(width, "I"))
+        padded = label.ljust(width, "I")
+        labels.append(padded[::-1] if reverse else padded)
         coeffs.append(coeff)
     return labels, coeffs
 
 
-def to_qiskit_op(hamiltonian: Any, *, n_qubits: Optional[int] = None):
+def to_qiskit_op(
+    hamiltonian: Any, *, n_qubits: Optional[int] = None, reverse: bool = False
+):
     """Convert a superfermion Pauli operator to ``qiskit.quantum_info``.
 
     Args:
         hamiltonian: A superfermion ``Hamiltonian`` or ``SparsePauliOp``.
         n_qubits: Width of the target operator.  Defaults to the widest label,
             which is right when the mapping already used the full register.
+        reverse: Emit labels in Qiskit's wire order, i.e. character ``i`` is
+            qubit ``n-1-i``.  ``False`` keeps ``to_matrix()`` equal to
+            superfermion's own ``pauli_matrix``; ``True`` keeps the *qubit
+            assignment* equal (see the module docstring).
 
     Returns:
         ``qiskit.quantum_info.SparsePauliOp`` with the same terms and complex
-        coefficients in the same qubit order.
+        coefficients, in the requested character order.
     """
     _require_qiskit()
     from qiskit.quantum_info import SparsePauliOp
 
-    labels, coeffs = to_qiskit_labels(hamiltonian, n_qubits=n_qubits)
+    labels, coeffs = to_qiskit_labels(
+        hamiltonian, n_qubits=n_qubits, reverse=reverse
+    )
     return SparsePauliOp(labels, coeffs).simplify(atol=0.0, rtol=0.0)
 
 
-def from_qiskit_op(op: Any, *, simplify: bool = True):
+def from_qiskit_op(op: Any, *, simplify: bool = True, reverse: bool = False):
     """Convert a Qiskit Pauli operator into a superfermion ``Hamiltonian``.
 
     Args:
@@ -152,6 +182,9 @@ def from_qiskit_op(op: Any, *, simplify: bool = True):
         simplify: Merge repeated labels and drop exact zeros (default).  With
             ``False`` every term is preserved, which is what a round-trip test
             of a deliberately duplicated operator wants.
+        reverse: Flip each label, undoing :func:`to_qiskit_op`'s ``reverse``.
+            ``False`` (default) reads Qiskit labels in character order, which
+            round-trips ``to_qiskit_op(h)`` exactly.
 
     Returns:
         ``superfermion.observables.Hamiltonian``.
@@ -162,6 +195,8 @@ def from_qiskit_op(op: Any, *, simplify: bool = True):
     from superfermion.observables.core import Hamiltonian, PauliString
 
     pairs = _qiskit_pairs(op)
+    if reverse:
+        pairs = [(label[::-1], coeff) for label, coeff in pairs]
     if not pairs:
         raise ValueError("cannot convert an operator with no terms")
     if simplify:

@@ -33,6 +33,36 @@ def _assert_builds_circuit(code, min_qubits: int = 1):
     assert circuit.gate_count >= 0
 
 
+def _rank2(checks, n: int) -> int:
+    """Rank of a 0/1 check matrix over GF(2)."""
+    rows = []
+    for support in checks:
+        row = [0] * n
+        for q in support:
+            row[q] ^= 1
+        rows.append(row)
+    r = 0
+    for c in range(n):
+        pivot = next((i for i in range(r, len(rows)) if rows[i][c]), None)
+        if pivot is None:
+            continue
+        rows[r], rows[pivot] = rows[pivot], rows[r]
+        for i in range(r + 1, len(rows)):
+            if rows[i][c]:
+                rows[i] = [a ^ b for a, b in zip(rows[i], rows[r])]
+        r += 1
+    return r
+
+
+def _commutes(x_checks, z_checks) -> bool:
+    """Every X-check must overlap every Z-check in an even number of qubits."""
+    return all(
+        len(set(xs) & set(zs)) % 2 == 0
+        for xs in x_checks
+        for zs in z_checks
+    )
+
+
 class TestLinearCodes:
     def test_repetition_code_construction_and_build(self):
         code = RepetitionCode(n=3, code_type="bit")
@@ -82,11 +112,28 @@ class TestLinearCodes:
         assert circuit.gate_count > 0
 
     def test_bacon_shor_code_construction_and_build(self):
+        """QEC-D4: the gauge-fixed X sector is six X-checks and two Z-checks.
+
+        The old body measured all twelve gauge pairs, ten of them as ``ZZ``
+        parities, and this test pinned ``L**2 + 2*(L-1)*L = 21`` qubits. The
+        fixed body measures exactly ``stabilizers()``: 9 data + 8 ancillas.
+        Recomputed from the returned matrices by ``_qec_codes_verify.py``:
+        rank_X = 6, rank_Z = 2, so k = 9 - 6 - 2 = 1, and d_X = d_Z = 3 --
+        the ``[[9, 1, 3]]`` the class advertises.
+        """
         code = BaconShorCode(L=3)
         assert code.L == 3
-        expected_qubits = code.L**2 + 2 * (code.L - 1) * code.L
+        x_checks, z_checks = code.stabilizers()
+        assert len(x_checks) == 6
+        assert len(z_checks) == 2
+        assert _commutes(x_checks, z_checks)
+
+        n = code.L**2
+        assert n - _rank2(x_checks, n) - _rank2(z_checks, n) == 1
+
         circuit = code.build()
-        assert circuit.n_qubits == expected_qubits
+        assert circuit.n_qubits == n + len(x_checks) + len(z_checks) == 17
+        assert circuit.gate_count > 0
 
     def test_generic_css_code_construction_and_build(self):
         hx = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.int32)
@@ -108,11 +155,25 @@ class TestTopologicalCodes:
         assert circuit.gate_count > 0
 
     def test_hypercube_code_properties_and_build(self):
+        """QEC-D8: the checks are the eight facets, so eight ancillas a sector.
+
+        The old body gave each of 32 ancillas a single ``cx`` onto one data
+        qubit (a weight-1 operator, not a syndrome) and this test pinned that
+        width.  Recomputed from the returned matrices by
+        ``_qec_codes_verify.py``: rank 5 per sector, k = 16 - 5 - 5 = 6, and
+        d_X = d_Z = 4 -- the ``[[16, 6, 4]]`` the docstring states.
+        """
         code = HypercubeCode4D(size=2)
         assert code.n_data == 16
-        assert code.n_syndromes == 32
+        x_checks, z_checks = code.stabilizers()
+        assert code.n_syndromes == len(x_checks) == len(z_checks) == 8
+        assert _commutes(x_checks, z_checks)
+
+        n = code.n_data
+        assert n - _rank2(x_checks, n) - _rank2(z_checks, n) == 6
+
         circuit = code.build()
-        assert circuit.n_qubits == code.n_data + code.n_syndromes
+        assert circuit.n_qubits == n + 2 * code.n_syndromes == 32
         assert circuit.gate_count > 0
 
     def test_toric_code_properties_and_build(self):

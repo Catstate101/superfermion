@@ -16,6 +16,8 @@ __all__ = [
     # solvers and embeddings
     "exact_energy", "all_determinants", "hamiltonian_matrix",
     "sqd_energy", "qsci", "one_shot_dmet",
+    # tabulated integral library
+    "MoleculeLibrary",
     # encodings and file formats
     "scbk_from_integrals",
     "read_fcidump", "write_fcidump", "read_fcidump_text",
@@ -46,6 +48,7 @@ _LAZY_MAP = {
     "sqd_energy":                "superfermion.chemistry.sqd",
     "qsci":                      "superfermion.chemistry.sqd",
     "one_shot_dmet":             "superfermion.chemistry.dmet",
+    "MoleculeLibrary":           "superfermion.chemistry.library",
     "scbk_from_integrals":       "superfermion.chemistry.scbk",
     "read_fcidump":              "superfermion.chemistry.fcidump",
     "write_fcidump":             "superfermion.chemistry.fcidump",
@@ -67,3 +70,13 @@ def __getattr__(name):
         globals()[name] = attr
         return attr
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    """Expose the lazy names to ``dir()`` and to tab completion.
+
+    Without this the module defines only ``__getattr__``, so ``dir()``
+    returned ``[]`` even though every name in ``__all__`` was importable
+    (CH-10). Names already resolved are included as well.
+    """
+    return sorted(set(__all__) | set(_LAZY_MAP) | set(globals()))

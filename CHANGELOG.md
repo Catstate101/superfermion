@@ -2,6 +2,76 @@
 
 All notable changes to the Superfermion framework.
 
+## [Unreleased]
+
+Correctness work across QEC, error mitigation, gradients, chemistry, algorithms, the
+compiler and the GPU lane, plus the documentation corrections that follow from it.
+Every item below is pinned by a test; the additions are described by what they
+change, and each test name states the behaviour it locks.
+
+### Fixed
+
+- **QEC**: codes gained `stabilizers()` / `gauge_operators()` and a real `encoder()`, built on
+  new GF(2) primitives (`_gf2_rref`, `_gf2_kernel`); decoders gained minimum-weight search and
+  a dependency check that reports the missing neural extra instead of failing deep inside
+  import; `manager` gained `run_logical_lifecycle` and a qubit-limit guard.
+- **Error mitigation**: zero-noise extrapolation now builds its folded expectation values from
+  the circuit it is handed (`_folded_expectations`, `_amplification`, `_checked_scale`) and
+  warns when extrapolation cannot change anything, instead of returning the unmitigated value
+  silently; the noisy expectation path is separable from the ideal one.
+- **Gradients**: adjoint observables are converted through `_observable_to_rust_terms`;
+  parameter-shift normalises its observable argument; `qng` returns the step in the caller's
+  parameter order; `grad_checks` resolves DAG parameter names rather than relying on labels.
+- **Chemistry**: `uccsd_ansatz`, `excitation_pairs`, `hardware_efficient_ansatz` and the
+  single/double excitation gates are exposed; `library` resolves names through
+  `require`/`require_by_name`/`lookup` and raises on an unknown name; `interop` converts
+  operators to and from Qiskit; `pyscf_bridge` derives its formula from the atoms.
+- **Algorithms**: QPE builds controlled single-qubit gates from the gate matrix, HHL applies its
+  bit reversal explicitly, and amplitude estimation builds the controlled embedding — each was
+  previously assembled from an assumption about the input.
+- **Results / runner / observables**: `results` gained documented gradient fallbacks and
+  order-stable outcome indexing; `runner` distinguishes "not passed" from `None`
+  (`_Unset`); MPS truncation is reported through `truncation_report()` with the four documented
+  fields, and asking for the report does not change the value.
+- **Sampling**: an omitted `seed` still defaults to the historical `42`, but `seed=None` no longer
+  raises — it draws a fresh 32-bit seed and records it in `result.metadata["seed"]`, so unseeded
+  repeats finally differ and a drawn run stays replayable. Previously every method re-seeded to
+  `42` on every call, which made error bars from repeated runs meaningless.
+- **Memory guard**: an exact state larger than physical RAM used to abort the interpreter inside
+  the Rust allocator (exit `0xC0000409`, no `MemoryError`). The size is now estimated first and
+  refused with a catchable `MemoryError` naming the arithmetic and the alternatives; override
+  per run with `max_state_gib=`, globally with `SF_STATE_MEMORY_LIMIT_GIB` (`0` disables).
+- **Classical register order**: `measure(q, cbit=c)` said the classical register was the output,
+  but counts were qubit-keyed. They are relabelled when the cbit targets permute the qubits, so
+  the string width and every other bit are unchanged.
+- **Compiler**: native lowering moved into `compiler/layout.py` and
+  `compiler/native_lowering.py`, with `specs` exposing `is_native` / `is_emittable` /
+  `degree_histogram`; `manager` gained a Rust compile path.
+- **Circuit**: added the `ch` (controlled-Hadamard) gate.
+- **Rust**: `sf-ir` gained a batched MPS Pauli-expectation path
+  (`simulate_mps_pauli_expval_batch_report`) exposed through `sf-bindings`; `sf-gpu` now
+  contains the nvrtc initialisation panic, so `gpu_available()` returns `False` instead of
+  raising `pyo3_runtime.PanicException`, and `gpu_diagnose()` reports the loader detail.
+
+### Docs
+
+- The execution guide gained a reproducibility section (when `seed` is fixed, when it is drawn,
+  and how to replay) and the `MemoryError` precondition; the `sf.run` parameter table lists `seed`
+  and `max_state_gib`.
+- The GPU notes no longer claim an `sm_75+` gate: kernels are JIT-compiled for the device's own
+  compute capability and were verified on `sm_61`, where the GPU state is bit-identical to the
+  CPU state. The nvrtc filename gap, the graceful-degradation contract and the memory-bound
+  qubit ceiling (16 bytes per amplitude) are now stated where the old text claimed "~30 qubits
+  on GPU".
+
+### Verification
+
+- Full suite on this tree: **1582 passed, 0 skipped, 0 failed** (287.00 s).
+- `cargo fmt --check` clean; `clippy -p sf-gpu --all-features` clean.
+- GPU lane: `||psi_cpu - psi_gpu||^2 = 0` at 12, 16 and 20 qubits; seeded counts identical
+  between lanes; against Qiskit Aer the CPU lane holds fidelity >= 0.999999999999988 and
+  `max|d<Z>| <= 2.22e-16` over three circuit families.
+
 ## [0.1.24] — 2026-10-31
 
 Gradient correctness. Five defects that returned **plausible wrong numbers** —

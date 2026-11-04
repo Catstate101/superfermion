@@ -2277,6 +2277,33 @@ impl MPSState {
         // Final left should be 1x1 — that's the expectation value.
         left[(0, 0)]
     }
+
+    /// Wire-indexed Pauli expectation: `pauli[w]` is the Pauli acting on
+    /// virtual qubit `w`, the convention every caller (statevector, Python
+    /// ``expval``, observable strings) already uses.
+    ///
+    /// Long-range 2q gates go through the lazy-SWAP path, which moves a
+    /// virtual qubit to a different tensor site and records the move in
+    /// `perm`.  [`Self::pauli_expval`] is *site*-indexed, so handing it a
+    /// wire-indexed string silently evaluates a different operator as soon
+    /// as any routing has happened.  This wrapper remaps wire -> site first;
+    /// for circuits whose 2q gates are all adjacent the map is the identity
+    /// and the result is bit-identical to `pauli_expval`.
+    pub fn pauli_expval_wires(&self, pauli: &[u8]) -> Complex64 {
+        let n = self.n_qubits;
+        let mut wire_pauli = vec![0u8; n];
+        let m = pauli.len().min(n);
+        wire_pauli[..m].copy_from_slice(&pauli[..m]);
+        // site s holds the Pauli of whichever wire is routed there.
+        let mut site_pauli = vec![0u8; n];
+        for w in 0..n {
+            let s = self.perm[w];
+            if s < n {
+                site_pauli[s] = wire_pauli[w];
+            }
+        }
+        self.pauli_expval(&site_pauli)
+    }
 }
 
 impl QuantumDAG {
@@ -2304,7 +2331,7 @@ impl QuantumDAG {
     pub fn simulate_mps_pauli_expval(&self, bond_dim: usize, pauli: &[u8]) -> Complex64 {
         let mut state = MPSState::new(self.n_qubits, bond_dim);
         self._evolve_into(&mut state);
-        state.pauli_expval(pauli)
+        state.pauli_expval_wires(pauli)
     }
 
     /// Batched Pauli expectation: evolve the MPS ONCE, then contract every
@@ -2322,7 +2349,32 @@ impl QuantumDAG {
     ) -> Vec<Complex64> {
         let mut state = MPSState::new(self.n_qubits, bond_dim);
         self._evolve_into(&mut state);
-        paulis.iter().map(|p| state.pauli_expval(p)).collect()
+        paulis.iter().map(|p| state.pauli_expval_wires(p)).collect()
+    }
+
+    /// Same as [`Self::simulate_mps_pauli_expval_batch`] but also returns the
+    /// truncation telemetry from the *same* evolution.
+    ///
+    /// Callers that report a number to a user need to know how much weight the
+    /// bond cap threw away; recomputing the evolution just to read
+    /// `discarded_weight` would double the cost, so the report is carried out
+    /// alongside the values. Returns `(values, discarded_weight,
+    /// max_discarded_weight, truncation_events)`; the last three are exactly
+    /// the fields [`MPSState`] exposes after `run(method="mps")`.
+    pub fn simulate_mps_pauli_expval_batch_report(
+        &self,
+        bond_dim: usize,
+        paulis: &[Vec<u8>],
+    ) -> (Vec<Complex64>, f64, f64, usize) {
+        let mut state = MPSState::new(self.n_qubits, bond_dim);
+        self._evolve_into(&mut state);
+        let values = paulis.iter().map(|p| state.pauli_expval_wires(p)).collect();
+        (
+            values,
+            state.discarded_weight,
+            state.max_discarded_weight,
+            state.truncation_events,
+        )
     }
 
     /// Sequential lazy-SWAP evolution: processes gates in topological order,

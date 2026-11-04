@@ -38,58 +38,40 @@ import numpy as np
 from superfermion.circuit import Circuit
 from superfermion.parameters import SymbolicParameter  # noqa: F401 - public re-export
 
-_PAULI_MAP = {"I": 0, "X": 1, "Y": 2, "Z": 3}
+from superfermion.qml.gradient._observables import (
+    PAULI_CODES as _PAULI_MAP,  # noqa: F401 - historical name, kept importable
+    normalize_for_gradient,
+    observable_terms as _observable_terms,
+    pauli_indices as _pauli_indices,  # noqa: F401 - historical name
+)
 
 
-def _observable_to_rust_terms(
-    obs, n_qubits: int
-) -> list[tuple]:
+def _observable_to_rust_terms(obs, n_qubits: int) -> list[tuple]:
     """Convert an observable to Rust's [(paulis_u8, coef_re, coef_im)] format.
+
+    The spelling table lives in ``superfermion.qml.gradient._observables`` so
+    that this module, the parameter-shift/finite-difference pair, and
+    ``RunResult.grad`` all accept exactly the same forms -- they used to
+    differ, and the differences are recorded as E/V-3 and E/V-4.
 
     Supports:
       - str: single Pauli string like "ZZI"
       - Sequence[str]: several Pauli strings, summed with unit weight
       - dict: {"ZI": 0.5, "IX": 0.3}
       - Hamiltonian / SparsePauliOp with .terms attribute
-      - Any object with .terms returning list of PauliString-like objects
+      - PauliString: a single weighted Pauli string (CH-7)
+      - Sequence[PauliString | SparsePauliOp | str]: the same sum written as a
+        list of terms
+      - the engine form [(paulis, coef_re, coef_im)], including numpy integer
+        code arrays
+
+    No validation is applied here: this is the bare converter that
+    ``RunResult.expectation`` also uses, where a non-Hermitian operator is a
+    perfectly well-defined expectation value.  Gradient entry points call
+    :func:`normalize_for_gradient`, which adds the width and Hermiticity
+    checks the derivative engines rely on.
     """
-    from superfermion.observables.core import SparsePauliOp
-
-    if isinstance(obs, str):
-        paulis = [_PAULI_MAP[ch] for ch in obs.upper()]
-        return [(paulis, 1.0, 0.0)]
-
-    if isinstance(obs, (list, tuple)) and all(isinstance(o, str) for o in obs):
-        return [([_PAULI_MAP[ch] for ch in o.upper()], 1.0, 0.0) for o in obs]
-
-    if isinstance(obs, dict):
-        terms = []
-        for pauli_str, coef in obs.items():
-            paulis = [_PAULI_MAP[ch] for ch in pauli_str.upper()]
-            c = complex(coef)
-            terms.append((paulis, c.real, c.imag))
-        return terms
-
-    if isinstance(obs, SparsePauliOp):
-        terms = []
-        for pauli_str, coef in obs._terms:
-            paulis = [_PAULI_MAP[ch] for ch in pauli_str.upper()]
-            c = complex(coef)
-            terms.append((paulis, c.real, c.imag))
-        return terms
-
-    if hasattr(obs, "terms"):
-        terms = []
-        for ps in obs.terms:
-            paulis = [_PAULI_MAP[ch] for ch in ps.pauli_str.upper()]
-            c = complex(ps.coeffs)
-            terms.append((paulis, c.real, c.imag))
-        return terms
-
-    raise TypeError(
-        f"Cannot convert observable of type {type(obs).__name__} to Rust format. "
-        f"Expected str, Sequence[str], dict, SparsePauliOp, or Hamiltonian."
-    )
+    return _observable_terms(obs, n_qubits)
 
 
 def _check_param_names(circuit: Circuit, param_names: Sequence[str]) -> None:
@@ -141,7 +123,11 @@ def adjoint_grad_vector(
     """
     params_dict = {nm: float(v) for nm, v in zip(param_names, param_values)}
     _check_param_names(circuit, param_names)
-    rust_obs = _observable_to_rust_terms(observable, circuit.n_qubits)
+    # Width and Hermiticity are checked here: a label one character short or
+    # long used to evaluate a different operator silently, and a non-Hermitian
+    # coefficient dict produced three different answers from three engines
+    # (E/V-5, E/V-7).
+    rust_obs = normalize_for_gradient(observable, circuit.n_qubits)
 
     dag = circuit.to_ir()
     grad_dict = dag.adjoint_grad(rust_obs, params_dict)

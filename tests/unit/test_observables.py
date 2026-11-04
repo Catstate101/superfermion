@@ -1,6 +1,7 @@
 """Unit tests for observable construction and expectation values."""
 
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -208,6 +209,71 @@ class TestMpsExpval:
         c.h(0)
         with pytest.raises(ValueError, match="n_qubits"):
             mps_expval(c, "ZZZ")
+
+
+class TestMpsTruncationReporting:
+    """``mps_expval(warn_truncation=True)`` must reach the Rust report.
+
+    The Python layer looks the entry point up with ``getattr(..., None)``, so an
+    extension older than its Rust source -- Python ahead of ``_sf_core.pyd`` --
+    makes the documented warning vanish silently while every value stays
+    correct.  That is a wrong *claim* rather than a wrong number, which is why
+    no other test caught it: the fallback branch is indistinguishable from "no
+    truncation occurred".
+    """
+
+    @staticmethod
+    def _circuit(n=8, depth=4, seed=5):
+        import superfermion as sf
+
+        rng = np.random.default_rng(seed)
+        c = sf.Circuit(n)
+        for _ in range(depth):
+            for q in range(n):
+                c.ry(float(rng.uniform(-1, 1)), q)
+            for q in range(n - 1):
+                c.cx(q, q + 1)
+        return c
+
+    def test_the_report_entry_point_exists_on_the_loaded_extension(self):
+        ir = self._circuit().to_ir()
+        assert hasattr(ir, "simulate_mps_pauli_expval_batch_report"), (
+            "the compiled extension predates its Rust source: rebuild _sf_core, "
+            "otherwise mps_expval(warn_truncation=True) is silently inert")
+
+    def test_the_report_carries_the_four_documented_fields(self):
+        ir = self._circuit().to_ir()
+        _, report = ir.simulate_mps_pauli_expval_batch_report(4, [[3] + [0] * 7])
+        assert set(report) == {
+            "discarded_weight", "max_discarded_weight",
+            "truncation_events", "fidelity_lower_bound"}
+        assert report["discarded_weight"] > 0.0
+        assert report["truncation_events"] > 0
+        assert report["fidelity_lower_bound"] == pytest.approx(
+            max(0.0, 1.0 - report["discarded_weight"]), abs=1e-12)
+
+    def test_a_truncated_mps_warns_and_a_wide_one_does_not(self):
+        c = self._circuit()
+        obs = "Z" + "I" * 7
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mps_expval(c, obs, bond_dim=4)
+        assert any("truncated" in str(w.message) for w in caught), (
+            f"bond_dim=4 on this circuit discards 4.1e-01 of the weight but no "
+            f"warning was raised; got {[str(w.message) for w in caught]}")
+        with warnings.catch_warnings(record=True) as quiet:
+            warnings.simplefilter("always")
+            mps_expval(c, obs, bond_dim=32)
+        assert not quiet, [str(w.message) for w in quiet]
+
+    def test_asking_for_the_report_does_not_change_the_value(self):
+        c = self._circuit()
+        obs = "Z" + "I" * 7
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            reported = mps_expval(c, obs, bond_dim=4)
+        plain = mps_expval(c, obs, bond_dim=4, warn_truncation=False)
+        assert reported == plain
 
 
 class TestMpsTodense:

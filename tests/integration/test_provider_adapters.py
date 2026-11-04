@@ -341,6 +341,11 @@ class TestBraketDeviceAdapter:
 
     def test_callable_returns_device_executor_with_mocked_boto3(self):
         pytest.importorskip("boto3")
+        # _get_aws_session imports braket.aws, so boto3 alone does not make this
+        # runnable: the test failed with ModuleNotFoundError in any environment
+        # that had boto3 (a common transitive dependency) without the qpu or
+        # interop extra.
+        pytest.importorskip("braket.aws")
         from superfermion.devices.braket import BraketDevice, BraketDeviceExecutor
 
         with patch("boto3.Session"):
