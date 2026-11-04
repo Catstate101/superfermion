@@ -27,7 +27,7 @@ print(state.numpy())   # [0.707+0j, 0, 0, 0.707+0j]
 ```python
 # Local simulation
 sf.run(qc, device="cpu")    # Rust CPU — Rayon multithreading
-sf.run(qc, device="gpu")    # Rust GPU — CUDA (requires sf-gpu)
+sf.run(qc, device="gpu")    # Rust GPU — CUDA (needs a build with the gpu feature)
 
 # Cloud QPUs
 from superfermion.devices.ibm import IBMDevice
@@ -46,7 +46,15 @@ Change `method=` — the API doesn't change.
 
 ### Statevector (default)
 
-Exact simulation. Up to ~25 qubits CPU, ~30 GPU.
+Exact simulation. Up to ~25 qubits on CPU. On GPU the ceiling is device memory rather than a
+fixed number: a complex128 state costs 16 bytes per amplitude, so 25 qubits is 0.5 GB, 28 qubits
+is 4.3 GB, and 30 qubits needs about 17 GB. Verified to 22 qubits on a 2 GB card.
+
+The size is checked before the allocation is attempted, because the Rust allocator aborts the
+process when an allocation of that size fails — no Python exception, no traceback. Asking for a
+state larger than the host's physical RAM raises `MemoryError` with the arithmetic and the
+alternatives (`mps`, `stabilizer`, `return_statevector=False`). Pass `max_state_gib=` to set the
+ceiling per run, or `SF_STATE_MEMORY_LIMIT_GIB=0` to switch the guard off.
 
 ```python
 result = sf.run(qc, method="statevector", shots=1024)
@@ -210,6 +218,19 @@ ansatz = sf.Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
 # Both forms are equivalent:
 state = sf.simulate(ansatz, params={"t": 0.5})
 state = sf.simulate(ansatz.bind({"t": 0.5}))
+```
+
+## Reproducibility
+
+Sampling is seeded, and the default is deliberately conservative: omitting `seed` uses the fixed
+value `42`, so a script that never mentions a seed keeps returning the counts it always returned.
+That also means two *unseeded* runs are identical, which makes an error bar built by repeating
+such a run meaningless. Use `seed=None` to draw a fresh seed:
+
+```python
+result = sf.run(qc, shots=4096, seed=None)
+print(result.metadata["seed"])   # recorded, so the run can be replayed exactly
+sf.run(qc, shots=4096, seed=result.metadata["seed"])   # same counts
 ```
 
 ## Error Handling

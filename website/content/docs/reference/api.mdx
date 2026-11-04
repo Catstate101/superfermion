@@ -144,6 +144,8 @@ print(result.shots)         # 4096
 | `target` | `str` or `None` | `None` | Hardware target for auto-compilation |
 | `tracker` | `TrackerProtocol` or `None` | `None` | Explicit tracker |
 | `params` | `dict` or `None` | `None` | Auto-bind symbolic parameters |
+| `seed` | `int` or `None` | omitted → `42` | RNG seed. Omitting it keeps the historical fixed `42`, so existing results reproduce; `seed=None` draws a fresh one and records it in `result.metadata["seed"]` |
+| `max_state_gib` | `float` or `None` | host RAM | Ceiling for a single exact state, checked before allocation. `0` disables it. Also settable globally with `SF_STATE_MEMORY_LIMIT_GIB` |
 
 ### Device Resolution
 
@@ -233,7 +235,7 @@ All methods use the same `sf.run()` / `sf.simulate()` API. Only the `method=` pa
 
 ### Statevector (default)
 
-Exact simulation. Supports all `sf.State` methods including gradients. Up to ~25 qubits on CPU, ~30 on GPU.
+Exact simulation. Supports all `sf.State` methods including gradients. Up to ~25 qubits on CPU; on GPU the limit is device memory, not a constant (16 bytes per amplitude — 0.5 GB at 25 qubits, about 17 GB at 30).
 
 ```python
 result = sf.run(qc, method="statevector", shots=1000)

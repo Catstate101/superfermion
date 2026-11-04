@@ -203,7 +203,8 @@ crates/
 ├── sf-router/       SABRE routing, hardware topology
 ├── sf-pulse/        Waveforms, schedules
 ├── sf-qec/          Stabilizer codes, MWPM/UnionFind decoders
-├── sf-gpu/          CUDA statevector simulation (cudarc, sm_75+)
+├── sf-gpu/          CUDA statevector simulation (cudarc; kernels are
+│                    JIT-compiled for the device's own compute capability)
 └── sf-bindings/     PyO3 FFI — exposes State, QuantumDAG, compile, etc.
 ```
 
@@ -219,6 +220,27 @@ compile-checks exactly that combination (`cargo check -p sf-ir --features gpu --
 `cudarc` is configured with `dynamic-loading`, so building needs neither the CUDA toolkit nor a
 GPU — `libcuda` is only looked for at runtime. The `pip install "superfermion[gpu]"` extra is
 unrelated to this crate; it pulls `jax[cuda12]`.
+
+There is no minimum compute capability in the code. Kernels are JIT-compiled with nvrtc against
+the capability the device reports, so older parts work: on an `sm_61` (Pascal) card the GPU state
+is bit-identical to the CPU state (`||psi_cpu - psi_gpu||^2 = 0` at 12, 16 and 20 qubits), which
+is why the GPU lane inherits the CPU lane's agreement with Qiskit Aer rather than adding its own
+error. Whether the GPU is *faster* is a separate question, and device-dependent: on a laptop GPU
+whose fp64 rate is 1/32 of fp32, the CPU lane was 2-4x faster at 12-16 qubits and the two were
+within 10% at 20. Measure, do not assume.
+
+Two runtime details matter on real machines:
+
+* cudarc resolves nvrtc by a fixed list of filenames, which does not cover every toolkit spelling
+  (`nvrtc64_112_0.dll`, shipped with CUDA 11.6, is not on that list). When the library cannot be
+  loaded, `gpu_available()` returns `False` instead of raising: initialisation is contained with
+  `catch_unwind`, because cudarc resolves the library with `expect` and the panic would otherwise
+  surface as `pyo3_runtime.PanicException` — a `BaseException` that slips past `except Exception`
+  in caller code. `gpu_diagnose()` reports the nvrtc failure detail rather than a bare
+  "unavailable".
+* requesting `device="gpu"` on a machine without a usable GPU raises `RuntimeError`, which
+  `tests/test_gpu_availability_contract.py` pins so the graceful-degradation promise cannot
+  regress.
 
 ### FFI buffer contract
 
@@ -315,7 +337,7 @@ covered in **[Why SuperFermion Is Fast](/docs/reference/execution-engine)**.
 
 | Method | Engine | Max Qubits | Best For |
 |---|---|---|---|
-| `statevector` | Rust (Rayon) | ~25 CPU, ~30 GPU | Exact sim, gradients, QML |
+| `statevector` | Rust (Rayon) | ~25 CPU; GPU limited by device memory | Exact sim, gradients, QML |
 | `mps` | Rust (faer) | 200+ | Low-entanglement circuits |
 | `stabilizer` | Rust (word-packed) | ~1000 | Clifford circuits, QEC |
 | `density_matrix` | Rust (Kraus) | ~12 | Noisy simulation |
