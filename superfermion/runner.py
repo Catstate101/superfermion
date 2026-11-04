@@ -33,6 +33,28 @@ from superfermion.results import RunResult
 from superfermion.devices import DeviceExecutor
 
 
+class _Unset:
+    """Sentinel for "the caller did not pass this keyword at all".
+
+    Used as the default of ``run(seed=...)`` because a plain ``None`` default
+    would collapse two different requests: ``seed=None`` asks the engine to
+    draw fresh entropy for *this* run, while omitting ``seed`` asks for the
+    historical fixed default of 42.  A sentinel keeps them distinguishable and
+    lets the parameter appear in ``inspect.signature``, which it could not
+    while it was swallowed by ``**kwargs`` (xq8/STAB-3).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+#: ``run(seed=...)``'s default: forward nothing, so the device keeps its own
+#: default (42) and every pre-existing call returns the counts it always did.
+_SEED_UNSET = _Unset()
+
+
 def run(
     circuit: Circuit,
     device: Union[str, DeviceExecutor, None] = None,
@@ -41,6 +63,8 @@ def run(
     target: Optional[str] = None,
     tracker: Optional[Any] = None,
     params: Optional[dict] = None,
+    *,
+    seed: Any = _SEED_UNSET,
     **kwargs: Any,
 ) -> RunResult:
     """Execute a quantum circuit and return measurement results.
@@ -62,9 +86,27 @@ def run(
             runner checks for an active ``sf.experiment()`` context.
         params: Parameter values for symbolic circuits.  If provided,
             ``circuit.bind(params)`` is called automatically.
+        seed: Sampling seed, keyword-only.  ``seed=<int>`` reproduces a sample
+            exactly; omitting it uses the historical default of 42, so repeated
+            unseeded runs are bit-identical; ``seed=None`` draws a fresh 32-bit
+            seed from OS entropy and reports it back as
+            ``result.metadata["seed"]`` so the run can be replayed.  See the
+            section below.
         **kwargs: Passed through to the device executor (e.g. ``bond_dim``
-            for MPS, ``seed`` for sampling, ``densify=False`` to skip the
-            shots=0 MPS densification and receive only the state handle).
+            for MPS, ``densify=False`` to skip the shots=0 MPS densification
+            and receive only the state handle).
+
+    Sampling seed:
+        ``seed=<int>`` reproduces a sample exactly.  Omitting it uses the
+        historical default of 42, so repeated unseeded runs are bit-identical
+        -- repeat runs must vary the seed to build an error bar.  ``seed=None``
+        asks for a fresh 32-bit seed drawn from OS entropy; it is reported back
+        as ``result.metadata["seed"]`` so the run can be replayed:
+
+            >>> a = sf.run(c, shots=1000, seed=None)
+            >>> b = sf.run(c, shots=1000, seed=a.metadata["seed"])
+            >>> a.counts == b.counts
+            True
 
     Returns:
         ``RunResult`` with counts, statevector, probabilities, and metadata.
@@ -76,6 +118,12 @@ def run(
         ValueError: If device or method string is unrecognized.
     """
     # 0. Bind parameters if provided
+    symbolic_circuit = circuit
+    if seed is not _SEED_UNSET:
+        # Keep the device-side contract: ``_resolve_seed`` reads kwargs["seed"]
+        # and tells "absent" (fixed 42) apart from "None" (draw entropy) by
+        # key presence, so the sentinel must not be forwarded.
+        kwargs["seed"] = seed
     if params is not None:
         circuit = circuit.bind(params)
 
@@ -133,6 +181,19 @@ def run(
 
     if active_tracker is not None:
         active_tracker.on_run_complete(result)
+
+    # RES-2: ``bind()`` substitutes the numbers, so the symbolic names are
+    # gone from ``result.circuit``.  Keep the symbolic circuit and the values
+    # that were bound on the result itself (not in ``metadata``, which is
+    # serialised) so ``RunResult.grad`` can rebuild the parameterised IR
+    # without the caller passing a dag.
+    try:
+        result._sf_grad_context = {
+            "circuit": symbolic_circuit,
+            "params": dict(params) if params is not None else {},
+        }
+    except Exception:  # pragma: no cover - exotic result types
+        pass
 
     return result
 

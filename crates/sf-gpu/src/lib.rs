@@ -42,7 +42,19 @@ struct GpuState {
     stream: Arc<CudaStream>,
 }
 
+/// Loads the CUDA context and JIT-compiles the kernels for this device.
+///
+/// cudarc resolves the nvrtc library with `expect`, so a machine that has a
+/// driver but no loadable nvrtc panics here instead of returning `None`. That
+/// would break the "gracefully returns `is_available() = false`" contract this
+/// module advertises, so the unwind is contained and degraded to `None`.
 fn init_gpu() -> Option<GpuState> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(init_gpu_inner))
+        .ok()
+        .flatten()
+}
+
+fn init_gpu_inner() -> Option<GpuState> {
     let ctx = CudaContext::new(0).ok()?;
     let stream = ctx.default_stream();
 
@@ -73,9 +85,31 @@ pub fn is_available() -> bool {
     get_state().is_ok()
 }
 
+/// Renders a caught panic payload, which is either `&str` or `String`.
+fn describe_panic(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Diagnostic: returns detailed reason why GPU init failed (or "ok").
-#[allow(clippy::needless_return)]
 pub fn diagnose() -> String {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(diagnose_inner)) {
+        Ok(msg) => msg,
+        Err(payload) => format!(
+            "CUDA runtime load failed: {}. CUDA 11.6 ships nvrtc64_112_0.dll, which cudarc \
+             does not probe by name; a copy named nvrtc.dll on PATH lets the loader find it.",
+            describe_panic(payload)
+        ),
+    }
+}
+
+#[allow(clippy::needless_return)]
+fn diagnose_inner() -> String {
     match CudaContext::new(0) {
         Err(e) => return format!("CudaContext::new(0) failed: {:?}", e),
         Ok(ctx) => {

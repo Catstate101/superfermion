@@ -541,6 +541,16 @@ class Circuit:
         """
         return self.cu(theta, 0.0, 0.0, control, target)
 
+    def ch(self, control: int, target: int) -> Circuit:
+        """Controlled-Hadamard: applies H on ``target`` if ``control`` is |1⟩.
+
+        ``U3(π/2, 0, π)`` is exactly the Hadamard matrix — the U3 convention
+        already carries the phase, so this is a true controlled-H and not a
+        global-phase-shifted variant. Emitted as ``CU`` because the IR has no
+        dedicated ``CH`` opcode; adjoint and parameter-shift both cover ``CU``.
+        """
+        return self.cu(np.pi / 2, 0.0, np.pi, control, target)
+
     # ───────────────────────────────────────────────────────
     # Two-qubit gates
     # ───────────────────────────────────────────────────────
@@ -718,13 +728,48 @@ class Circuit:
         During ``sf.compile(target=...)``, it is decomposed into basis
         gates by ``UnitaryDecompositionPass``.
 
+        Bit order: ``matrix``'s index bit ``r`` drives ``qubits[k-1-r]``, so
+        ``qubits[0]`` is the **most significant** bit of the matrix index.  The
+        circuit's own state vector and :meth:`to_unitary` use the opposite
+        (Qiskit) convention, qubit 0 as least significant, so this method
+        applies ``B @ matrix @ B`` as an operator on the circuit, where ``B``
+        is the ``k``-qubit bit-reversal permutation.  For ``k == 1`` the two
+        agree exactly (max difference 0.000e+00 against Qiskit); for ``k >= 2``
+        they are different operators, separated by up to 1.30 (``k == 2``) and
+        1.06 (``k == 3``) in max-norm on random Haar unitaries, and by 1.137 /
+        0.992 on the fixed matrices the engine harness uses -- the exact number
+        is a property of the matrix, but it is O(1), not rounding.  To apply
+        ``matrix`` in :meth:`to_unitary` order -- the same operator Qiskit
+        applies -- pass the wires reversed::
+
+            circuit.unitary(matrix, [q2, q1, q0])   # q2 is the MSB of matrix
+
+        and to keep the wire order and reverse the operator instead, bit-reverse
+        the matrix itself::
+
+            perm = [int(format(i, f"0{k}b")[::-1], 2) for i in range(2 ** k)]
+            circuit.unitary(matrix[np.ix_(perm, perm)], [q0, q1, q2])
+
+        This is the relationship :meth:`GateRecord.to_unitary` documents from
+        the other side; it is stated here as well because a caller reaching for
+        ``unitary()`` has no reason to read the record's docstring first.  The
+        algorithms in this package that build a matrix in ``qubits`` order (HHL,
+        amplitude estimation) therefore pass ``[control] + reversed(targets)``.
+
         Args:
             matrix: A unitary matrix of shape ``(2^k, 2^k)`` where
                 ``k = len(qubits)``.
-            qubits: The qubit indices this unitary acts on.
+            qubits: The qubit indices this unitary acts on, most significant
+                matrix bit first.
 
         Returns:
             ``self``, for fluent chaining.
+
+        Raises:
+            ValueError: the shape does not match ``len(qubits)``, the matrix is
+                not unitary, a qubit index is out of range, or a ``c_if(...)``
+                condition is pending (classical conditions are only supported
+                for named gates).
         """
         matrix = np.asarray(matrix, dtype=complex)
         k = len(qubits)
@@ -1072,6 +1117,14 @@ class Circuit:
         written the other way round (leftmost character = qubit 0), so
         ``"XI"`` and the basis index ``0b01`` refer to the same qubit.
         """
+        # MEM-1: the Rust allocator aborts the process on a failed allocation
+        # (exit 0xC0000409, uncatchable), so a 4^n matrix that cannot fit is
+        # refused here while it is still a Python exception.
+        from superfermion._limits import guard_state_allocation
+
+        guard_state_allocation(
+            self.n_qubits, "unitary", what="Circuit.to_unitary()"
+        )
         ir_dag = self.to_ir()
         return np.asarray(ir_dag.to_unitary())
 

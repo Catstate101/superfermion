@@ -171,6 +171,12 @@ class TestIonQDevice:
 class TestBraketDevice:
     def test_callable_returns_executor(self):
         pytest.importorskip("boto3")
+        # The executor is built through _get_aws_session, which imports
+        # braket.aws -- boto3 alone is not enough.  boto3 is a transitive
+        # dependency of many packages, so guarding on it alone made this test
+        # fail (ModuleNotFoundError: braket) in every environment that had
+        # boto3 but not the qpu/interop extra.
+        pytest.importorskip("braket.aws")
         from superfermion.devices.braket import BraketDevice, BraketDeviceExecutor
 
         with patch("boto3.Session"):

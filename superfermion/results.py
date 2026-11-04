@@ -178,8 +178,11 @@ class RunResult:
         from counts.
 
         Args:
-            observable: Pauli observable — str ("ZIII", MSB-first), dict,
-                SparsePauliOp, or Rust term list [(paulis, coef_re, coef_im)].
+            observable: Pauli observable — str (one character per qubit,
+                character 0 = qubit 0), dict, SparsePauliOp, PauliString,
+                Hamiltonian, Sequence[str], Sequence[PauliString], or Rust term
+                list
+                [(paulis, coef_re, coef_im)].
 
         Returns:
             Expectation value as float.
@@ -188,7 +191,9 @@ class RunResult:
         if self.state is not None:
             return self.state.expectation(observable)
         if self.counts:
-            return _estimate_expval_from_counts(observable, self.counts)
+            return _estimate_expval_from_counts(
+                observable, self.counts, _outcome_char_index(self)
+            )
         return 0.0
 
     def variance(self, observable) -> float:
@@ -199,8 +204,11 @@ class RunResult:
         PennyLane analogue: ``qml.var``.
 
         Args:
-            observable: Pauli observable — str ("ZIII", MSB-first), dict,
-                SparsePauliOp, or Rust term list [(paulis, coef_re, coef_im)].
+            observable: Pauli observable — str (one character per qubit,
+                character 0 = qubit 0), dict, SparsePauliOp, PauliString,
+                Hamiltonian, Sequence[str], Sequence[PauliString], or Rust term
+                list
+                [(paulis, coef_re, coef_im)].
 
         Returns:
             Variance as float.
@@ -209,7 +217,9 @@ class RunResult:
         if self.state is not None:
             return self.state.variance(observable)
         if self.counts:
-            return _estimate_var_from_counts(observable, self.counts)
+            return _estimate_var_from_counts(
+                observable, self.counts, _outcome_char_index(self)
+            )
         return 0.0
 
     def mutual_info(self, wires_a, wires_b) -> float:
@@ -235,20 +245,79 @@ class RunResult:
         Uses adjoint differentiation from state (if available).
 
         Args:
-            observable: Pauli observable — str ("ZIII", MSB-first), dict,
-                SparsePauliOp, or Rust term list [(paulis, coef_re, coef_im)].
-            dag: QuantumDAG for gradient computation.
-            param_values: Parameter values dict.
+            observable: Pauli observable — str (one character per qubit,
+                character 0 = qubit 0), dict, SparsePauliOp, PauliString,
+                Hamiltonian, Sequence[str], Sequence[PauliString], or Rust term
+                list
+                [(paulis, coef_re, coef_im)].
+            dag: Parameterised IR (a ``QuantumDAG``, or a ``Circuit`` which is
+                converted with ``to_ir()``).  Optional: a result returned by
+                ``sf.run(circuit, params=...)`` remembers the symbolic circuit
+                and the values it bound, so the dag is rebuilt for you (RES-2).
+            param_values: Parameter values — a ``{name: value}`` dict, or a
+                sequence aligned with the circuit's parameter names.
+                Optional for the same reason as ``dag``.
 
         Returns:
             Dict mapping parameter name to gradient value.
+
+        Raises:
+            ValueError: the result has no dag to differentiate, the dag carries
+                no symbolic parameters (a bound circuit erases them), the
+                values were not recorded, or the observable is not a valid
+                observable for a gradient (``grad`` refuses a label whose
+                width is not the circuit's qubit count, and a non-Hermitian
+                operator, exactly like the four standalone engines).
         """
-        observable = _coerce_observable(observable, _result_n_qubits(self))
-        if self.state is not None:
-            if dag is None or param_values is None:
-                raise ValueError("grad() requires dag and param_values arguments")
-            return self.state.grad(observable, dag, param_values)
-        raise RuntimeError("grad() not available: no state (QPU result?)")
+        from superfermion.qml.gradient._observables import normalize_for_gradient
+        from superfermion.qml.gradient._params import dag_parameter_names
+
+        observable = normalize_for_gradient(
+            observable, _result_n_qubits(self) or 0, what="grad() observable"
+        )
+        if self.state is None:
+            raise RuntimeError("grad() not available: no state (QPU result?)")
+        if dag is not None and not hasattr(dag, "adjoint_grad") and hasattr(
+            dag, "to_ir"
+        ):
+            dag = dag.to_ir()
+        if dag is None or param_values is None:
+            fallback_dag, fallback_values = _grad_fallbacks(self)
+            if dag is None:
+                dag = fallback_dag
+            if param_values is None:
+                param_values = fallback_values
+        if param_values is not None and not isinstance(param_values, dict):
+            param_values = _as_param_dict(param_values, self)
+        if dag is None:
+            raise ValueError(
+                "grad() needs a parameterised dag for this result and none "
+                "could be rebuilt (the circuit carries no free parameters).\n"
+                "  Fix: pass dag=circuit.to_ir() for the circuit that produced "
+                "this state"
+            )
+        if param_values is None:
+            raise ValueError(
+                "grad() needs the values of the circuit parameters; the run "
+                "did not record them.\n"
+                "  Fix: run with sf.run(circuit, params={'theta': 0.3, ...}) "
+                "or pass param_values={'theta': 0.3, ...}"
+            )
+        if not dag_parameter_names(dag):
+            # A bound circuit has no symbols left, so the Rust adjoint engine
+            # can only answer {}.  Returning that silently made a bound-by-
+            # accident training loop read a zero gradient and stop making
+            # progress (F/V-6).
+            raise ValueError(
+                "grad() has nothing to differentiate: the dag for this result "
+                "carries no symbolic parameters.\n"
+                "  Cause: the circuit was already bound — circuit.bind({...}) "
+                "replaces every sf.param(...) symbol with a number, so "
+                ".to_ir() reports no parameters.\n"
+                "  Fix: run the unbound circuit and let this result bind the "
+                "values: sf.run(circuit, params={'theta': 0.3, ...}).grad('ZZ')"
+            )
+        return self.state.grad(observable, dag, param_values)
 
     def get_probabilities(self) -> Dict[str, float]:
         """Probability distribution from explicit value, statevector, or counts.
@@ -354,21 +423,155 @@ def _coerce_observable(observable, n_qubits=None):
     """Accept user-friendly observable forms; convert to Rust term list.
 
     Accepted (verified against parameter-shift ground truth to ~1e-16):
-      - str, e.g. "ZIII": Pauli string, MSB-first — leftmost char = qubit 0
-        (matches PennyLane ``qml.Z(0)`` / Qiskit wire convention).
+      - str, e.g. "ZIII": one character per qubit, **character 0 = qubit 0**
+        (q0-leftmost, matching the Pauli-index encoding the engines consume
+        and ``RunResult.expectation``'s own counts parity).
       - dict, e.g. {"ZI": 0.5, "IX": 0.3}.
       - SparsePauliOp / Hamiltonian-like objects.
-      - Rust term list [(paulis, coef_re, coef_im)]: passed through unchanged.
+      - PauliString: a single weighted Pauli string (CH-7).
+      - Sequence[PauliString]: the same sum written as a list of weighted
+        terms; each element is converted on its own (CH-7).
+      - Sequence[str]: several Pauli strings, summed with unit weight.
+      - Rust term list [(paulis, coef_re, coef_im)]: passed through unchanged,
+        and so are the ``(label, coef)`` / ``(label, coef_re, coef_im)``
+        spellings a user might reasonably write (RES-2).
 
     Anything unrecognized is passed through unchanged (legacy behavior).
     """
     if isinstance(observable, (list, tuple)):
-        return observable
+        terms = _term_sequence(observable)
+        return observable if terms is None else terms
     try:
         from superfermion.qml.gradient.adjoint import _observable_to_rust_terms
         return _observable_to_rust_terms(observable, n_qubits or 0)
     except (TypeError, ValueError, ImportError, AttributeError):
         return observable
+
+
+def _term_sequence(observable):
+    """Rust terms for a user-written sequence, or ``None`` when unrecognised.
+
+    Only shapes whose meaning is unambiguous are converted.  The engine's own
+    form carries ``paulis`` as integer codes, so anything whose first element
+    is already a list/tuple of ints is left exactly as it is; a string label
+    (or a label plus coefficient) is plainly a user spelling and becomes
+    ``(paulis, coef_re, coef_im)``.
+    """
+    try:
+        items = list(observable)
+    except TypeError:
+        return None
+    if not items:
+        return None
+    try:
+        from superfermion.qml.gradient.adjoint import _pauli_indices
+    except ImportError:  # pragma: no cover - adjoint module always ships
+        return None
+    if all(isinstance(item, str) for item in items):
+        return [(_pauli_indices(item), 1.0, 0.0) for item in items]
+    converted = []
+    for item in items:
+        if not isinstance(item, (tuple, list)) or len(item) not in (2, 3):
+            return None
+        label = item[0]
+        if isinstance(label, str):
+            paulis = _pauli_indices(label)
+        else:
+            return None  # already the engine form (or unknown): do not touch
+        if len(item) == 3:
+            try:
+                coef_re = float(item[1])
+                coef_im = float(item[2])
+            except (TypeError, ValueError):
+                return None
+        else:
+            coefficient = item[1]
+            if isinstance(coefficient, dict):
+                try:
+                    coef_re = float(
+                        coefficient.get("real", coefficient.get("re", 0.0))
+                    )
+                    coef_im = float(
+                        coefficient.get("imag", coefficient.get("im", 0.0))
+                    )
+                except (TypeError, ValueError):
+                    return None
+            else:
+                try:
+                    value = complex(coefficient)
+                except (TypeError, ValueError):
+                    return None
+                coef_re, coef_im = value.real, value.imag
+        converted.append((paulis, coef_re, coef_im))
+    return converted
+
+
+def _outcome_char_index(result) -> "Optional[Dict[int, int]]":
+    """Character position of each qubit in ``result.counts``, if not default.
+
+    ``None`` means the historical qubit-keyed layout (character ``n-1-q``).
+    Results whose counts are keyed by classical bit carry the map in
+    ``metadata['qubit_char_index']``.
+    """
+    metadata = getattr(result, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    index = metadata.get("qubit_char_index")
+    return index if isinstance(index, dict) else None
+
+
+def _grad_fallbacks(result):
+    """Best-effort ``(dag, param_values)`` for :meth:`RunResult.grad`.
+
+    ``sf.run`` stashes the *symbolic* circuit it bound and the values it used,
+    which is the only place those names survive: ``bind()`` returns a circuit
+    with the numbers substituted in.  Without that context the stored circuit
+    is used, which differentiates only if it still carries free parameters.
+    """
+    context = getattr(result, "_sf_grad_context", None)
+    if not isinstance(context, dict):
+        context = {}
+    candidate = context.get("circuit")
+    if candidate is None:
+        candidate = getattr(result, "circuit", None)
+    dag = None
+    if candidate is not None:
+        try:
+            dag = candidate.to_ir()
+        except Exception:
+            dag = None
+    params = context.get("params")
+    if params is not None:
+        return dag, dict(params)
+    free = tuple(getattr(candidate, "parameters", ()) or ())
+    if free:
+        return dag, None  # names known, values lost -> caller must supply
+    return dag, {}
+
+
+def _as_param_dict(values, result) -> dict:
+    """Align a sequence of parameter values with the circuit's names."""
+    names: List[str] = []
+    context = getattr(result, "_sf_grad_context", None)
+    if isinstance(context, dict) and isinstance(context.get("params"), dict):
+        names = list(context["params"])
+    if not names:
+        circuit = getattr(result, "circuit", None)
+        names = list(getattr(circuit, "parameters", ()) or ())
+    values = list(values)
+    if not names:
+        raise ValueError(
+            "grad() cannot align a sequence of parameter values: this result "
+            "records no parameter names.\n"
+            "  Fix: pass param_values={'theta': 0.3, ...}"
+        )
+    if len(names) != len(values):
+        raise ValueError(
+            f"grad() got {len(values)} parameter value(s) for {len(names)} "
+            f"parameter(s) {names}.\n"
+            "  Fix: pass a dict, or one value per parameter"
+        )
+    return {name: float(value) for name, value in zip(names, values)}
 
 
 def _result_n_qubits(result) -> "Optional[int]":
@@ -382,11 +585,17 @@ def _result_n_qubits(result) -> "Optional[int]":
 def _estimate_expval_from_counts(
     observable: list,
     counts: Dict[str, int],
+    qubit_char_index: "Optional[Dict[int, int]]" = None,
 ) -> float:
     """Estimate expectation value from measurement counts.
 
     For each Pauli term, compute the parity of the measured bits
     for non-identity Pauli operators and accumulate the weighted sum.
+
+    ``qubit_char_index`` maps qubit ``q`` onto its character position; ``None``
+    is the default qubit-keyed layout, where character ``i`` is qubit
+    ``n-1-i``.  A result whose counts are keyed by classical bit (RES-1) holds
+    a non-default map in ``metadata['qubit_char_index']``.
     """
     total_shots = sum(counts.values())
     if total_shots == 0:
@@ -400,18 +609,30 @@ def _estimate_expval_from_counts(
             parity = 0
             for q, p in enumerate(paulis):
                 if p in (1, 2, 3):  # X, Y, Z all flip parity
-                    if q < n:
-                        # bitstrings are q0-last: qubit q is bit n-1-q
-                        parity ^= int(bitstring[n - 1 - q])
+                    index = _char_position(q, n, qubit_char_index)
+                    if 0 <= index < n:
+                        parity ^= int(bitstring[index])
             eigenvalue = 1.0 - 2.0 * parity
             term_val += eigenvalue * count
         result += coef_re * term_val / total_shots
     return result
 
 
+def _char_position(
+    qubit: int, n: int, qubit_char_index: "Optional[Dict[int, int]]"
+) -> int:
+    """Character position of ``qubit`` in an outcome string of width ``n``."""
+    if qubit_char_index is not None:
+        position = qubit_char_index.get(qubit)
+        if position is not None:
+            return int(position)
+    return n - 1 - qubit
+
+
 def _estimate_var_from_counts(
     observable: list,
     counts: Dict[str, int],
+    qubit_char_index: "Optional[Dict[int, int]]" = None,
 ) -> float:
     """Estimate Var(O) = E[o²] − E[o]² from measurement counts.
 
@@ -432,9 +653,9 @@ def _estimate_var_from_counts(
             parity = 0
             for q, p in enumerate(paulis):
                 if p in (1, 2, 3):  # X, Y, Z all flip parity
-                    if q < n:
-                        # bitstrings are q0-last: qubit q is bit n-1-q
-                        parity ^= int(bitstring[n - 1 - q])
+                    index = _char_position(q, n, qubit_char_index)
+                    if 0 <= index < n:
+                        parity ^= int(bitstring[index])
             eigen += coef_re * (1.0 - 2.0 * parity)
         mean += eigen * count
         mean_sq += eigen * eigen * count

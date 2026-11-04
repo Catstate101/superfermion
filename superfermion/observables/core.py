@@ -86,7 +86,32 @@ def expval(statevector: np.ndarray, observable) -> float:
     return float(np.real(observable._fast_expval(sv)))
 
 
-def mps_expval(circuit, observable, bond_dim: int = 64, params=None) -> float:
+class _TruncationReport:
+    """Minimal shim so ``_check_mps_truncation`` can be reused verbatim.
+
+    That helper expects an object with a ``truncation_report()`` method, which
+    is what ``run(method="mps").state`` provides. ``mps_expval`` gets the
+    report as a plain dict from a one-shot Rust call, so it wraps it here
+    rather than duplicating the threshold logic, the wording and the
+    ``SF_MPS_WARN_WEIGHT`` / ``SF_MPS_STRICT`` environment handling.
+    """
+
+    __slots__ = ("_report",)
+
+    def __init__(self, report):
+        self._report = report
+
+    def truncation_report(self):
+        return self._report
+
+
+def mps_expval(
+    circuit,
+    observable,
+    bond_dim: int = 64,
+    params=None,
+    warn_truncation: bool = True,
+) -> float:
     """Compute ⟨ψ|O|ψ⟩ directly on the MPS tensor network.
 
     Evolves the circuit once (bond_dim cap) and evaluates every Pauli term
@@ -96,14 +121,26 @@ def mps_expval(circuit, observable, bond_dim: int = 64, params=None) -> float:
 
     Args:
         circuit: ``sf.Circuit`` (parameters must be bound, or pass ``params``).
-        observable: str ("ZIII", MSB-first: leftmost char = qubit 0, matching
-            PennyLane/Qiskit wire order), dict, SparsePauliOp, Hamiltonian-like,
-            or Rust term list [(paulis, coef_re, coef_im)].
+        observable: str, dict, SparsePauliOp, Hamiltonian-like, PauliString,
+            or Rust term list ``[(paulis, coef_re, coef_im)]``. In a Pauli
+            **string** the leftmost character is qubit 0, i.e. position ``k``
+            carries weight ``2**k`` — qubit 0 is the *least* significant bit.
+            This is the same order ``expval()`` and ``RunResult.expectation``
+            use, and it is the **opposite** of a counts key, where the
+            leftmost character is qubit ``n-1``.
         bond_dim: max MPS bond dimension (default 64).
         params: optional dict of symbolic-parameter bindings.
+        warn_truncation: emit the same ``RuntimeWarning`` (and honour the
+            same ``SF_MPS_WARN_WEIGHT`` / ``SF_MPS_STRICT`` environment
+            switches) that ``run(method="mps")`` raises, so a value computed
+            from a heavily truncated state is not reported as if it were
+            exact. Set ``False`` to silence it.
 
     Returns:
         Real expectation value (float).
+
+    Raises:
+        RuntimeError: if truncation occurs and ``SF_MPS_STRICT=1``.
     """
     from superfermion.qml.gradient.adjoint import _observable_to_rust_terms
 
@@ -121,11 +158,19 @@ def mps_expval(circuit, observable, bond_dim: int = 64, params=None) -> float:
         if len(plist) != n:
             raise ValueError(
                 f"Pauli term length {len(plist)} != n_qubits {n}. "
-                "Use one character per qubit, e.g. 'ZIII'."
+                "Use one character per qubit, e.g. 'ZIII' (leftmost char = qubit 0)."
             )
         paulis.append(plist)
         coefs.append(complex(t[1], t[2]))
-    vals = circuit.to_ir().simulate_mps_pauli_expval_batch(bond_dim, paulis)
+    ir = circuit.to_ir()
+    get_report = getattr(ir, "simulate_mps_pauli_expval_batch_report", None)
+    if warn_truncation and get_report is not None:
+        vals, report = get_report(bond_dim, paulis)
+        from superfermion.devices.rust_device import _check_mps_truncation
+
+        _check_mps_truncation(_TruncationReport(report), bond_dim)
+    else:
+        vals = ir.simulate_mps_pauli_expval_batch(bond_dim, paulis)
     total = sum((c * complex(v[0], v[1]) for c, v in zip(coefs, vals)), start=0j)
     return float(total.real)
 
@@ -553,3 +598,109 @@ def _pl_term_to_str(pl_term) -> str:
     name = pl_term.name  # 'PauliX', 'PauliZ', etc.
     char = name[-1] if len(name) > 1 else name
     return char
+
+
+# ── State.expectation observable compatibility ────────────────────────────────
+#
+# ``State`` is a PyO3 class whose ``expectation`` only accepted the raw Rust
+# term list ``[(paulis, coef_re, coef_im)]``. Every Python-side observable form
+# raised a PyO3 conversion error instead -- ``Can't extract `str` to `Vec```
+# for a plain string, ``'dict' object is not an instance of 'Sequence'`` for a
+# dict, a PauliString or a SparsePauliOp (CH-6), and the messages said nothing
+# about the observable (CH-11). The wrapper below coerces the observable first
+# and validates the shape, so a bad term list names the offending qubit count
+# instead of leaking a Rust extraction message.
+
+_STATE_EXPECTATION_ORIGINAL = None
+
+
+def _normalise_rust_terms(terms, n_qubits: int, source: str):
+    """Validate ``[(paulis, coef_re, coef_im)]`` and return the canonical form."""
+    if isinstance(terms, (str, bytes)) or not isinstance(terms, (list, tuple)):
+        raise TypeError(
+            f"{source}: expected a Pauli observable (str, dict, PauliString, "
+            f"SparsePauliOp, Hamiltonian) or a Rust term list "
+            f"[(paulis, coef_re, coef_im)], got {type(terms).__name__}."
+        )
+    out = []
+    for index, term in enumerate(terms):
+        if isinstance(term, (str, bytes)) or not isinstance(term, (list, tuple)):
+            raise TypeError(
+                f"{source}: term {index} must be (paulis, coef_re, coef_im), "
+                f"got {type(term).__name__}. Did you pass Pauli letters without "
+                f"converting them? Use observables.core's helper or a Pauli "
+                f"string such as 'ZIII'."
+            )
+        if len(term) < 3:
+            raise TypeError(
+                f"{source}: term {index} needs 3 entries "
+                f"(paulis, coef_re, coef_im), got {len(term)}."
+            )
+        paulis, coef_re, coef_im = term[0], term[1], term[2]
+        pauli_list = [int(p) for p in paulis]
+        if n_qubits and len(pauli_list) != n_qubits:
+            raise ValueError(
+                f"{source}: term {index} covers {len(pauli_list)} qubits but the "
+                f"state has {n_qubits}. Use one entry per qubit, e.g. 'ZIII' "
+                f"for a 4-qubit state (leftmost character = qubit 0)."
+            )
+        out.append((pauli_list, float(np.real(coef_re)), float(np.real(coef_im))))
+    return out
+
+
+def _state_expectation(self, observable):
+    """``State.expectation`` that accepts every documented observable form."""
+    n_qubits = getattr(self, "n_qubits", 0)
+    if isinstance(observable, list) and observable and isinstance(observable[0], tuple):
+        # Already a Rust term list. Keep the original call, but reject a term
+        # whose length disagrees with the state first: the Rust side silently
+        # returned 0.0 for a short term and raised "MethodError invalid state
+        # dimension or Pauli string" for a long one.
+        for index, term in enumerate(observable):
+            if len(term) >= 1 and isinstance(term[0], (list, tuple)) and n_qubits:
+                if len(term[0]) != n_qubits:
+                    raise ValueError(
+                        f"State.expectation: term {index} covers {len(term[0])} "
+                        f"qubits but the state has {n_qubits}."
+                    )
+        return _STATE_EXPECTATION_ORIGINAL(self, observable)
+    from superfermion.qml.gradient.adjoint import _observable_to_rust_terms
+
+    terms = _observable_to_rust_terms(observable, n_qubits)
+    terms = _normalise_rust_terms(terms, n_qubits, "State.expectation")
+    try:
+        return _STATE_EXPECTATION_ORIGINAL(self, terms)
+    except TypeError as exc:  # pragma: no cover - defensive, should not trigger
+        raise TypeError(
+            f"State.expectation: could not evaluate {type(observable).__name__} "
+            f"({exc}). The underlying Rust call expects "
+            f"[(paulis, coef_re, coef_im)] with one entry per qubit."
+        ) from exc
+
+
+def install_state_expectation_compat() -> bool:
+    """Patch ``State.expectation`` to share ``RunResult.expectation``'s API.
+
+    Returns True when the patch is installed (idempotent). PyO3 classes allow
+    attribute assignment in this build; if a future build forbids it the
+    function returns False and the raw behaviour is left untouched.
+    """
+    global _STATE_EXPECTATION_ORIGINAL
+    try:
+        from superfermion._sf_core import State
+    except ImportError:
+        return False
+    if _STATE_EXPECTATION_ORIGINAL is not None:
+        return True
+    original = getattr(State, "expectation", None)
+    if original is None:
+        return False
+    try:
+        State.expectation = _state_expectation
+    except (AttributeError, TypeError):
+        return False
+    _STATE_EXPECTATION_ORIGINAL = original
+    return True
+
+
+STATE_EXPECTATION_COMPAT = install_state_expectation_compat()

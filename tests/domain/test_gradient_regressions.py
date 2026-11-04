@@ -363,3 +363,158 @@ def test_new_gate_aliases_are_exact():
         sf.Circuit(2).cp(theta, 0, 1).to_unitary(),
         atol=1e-2,
     )
+
+
+# ── E/F: the 0.1.25 observable and metric fixes ──────────────────────────────
+#
+# Defect ledger for this section (numbers measured in _xq6_grad.py against
+# Qiskit 2.6.1, which refuses the same inputs and inverts the same metric):
+#
+# E. the five gradient entry points each coerced observables their own way --
+#    ``list[PauliString]`` reached only the adjoint and the engine term list
+#    only ``RunResult.grad``;
+# V. a label whose width was not the register's was accepted and meant a
+#    different operator (``'Z'`` on two wires acted as ``II``), and a
+#    non-Hermitian operator was differentiated three different ways;
+# W. ``qng_step`` assembled the gradient in the caller's order but left the
+#    qfim in the dag's, which moved the step by 0.024420, and used
+#    ``np.linalg.solve`` on a rank-deficient metric, which returned
+#    |dtheta| = 532 instead of raising.
+
+
+def _f_metric_circuit():
+    """Three symbols on two qubits, ``zz`` repeated across an RY and a P."""
+    zz, aa, mm = sf.param("zz"), sf.param("aa"), sf.param("mm")
+    circuit = sf.Circuit(2).h(0).ry(zz, 1).cx(0, 1).rz(aa, 0).rx(mm, 1).p(zz, 0)
+    return circuit, {"zz": 0.37, "aa": 0.4, "mm": 0.9}
+
+
+def test_state_grad_documents_itself():
+    """``help(sf.State.grad)`` must explain the term form and the ordering."""
+    import inspect
+
+    for method, needles in (
+        (sf.State.grad, ("adjoint", "parameter_names", "Hermitian", "ValueError")),
+        (sf.State.qfim, ("Bures", "parameter_names", "permute", "pinv")),
+    ):
+        doc = inspect.getdoc(method)
+        assert doc, f"{method.__name__} has no docstring"
+        missing = [n for n in needles if n not in doc]
+        assert not missing, f"{method.__name__} docstring omits {missing}"
+
+
+def test_state_grad_refuses_a_label_narrower_than_the_register():
+    """``'Z'`` on two wires used to mean ``II`` and return a plausible zero."""
+    circuit, values = _f_metric_circuit()
+    state = sf.run(circuit, params=values).state
+    dag = circuit.to_ir()
+
+    with pytest.raises(ValueError, match="wire"):
+        state.grad([([3], 1.0, 0.0)], dag, values)
+    with pytest.raises(ValueError, match="wire"):
+        state.grad("IZI", dag, values)
+
+
+def test_state_grad_refuses_a_non_hermitian_operator():
+    """A complex coefficient has no real derivative; Qiskit refuses it too."""
+    circuit, values = _f_metric_circuit()
+    state = sf.run(circuit, params=values).state
+    dag = circuit.to_ir()
+
+    with pytest.raises(ValueError, match="Hermitian"):
+        state.grad([([3, 3], 1.0, 0.5)], dag, values)
+    # A Hermitian complex sum is still accepted.
+    assert state.grad({"ZZ": 1.0 + 0.0j}, dag, values)["aa"] == pytest.approx(
+        state.grad("ZZ", dag, values)["aa"], abs=1e-12
+    )
+
+
+def test_state_grad_accepts_a_label_string_and_the_engine_form_alike():
+    """Both spellings reach the same engine and must not disagree."""
+    circuit, values = _f_metric_circuit()
+    state = sf.run(circuit, params=values).state
+    dag = circuit.to_ir()
+
+    from_terms = state.grad([([3, 0], 1.0, 0.0), ([0, 3], 0.5, 0.0)], dag, values)
+    from_dict = state.grad({"ZI": 1.0, "IZ": 0.5}, dag, values)
+    for name in values:
+        assert from_terms[name] == pytest.approx(from_dict[name], abs=1e-12)
+
+
+def test_qng_step_solves_in_the_callers_parameter_order():
+    """F/V-10: a metric tensor is a matrix of coordinates -- permute both axes."""
+    from superfermion.qml.gradient.qng import qng_step
+
+    circuit, values = _f_metric_circuit()
+    dag = circuit.to_ir()
+    names = list(dag.parameter_names())
+    state = sf.run(circuit, params=values).state
+    observable = "ZZ"
+    lr, reg = 0.05, 1e-6
+
+    metric = np.asarray(state.qfim(dag, values), dtype=float)
+    grad = adjoint_grad(circuit, observable, values)
+
+    shuffled = list(reversed(names))
+    perm = [names.index(name) for name in shuffled]
+    g_shuffled = np.array([grad[name] for name in shuffled])
+    m_shuffled = metric[np.ix_(perm, perm)]
+
+    step = qng_step(state, dag, observable, shuffled, values,
+                    learning_rate=lr, regularization=reg)
+    solved = np.linalg.solve(m_shuffled + reg * np.eye(len(names)), g_shuffled)
+    for name, delta in zip(shuffled, solved):
+        assert step[name] == pytest.approx(values[name] - lr * delta, abs=1e-10)
+
+    # ... and the old mixed-basis answer is measurably a different step, so
+    # the row above is not vacuous.
+    mixed = np.linalg.solve(metric + reg * np.eye(len(names)), g_shuffled)
+    gap = max(abs((values[name] - lr * m) - step[name])
+              for name, m in zip(shuffled, mixed))
+    assert gap > 1e-3, f"the two bases coincide here (gap {gap:.3e}); test is vacuous"
+
+
+def test_qng_step_refuses_an_unknown_parameter_name():
+    """An unknown name used to be filled with 0.0 and silently ignored."""
+    from superfermion.qml.gradient.qng import qng_step
+
+    circuit, values = _f_metric_circuit()
+    dag = circuit.to_ir()
+    state = sf.run(circuit, params=values).state
+
+    with pytest.raises(ValueError, match="not a parameter"):
+        qng_step(state, dag, "ZZ", ["zz", "nope"], values)
+
+
+def test_qng_step_survives_a_rank_deficient_metric():
+    """F/V-11: ``solve`` on a singular metric returned |dtheta| = 532, not an error.
+
+    ``ry(a) ry(b) = ry(a + b)``, so the Fubini-Study tensor is exactly
+    ``[[1,1],[1,1]]``: rank 1 in a 2-dimensional space.  The unregularized
+    step must stay in the parameter domain and must be the same minimum-norm
+    step ``sr_step`` (which has always used the pseudo-inverse) takes.
+    """
+    from superfermion.qml.gradient.qng import qng_step
+    from superfermion.qml.gradient.stochastic_reconfig import sr_step
+
+    a, b = sf.param("a"), sf.param("b")
+    circuit = sf.Circuit(1).ry(a, 0).ry(b, 0)
+    values = {"a": 0.4, "b": 0.9}
+    dag = circuit.to_ir()
+    names = list(dag.parameter_names())
+    state = sf.run(circuit, params=values).state
+    lr = 0.05
+
+    metric = np.asarray(state.qfim(dag, values), dtype=float)
+    assert np.linalg.matrix_rank(metric) == 1, f"expected a rank-1 metric, got {metric}"
+
+    step = qng_step(state, dag, "X", names, values, learning_rate=lr,
+                    regularization=0.0)
+    sane = sr_step(state, dag, "X", names, values, learning_rate=lr,
+                   regularization=0.0)
+
+    worst = max(abs(step[name] - values[name]) for name in names)
+    assert worst < 1.0, f"the step left the parameter domain: |dtheta|={worst:.3f}"
+    assert worst > 1e-6, "the deficient metric silently did nothing"
+    for name in names:
+        assert step[name] == pytest.approx(sane[name], abs=1e-12)

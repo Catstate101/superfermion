@@ -16,10 +16,19 @@ into the impurity one-body Hamiltonian.
 
 The total energy uses the standard correction
 
-    E_DMET = E_HF + sum_f (E_imp_f - E_ref_f)
+    E_DMET = E_HF + sum_f w_f (E_imp_f - E_ref_f)
 
 which is exact when a fragment's impurity space covers the whole system, and
-in that limit the tests assert equality with full CI.
+in that limit the tests assert equality with full CI.  ``w_f`` is the share of
+the correlation that fragment ``f`` may claim: an impurity that spans a
+fraction of the system is the only place its own correlation is solved, but
+when two impurities *both* span the same orbitals each of them solves that
+correlation again, and summing the raw differences counts it twice.  For H2
+split into one orbital per fragment both impurities are the whole two-orbital
+problem, so the raw sum reports ``E_HF + 2 * (E_FCI - E_HF)`` -- 0.0203 Ha
+*below* full CI, which no variational or non-variational embedding can be
+(CH-13).  ``w_f`` divides by how many impurities share ``f``'s space, which
+leaves a genuine multi-fragment partition (disjoint impurities) at ``w = 1``.
 
 Honest limits, stated rather than buried:
 
@@ -176,6 +185,7 @@ def one_shot_dmet(
     orbitals: Optional[np.ndarray] = None,
     density: Optional[np.ndarray] = None,
     tol: float = 1e-8,
+    deduplicate: bool = True,
 ) -> Dict[str, Any]:
     """Run one-shot DMET over a partition into fragments.
 
@@ -193,13 +203,20 @@ def one_shot_dmet(
         density: Optional ``(n, n)`` 1-RDM in the fragment basis. Defaults to
             the reference determinant's, i.e. ``2 U^T P_occ U``.
         tol: Bath singular-value threshold.
+        deduplicate: Divide each fragment's correlation by the number of
+            fragments whose impurity spans the same orbitals. Two impurities
+            that both cover the whole system each solve the whole correlation,
+            so the raw sum counts it twice (H2 split into single orbitals came
+            out 0.0203 Ha below full CI). ``False`` restores the raw sum.
 
     Returns:
         Dict with ``energy``, ``energy_electronic``, ``hf_energy``,
         ``fragments`` (per-fragment dicts: ``n_bath``, ``n_impurity``,
         ``n_impurity_electrons``, ``impurity_occupation``,
-        ``energy_impurity``, ``energy_reference``, ``correlation``) and
-        ``correlation_total``.
+        ``energy_impurity``, ``energy_reference``, ``correlation``,
+        ``weight``, ``correlation_weighted``) and ``correlation_total``.
+        ``correlation_total_raw`` and ``energy_electronic_raw`` hold the
+        un-de-duplicated numbers, so nothing is lost.
 
     Raises:
         ValueError: when a fragment impurity has an odd electron count, which
@@ -240,6 +257,8 @@ def one_shot_dmet(
 
     details: List[Dict[str, Any]] = []
     correction = 0.0
+    raw_correction = 0.0
+    impurity_sizes: List[int] = []
     for fragment in fragments:
         basis = embedding_basis(D, fragment, tol=tol)
         T = basis["transform"]
@@ -298,6 +317,8 @@ def one_shot_dmet(
         energy_reference += e_core
 
         correction += energy_impurity - energy_reference
+        raw_correction += energy_impurity - energy_reference
+        impurity_sizes.append(n_imp_orb)
         details.append({
             "fragment": [int(i) for i in fragment],
             "n_bath": int(basis["n_bath"]),
@@ -309,11 +330,36 @@ def one_shot_dmet(
             "correlation": float(energy_impurity - energy_reference),
         })
 
-    energy_electronic = hf_elec + correction
+    if deduplicate and details:
+        # How many impurities span the same space. ``impurity`` is a prefix of
+        # the embedded basis, so two size-k impurities intersect in min(k, k')
+        # orbitals; a fragment whose impurity is the only one of its size keeps
+        # the full correction.
+        shares = [
+            sum(min(k, other) for other in impurity_sizes) / float(k)
+            for k in impurity_sizes
+        ]
+        for detail, share in zip(details, shares):
+            weight = 1.0 / max(1.0, share)
+            detail["weight"] = float(weight)
+            detail["correlation_weighted"] = float(detail["correlation"] * weight)
+    else:
+        for detail in details:
+            detail["weight"] = 1.0
+            detail["correlation_weighted"] = float(detail["correlation"])
+
+    correlation_weighted = float(
+        sum(detail["correlation_weighted"] for detail in details)
+    )
+    energy_electronic = hf_elec + correlation_weighted
     return {
         "energy": float(energy_electronic + nuclear_repulsion),
         "energy_electronic": float(energy_electronic),
         "hf_energy": float(hf_elec + nuclear_repulsion),
         "fragments": details,
-        "correlation_total": float(correction),
+        "correlation_total": float(correlation_weighted),
+        # Kept so a caller can reproduce the pre-0.1.24 raw sum exactly.
+        "correlation_total_raw": float(raw_correction),
+        "energy_electronic_raw": float(hf_elec + raw_correction),
+        "deduplicated": bool(deduplicate),
     }

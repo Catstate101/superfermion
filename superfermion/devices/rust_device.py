@@ -17,11 +17,16 @@ import numpy as np
 from superfermion.circuit import Circuit
 from superfermion.devices import DeviceCapabilities
 from superfermion.results import LazyDict, RunResult
+from superfermion._classical_order import apply_to_result as _apply_classical_order
 from superfermion._fixes import (
     PermutedMPSState,
     mps_routing_permutation,
     remap_counts,
     unpermute_statevector,
+)
+from superfermion._limits import (
+    guard_state_allocation,
+    limit_from_kwargs,
 )
 
 # Above this qubit count the exact |c|² probability table costs more to
@@ -116,6 +121,35 @@ def _apply_readout_to_counts(
     if fast is not None:
         return fast(counts, rng=rng)
     return noise_model.apply_to_counts(counts, rng=rng)
+
+
+#: Seed used when the caller does not pass ``seed=`` at all.  Kept at 42 so
+#: every pre-existing call returns exactly the counts it returned before.
+_DEFAULT_SEED = 42
+
+
+def _resolve_seed(kwargs: Dict[str, Any]) -> tuple:
+    """``(seed, drawn)`` for this run — draws from OS entropy on ``seed=None``.
+
+    STAB-1: the seed defaulted to the literal 42 on *every* path, so repeated
+    unseeded ``sf.run(..., shots=n)`` calls returned bit-identical counts -- for
+    ``statevector``, ``mps`` and ``stabilizer`` alike -- which makes any error
+    bar built from repeated unseeded runs meaningless.  Passing ``seed=None``
+    used to raise ``TypeError``; it now draws a fresh 32-bit seed and records
+    it in ``result.metadata['seed']``, so the run stays replayable.
+
+    Omitting ``seed`` keeps the historical 42, so nothing that works today
+    changes; ``drawn`` is True only for the ``seed=None`` case.
+    """
+    if "seed" not in kwargs:
+        return _DEFAULT_SEED, False
+    seed = kwargs["seed"]
+    if seed is None:
+        return int.from_bytes(os.urandom(4), "little"), True
+    try:
+        return int(seed), False
+    except (TypeError, ValueError):
+        return _DEFAULT_SEED, False
 
 
 def _mps_perm_for_sampling(dag: Any, circuit: Circuit, bond_dim: int):
@@ -393,7 +427,9 @@ class RustDevice:
     Args:
         hardware: ``"cpu"`` or ``"gpu"``. Controls where the statevector
             computation happens. CPU uses multi-threaded Rayon + AVX/NEON.
-            GPU uses CUDA via cudarc (requires sm_75+ GPU).
+            GPU uses CUDA via cudarc; the kernels are JIT-compiled for the
+            device's own compute capability (verified on sm_61, so older
+            parts work too — the binding is not gated on sm_75).
         method: Simulation method. ``"statevector"`` (default), ``"mps"``,
             ``"stabilizer"``, or ``"density_matrix"``. Only statevector
             supports GPU.
@@ -430,6 +466,17 @@ class RustDevice:
 
     def execute(self, circuit: Circuit, shots: int = 1000, **kwargs: Any) -> RunResult:
         """Execute a circuit on this device."""
+        # MEM-1: an exact state that cannot fit in physical RAM makes the Rust
+        # allocator abort the interpreter (exit 0xC0000409, no Python
+        # exception), so it is refused here while it is still catchable.
+        # ``max_state_gib=`` overrides the ceiling per run; methods whose cost
+        # is not 2^n (mps, stabilizer) are never held to it.
+        guard_state_allocation(
+            circuit.n_qubits,
+            self._method,
+            limit_bytes=limit_from_kwargs(kwargs),
+            what=f"sf.run(device='{self._hardware}')",
+        )
         # Gate/readout noise is only applied on the density-matrix path;
         # warn instead of silently returning noiseless results elsewhere.
         noise_model = kwargs.get("noise_model", None)
@@ -447,18 +494,37 @@ class RustDevice:
                 RuntimeWarning,
                 stacklevel=2,
             )
+        # STAB-1: resolve the seed once so every path below (statevector,
+        # mps, stabilizer, density-matrix, dynamic) sees the same integer.
+        # ``seed=None`` means "draw a fresh one"; omitting it keeps 42.
+        seed, seed_was_drawn = _resolve_seed(kwargs)
+        kwargs["seed"] = seed
         # Mid-circuit (dynamic) circuits: measure/reset/feed-forward change
         # the state during the circuit, so they need per-shot trajectory
         # replay instead of a single unitary evolution + terminal sampling.
         if _is_dynamic_circuit(circuit):
-            return self._run_dynamic(circuit, shots, **kwargs)
-        if self._method == "stabilizer":
-            return self._run_stabilizer(circuit, shots, **kwargs)
-        if self._method == "mps":
-            return self._run_mps(circuit, shots, **kwargs)
-        if self._method == "density_matrix":
-            return self._run_density_matrix(circuit, shots, **kwargs)
-        return self._run_statevector(circuit, shots, **kwargs)
+            result = self._run_dynamic(circuit, shots, **kwargs)
+        elif self._method == "stabilizer":
+            result = self._run_stabilizer(circuit, shots, **kwargs)
+        elif self._method == "mps":
+            result = self._run_mps(circuit, shots, **kwargs)
+        elif self._method == "density_matrix":
+            result = self._run_density_matrix(circuit, shots, **kwargs)
+        else:
+            result = self._run_statevector(circuit, shots, **kwargs)
+        # RES-1: ``measure(q, cbit=c)`` says the classical register is the
+        # output, but sampling is qubit-keyed.  Relabel only when the cbit
+        # targets are a permutation of the qubits, so the string width -- and
+        # therefore every other character -- is unchanged.
+        result = _apply_classical_order(circuit, result)
+        if seed_was_drawn:
+            # Record a drawn seed so the run can be replayed exactly; an
+            # explicit ``seed=`` needs no record because the caller has it.
+            try:
+                result.metadata["seed"] = seed
+            except Exception:  # pragma: no cover - exotic result/metadata
+                pass
+        return result
 
     def capabilities(self) -> DeviceCapabilities:
         return DeviceCapabilities(

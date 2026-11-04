@@ -52,13 +52,23 @@ def amplitude_estimation(
         shots: If > 0, sample results directly.
 
     Returns:
-        Dict with keys:
-          - ``"amplitude"``: Estimated amplitude a ∈ [0, 1].
-          - ``"probability"``: a² (estimated probability of marked state).
-          - ``"int_value"``: Raw measurement outcome (y).
-          - ``"precision_bits"``: m (estimation qubits).
-          - ``"method"``: Which method was used.
-          - ``"statevector"`` / ``"counts"``: Raw result data.
+        Dict. Every mode carries ``"amplitude"`` (estimated a ∈ [0, 1]),
+        ``"probability"`` (a², the estimated population of the marked
+        subspace), ``"precision_bits"`` (m) and ``"method"``.
+
+        The ``canonical`` (QPE) method adds ``"int_value"`` (the measured
+        bin y) and ``"result"`` (the ``RunResult`` of the AE circuit, so the
+        raw statevector or counts stay reachable as ``result.statevector`` /
+        ``result.counts``); with ``shots > 0`` it also adds ``"counts"`` and
+        ``"estimation_bits"`` (the estimation-register suffix that was read).
+
+        The ``iterative`` method has no QPE register to measure: it
+        reconstructs the angle from the per-k marked-state populations, so it
+        returns ``"result": None`` and no ``"int_value"``.
+
+        The mode names ``canonical`` and ``iterative`` are values of
+        ``"method"``, not keys of their own; they are written without quotes
+        here for that reason.
     """
     if ae_method == "canonical":
         return _canonical_ae(state_prep, oracle, precision_bits, n_qubits, device, shots)
@@ -126,11 +136,13 @@ def _canonical_ae(
         state_axes = tuple(total - 1 - q for q in range(m, total))
         probs = probs.sum(axis=state_axes)  # shape (2,)*m
 
-        # The IQFT swap reverses qubit order (q0 ↔ q_{m-1}, …).
-        # np.argmax on the C-order-flattened tensor returns an index
-        # whose bits are ordered [MSB…LSB]; we convert to physical y.
-        max_idx = np.unravel_index(np.argmax(probs), [2] * m)
-        y = sum(int(max_idx[i]) << i for i in range(m))
+        # The surviving axes are n..total-1, which are the estimation qubits in
+        # **reverse** order (axis n+j carries qubit m-1-j), so a C-order flatten
+        # reads them MSB-first and the flat argmax *is* the integer y.
+        # The old code re-interpreted the axis index as a bit position, which
+        # bit-reversed y and is why the canonical estimate ignored the true
+        # amplitude.
+        y = int(np.argmax(probs))
         a_est, prob = _interpret_measurement(y, m)
         return {
             "amplitude": a_est,
@@ -143,7 +155,15 @@ def _canonical_ae(
 
     if result.counts:
         best_bits = max(result.counts, key=result.counts.get)
-        y = int(best_bits[:m][::-1], 2) if len(best_bits) >= m else 0
+        # A counts key is written with the leftmost character as qubit n-1, so
+        # the estimation register (qubits 0..m-1) is the *tail* of the string
+        # and reading it left-to-right already yields the value MSB-first.
+        # The old `best_bits[:m][::-1]` read the state-register bits instead.
+        if len(best_bits) >= m:
+            est_bits = best_bits[len(best_bits) - m:]
+        else:
+            est_bits = best_bits.rjust(m, "0")
+        y = int(est_bits, 2)
         a_est, prob = _interpret_measurement(y, m)
         return {
             "amplitude": a_est,
@@ -152,6 +172,7 @@ def _canonical_ae(
             "precision_bits": m,
             "method": "canonical",
             "counts": result.counts,
+            "estimation_bits": est_bits,
             "result": result,
         }
 
@@ -259,6 +280,18 @@ def _apply_inverse_state_prep(circuit, state_prep, n):
         elif inv_name == "t":
             inv_name = "tdg"
             inv_params = []
+        elif inv_name == "unitary":
+            # Negating params cannot invert an opaque matrix; the adjoint is
+            # M† and the gate must be re-emitted as a UNITARY.
+            m = getattr(gate, "matrix", None)
+            if m is None:
+                raise ValueError("UNITARY gate carries no matrix")
+            circuit.unitary(np.asarray(m, dtype=complex).conj().T, list(gate.qubits))
+            continue
+        elif inv_name in ("u", "u3") and len(inv_params) >= 3:
+            # U3(θ,φ,λ)† = U3(−θ, −λ, −φ); negating all three is not the inverse.
+            th, ph, lam = inv_params[0], inv_params[1], inv_params[2]
+            inv_params = [th, -lam, -ph]
         gate_fn = getattr(circuit, inv_name, None)
         if gate_fn is not None:
             gate_fn(*inv_params, *gate.qubits)
@@ -366,6 +399,23 @@ def _controlled_q_power(
             phys_qubits = [state_offset + q for q in gate.qubits]
             _apply_controlled_gate(circuit, gate, control, phys_qubits)
 
+        # 5. Sign correction.
+        #
+        # The four steps above build ``Q = A S_0 A† S_χ``, whose eigenvalues
+        # are ``e^{i(π ± 2θ)}`` with ``sin²θ = a`` — the extra π is what makes
+        # this *not* the textbook Grover operator ``G = −A S_0 A† S_χ``.
+        # Ignoring it is harmless in the iterative estimator (a global −1 does
+        # not move a probability) but fatal in QPE: it shifts every peak by
+        # half the register, ``y → y + 2^{m−1}``, so the read-out is
+        # ``sin(πy/2^m) = cos θ`` instead of ``sin θ`` and the estimate stops
+        # tracking ``a`` at all.
+        #
+        # ``Q^{p}`` with ``p = 2^k`` only carries the offset when p is odd, i.e.
+        # only for ``k = 0``; for ``k ≥ 1`` the π is an integer multiple of 2π
+        # and cancels. So a single controlled −1 restores ``G^{2^k}``.
+        if power % 2 == 1:
+            circuit.z(control)
+
 
 def _apply_controlled_gate(
     circuit: sf.Circuit,
@@ -373,16 +423,37 @@ def _apply_controlled_gate(
     control: int,
     qubits: List[int],
 ):
-    """Apply a single gate in controlled form."""
+    """Apply a single gate in controlled form.
+
+    The single-qubit branches use the exact controlled primitives on
+    ``Circuit`` rather than hand-rolled decompositions. The versions this
+    replaced were measurably wrong and are what made the canonical estimator
+    disagree with the iterative one:
+
+    * controlled-H was ``RY(−π/4), CZ, RY(π/4)``, which is ``CH`` **up to a
+      diagonal correction** — it equals ``diag(1, e^{−iπ/4}, e^{iπ/4}, −1)``
+      rather than ``diag(1,1,H)``, so each one leaked phase into the QPE;
+    * controlled-RX/RY were ``R(−θ/2), CX, R(θ/2), CX`` — the wrong sign order,
+      which is the wrong gate;
+    * controlled-RZ was emitted as ``CP(θ) = diag(1,1,1,e^{iθ})``, but
+      ``CRZ(θ) = diag(1,1,e^{−iθ/2},e^{iθ/2})``.
+
+    Anything without an exact primitive falls through to a block-diagonal
+    ``UNITARY`` embedding instead of the old "CX sandwich" placeholder, which
+    applied the bare gate in the middle of two CNOTs and implements no
+    controlled operation at all.
+    """
     name = gate.name.upper()
+
+    def _p(i: int, default: float = 0.0):
+        try:
+            return gate.params[i]
+        except (IndexError, TypeError):
+            return default
+
     if name in ("H",):
-        # CH = RY(pi/4) . CZ . RY(-pi/4)  on target
-        # Apply: RY(-pi/4) first, then CZ, then RY(pi/4)
-        q = qubits[0]
-        circuit.ry(-np.pi / 4, q)
-        circuit.cz(control, q)
-        circuit.ry(np.pi / 4, q)
-    elif name in ("X",):
+        circuit.ch(control, qubits[0])
+    elif name in ("X", "NOT"):
         circuit.cx(control, qubits[0])
     elif name in ("Y",):
         circuit.cy(control, qubits[0])
@@ -396,26 +467,18 @@ def _apply_controlled_gate(
         circuit.cp(-np.pi / 2, control, qubits[0])
     elif name in ("TDG",):
         circuit.cp(-np.pi / 4, control, qubits[0])
-    elif name in ("P", "PHASE"):
-        theta = gate.params[0] if gate.params else 0.0
-        circuit.cp(theta, control, qubits[0])
+    elif name in ("P", "PHASE", "R1"):
+        circuit.cp(_p(0), control, qubits[0])
     elif name in ("RX",):
-        theta = gate.params[0] if gate.params else 0.0
-        q = qubits[0]
-        circuit.rx(-theta / 2, q)
-        circuit.cx(control, q)
-        circuit.rx(theta / 2, q)
-        circuit.cx(control, q)
+        circuit.crx(_p(0), control, qubits[0])
     elif name in ("RY",):
-        theta = gate.params[0] if gate.params else 0.0
-        q = qubits[0]
-        circuit.ry(-theta / 2, q)
-        circuit.cx(control, q)
-        circuit.ry(theta / 2, q)
-        circuit.cx(control, q)
+        circuit.cry(_p(0), control, qubits[0])
     elif name in ("RZ",):
-        theta = gate.params[0] if gate.params else 0.0
-        circuit.cp(theta, control, qubits[0])
+        circuit.crz(_p(0), control, qubits[0])
+    elif name in ("U", "U3"):
+        circuit.cu(_p(0), _p(1), _p(2), control, qubits[0])
+    elif name in ("SX",):
+        circuit.cu(-np.pi / 2, np.pi / 2, np.pi / 2, control, qubits[0])
     elif name in ("CNOT", "CX"):
         # Controlled-CNOT = Toffoli
         circuit.toffoli(control, qubits[0], qubits[1])
@@ -425,11 +488,8 @@ def _apply_controlled_gate(
         circuit.toffoli(control, qubits[0], qubits[1])
         circuit.h(qubits[1])
     elif name in ("SWAP",):
-        # Controlled-SWAP (Fredkin) decomposed as:
-        # CX(tgt, ctl); Toffoli(ctrl, ctl, tgt); CX(tgt, ctl)
-        circuit.cx(qubits[1], qubits[0])
-        circuit.toffoli(control, qubits[0], qubits[1])
-        circuit.cx(qubits[1], qubits[0])
+        # Controlled-SWAP is a Fredkin
+        circuit.fredkin(control, qubits[0], qubits[1])
     elif name in ("TOFFOLI", "CCX"):
         # Controlled-Toffoli = CCCX; decompose via ancilla
         # Use qubit 0 as workspace (borrowed, restored)
@@ -437,14 +497,45 @@ def _apply_controlled_gate(
         circuit.toffoli(control, 0, qubits[2])
         circuit.toffoli(qubits[0], qubits[1], 0)
     else:
-        # Best-effort controlled version via CX sandwich pattern
-        if len(qubits) == 1:
-            circuit.cx(control, qubits[0])
-            method = getattr(circuit, gate.name.lower(), None)
-            if method is not None:
-                args = list(gate.params) + [qubits[0]]
-                method(*args)
-            circuit.cx(control, qubits[0])
+        _controlled_embedding(circuit, gate, control, qubits)
+
+
+def _controlled_embedding(
+    circuit: sf.Circuit,
+    gate,
+    control: int,
+    qubits: List[int],
+):
+    """Control an arbitrary gate by exact block-diagonal embedding.
+
+    ``Circuit.unitary(M, qs)`` maps ``qs[0]`` to the **most significant** index
+    bit of ``M`` (measured against ``ccx``/``cx``), so the control comes first
+    and the targets follow in reverse.
+    """
+    k = len(qubits)
+    name = gate.name.upper()
+    if name == "UNITARY":
+        u = getattr(gate, "matrix", None)
+        if u is None:
+            raise ValueError("UNITARY gate carries no matrix")
+        u = np.asarray(u, dtype=complex)
+    else:
+        mini = sf.Circuit(k)
+        apply = getattr(mini, gate.name.lower(), None)
+        if apply is None:
+            raise ValueError(
+                f"amplitude_estimation cannot control gate {gate.name!r}: "
+                f"Circuit has no method {gate.name.lower()!r}"
+            )
+        apply(*list(gate.params), *range(k))
+        u = np.asarray(mini.to_unitary(), dtype=complex)
+    if u.shape != (2 ** k, 2 ** k):
+        raise ValueError(
+            f"gate {gate.name!r} produced matrix shape {u.shape} for {k} qubit(s)"
+        )
+    embedded = np.eye(2 ** (k + 1), dtype=complex)
+    embedded[2 ** k:, 2 ** k:] = u
+    circuit.unitary(embedded, [control] + list(reversed(qubits)))
 
 
 def _invert_gate(gate):
@@ -456,6 +547,20 @@ def _invert_gate(gate):
     import superfermion as _sf
 
     name = gate.name.upper()
+
+    # A UNITARY gate carries its matrix on ``gate.matrix``, not in ``params``;
+    # rebuilding it from the name/param pair would silently drop the matrix and
+    # the adjoint would be the identity.
+    if name == "UNITARY":
+        m = getattr(gate, "matrix", None)
+        if m is None:
+            raise ValueError("UNITARY gate carries no matrix; no adjoint available")
+        return _sf.circuit.GateRecord(
+            name="UNITARY",
+            qubits=list(gate.qubits),
+            matrix=np.asarray(m, dtype=complex).conj().T,
+        )
+
     inv_params = []
     for p in (gate.params or []):
         try:
@@ -563,9 +668,16 @@ def _qft_inverse(circuit: sf.Circuit, qubits: List[int]):
 # ── Measurement interpretation ─────────────────────────────────────────
 
 def _interpret_measurement(y: int, m: int) -> Tuple[float, float]:
-    r"""Convert QPE outcome y ∈ [0, 2^m) to amplitude estimate.
+    r"""Convert a QPE outcome y ∈ [0, 2^m) to ``(amplitude, probability)``.
 
-    a = sin²(π · y / 2^m)
+    ``θ = π·y / 2^m``
+
+    ``amplitude = sin θ`` and ``probability = sin²θ``.
+
+    The previous docstring wrote ``a = sin²(π·y/2^m)`` while the code returned
+    ``sin(π·y/2^m)``, which is why the estimator was reported as "returning
+    sqrt(a)": it returns the *amplitude*, and ``amplitude**2`` is the
+    probability. Both are returned, so neither has to be inferred.
     """
     theta = np.pi * y / (2 ** m)
     a = float(np.sin(theta))
@@ -589,10 +701,14 @@ def _find_marked_states(
     marked = []
     for i in range(N):
         c = sf.Circuit(n)
+        # `format(i, '0nb')` is MSB-first, i.e. bits[0] is qubit n-1. Indexing
+        # the wire with the character position (what this did before) prepares
+        # |bit-reversed i> instead of |i>, so the marked set came back wrong
+        # for every asymmetric oracle.
         bits = format(i, f"0{n}b")
         for j, b in enumerate(bits):
             if b == "1":
-                c.x(j)
+                c.x(n - 1 - j)
         oracle(c)
         r = sf.run(c, device=device, shots=0)
         if r.statevector is not None:

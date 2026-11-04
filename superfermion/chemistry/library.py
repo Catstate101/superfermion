@@ -13,6 +13,26 @@ the record instead of guessing by name.  The H2 record was produced by::
 
 and its FCI energy, also from PySCF, is ``-1.137306035753`` Ha.
 
+How the H2 record is verified
+-----------------------------
+PySCF is not installed in the test environment, and every other chemistry test
+consumes these integrals, so a check of the record against PySCF would only
+ever agree with itself.  The record is therefore held to the STO-3G definition
+instead: ``tests/domain/test_h2_record_from_scratch.py`` evaluates the
+three-Gaussian contraction analytically -- closed-form overlap and kinetic
+energy, Boys function for nuclear attraction and repulsion -- and compares
+elementwise.  Measured agreement at ``d = 0.735`` A: ``max|dh1| = 1.5e-11``,
+``max|dh2| = 5.0e-12`` over all 16 two-electron entries, nuclear repulsion
+``1/R`` to ``2.3e-11``, ``E_HF`` to ``1.0e-12`` and the exact 2x2 CI to
+``4.1e-13``.  The residual is the 12-digit rounding of the stored values.
+
+A published H2/STO-3G pair sometimes compared against this record (HF
+``-1.11765865``, FCI ``-1.13727017``) does not describe this system.  The HF
+number lies below the STO-3G HF minimum at any bond length (``-1.1175059`` at
+``0.7122`` A), so it is not this basis at all, and the FCI number is reproduced
+at ``0.7414`` A rather than this record's ``0.735`` A.  Both statements are
+measured by the test above; the record is not adjusted to match either.
+
 Why this file is this small
 ---------------------------
 It used to carry "mock coefficients for demonstration" for H2, a hand-written
@@ -156,6 +176,70 @@ class MoleculeLibrary:
         return None
 
     # ---- convenience accessors kept for the public API -------------------
+    @classmethod
+    def require(
+        cls,
+        geometry: str,
+        basis: str = "sto-3g",
+        charge: int = 0,
+        spin: int = 0,
+    ) -> Dict[str, Any]:
+        """Like :meth:`get`, but raises instead of returning ``None``.
+
+        ``get`` answering ``None`` is a legal dict-style contract, but a
+        caller who then indexes the result gets a ``TypeError`` far away from
+        the real cause, and a caller who does not check silently propagates a
+        missing integral set (CH-15).
+
+        Raises:
+            LookupError: with the geometries that *are* tabulated.
+        """
+        record = cls.get(geometry, basis, charge, spin)
+        if record is not None:
+            return record
+        raise LookupError(
+            f"no tabulated integrals for geometry {geometry!r} with basis "
+            f"{basis!r}, charge={charge}, spin={spin}. Available: "
+            + "; ".join(cls.available())
+        )
+
+    @classmethod
+    def require_by_name(
+        cls, name: str, basis: str = "sto-3g"
+    ) -> Dict[str, Any]:
+        """Like :meth:`get_by_name`, but raises instead of returning ``None``.
+
+        Raises:
+            LookupError: naming the records that are tabulated.
+        """
+        record = cls.get_by_name(name, basis)
+        if record is not None:
+            return record
+        raise LookupError(
+            f"no tabulated record named {name!r} with basis {basis!r}. "
+            f"Available: " + "; ".join(cls.available())
+        )
+
+    @classmethod
+    def lookup(
+        cls, key: str, basis: str = "sto-3g", charge: int = 0, spin: int = 0
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a record from *either* a name or a geometry string.
+
+        ``get`` deliberately does no name matching -- that is what made
+        ``"h2o"`` resolve to hydrogen -- but ``get("H2")`` then returned
+        ``None`` with no hint that the argument was the wrong *kind* of key
+        (CH-15). This entry point keeps both lookups separate and tells the
+        caller which one it used.
+
+        Returns:
+            The record, or ``None`` when neither a name nor a geometry matches.
+        """
+        record = cls.get_by_name(key, basis)
+        if record is not None:
+            return record
+        return cls.get(key, basis, charge, spin)
+
     @classmethod
     def hydrogen(cls, distance: float = 0.735) -> Dict[str, Any]:
         """The STO-3G H2 record.  Only ``distance == 0.735`` is tabulated."""

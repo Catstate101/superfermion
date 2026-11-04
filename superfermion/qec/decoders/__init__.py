@@ -1,7 +1,11 @@
 """
 Superfermion QEC Decoders - MWPM, Union-Find, BP+OSD, and Neural decoders.
 """
+import importlib
+import itertools
 import logging
+import math
+import warnings
 from typing import Dict, Any, List, Optional, Tuple, Callable, Union
 import superfermion as sf
 import numpy as np
@@ -14,6 +18,40 @@ except ImportError:
     _HAS_RUST_DECODERS = False
 
 logger = logging.getLogger(__name__)
+
+
+# ── Optional neural-network dependencies ────────────────────────────────────
+
+_NEURAL_DEPS = ("flax", "optax")
+_NEURAL_INSTALL_HINT = "pip install flax optax"
+
+
+def _missing_neural_deps() -> List[str]:
+    """Names of the optional neural-network packages that are not importable."""
+    missing: List[str] = []
+    for module in _NEURAL_DEPS:
+        try:
+            importlib.import_module(module)
+        except Exception:  # noqa: BLE001 - any import failure means 'unavailable'
+            missing.append(module)
+    return missing
+
+
+def _require_neural_deps(feature: str) -> None:
+    """Raise an actionable error when the optional NN stack is absent.
+
+    The previous failure mode was a bare ``ModuleNotFoundError: No module named
+    'flax'`` raised from three levels down, which said nothing about what the
+    caller could do (DEC-2).
+    """
+    missing = _missing_neural_deps()
+    if missing:
+        raise RuntimeError(
+            f"{feature} needs the optional neural-network stack, but "
+            f"{', '.join(missing)} could not be imported. Install it with "
+            f"`{_NEURAL_INSTALL_HINT}`, or use a non-neural decoder "
+            f"(MWPMDecoder, UnionFindDecoder, BPOSD_Decoder)."
+        )
 
 
 # ── Shared validation helpers ───────────────────────────────────────────────
@@ -50,8 +88,15 @@ def _bposd_fallback(
     n_data: int,
     syndrome_map: List[List[int]],
     syndrome: np.ndarray,
+    info: Optional[Dict[str, Any]] = None,
 ) -> List[Tuple[int, str]]:
-    """Fallback decode using BP+OSD (proven correct on small codes)."""
+    """Fallback decode using BP+OSD (proven correct on small codes).
+
+    ``info``, when supplied, is filled in with what actually happened. The
+    previous body ended in ``except Exception: return []``, which made "the
+    fallback crashed" indistinguishable from "there is no error to correct" --
+    an empty correction looked like a healthy no-op either way (DEC-4).
+    """
     try:
         # Lazy import to avoid circular dependency at module level
         from superfermion.qec.decoders import BPOSD_Decoder as _BP
@@ -62,9 +107,255 @@ def _bposd_fallback(
             max_iter=50,
             osd_order=1,
         )
-        return bp.decode(syndrome)
-    except Exception:
+        correction = bp.decode(syndrome)
+        if info is not None:
+            info["fallback_used"] = True
+            info["fallback_error"] = None
+        return correction
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        logger.warning(
+            "BP+OSD fallback failed (%s: %s); returning no correction",
+            type(exc).__name__,
+            exc,
+        )
+        if info is not None:
+            info["fallback_used"] = True
+            info["fallback_error"] = f"{type(exc).__name__}: {exc}"
         return []
+
+
+# ── Minimum-weight guarantee ────────────────────────────────────────────────
+#
+# The Rust MWPM decoder validates that a correction reproduces the syndrome but
+# not that it is *minimum* weight. On a ring (wrap-around) parity-check map its
+# internal metric does not wrap, so it returns valid but heavier corrections:
+# measured 0/16, 2/64, 12/256, 60/1024 heavier-than-minimum at n = 4/6/8/10
+# (DEC-3). Exhaustive validation never catches that, because every answer *is*
+# syndrome-valid.
+#
+# A correction of weight w is provably minimal once no weight-1..w-1 pattern
+# reproduces the same syndrome, and w is small in practice, so the exact search
+# below costs O(n^(w-1)) -- at most a few hundred XORs for a surface code.
+
+MAX_MIN_WEIGHT_SEARCH = 4
+"""Highest correction weight that the capped search will consider."""
+
+MIN_WEIGHT_SEARCH_BUDGET = 200_000
+"""Abandon a search level whose combination count exceeds this."""
+
+MIN_WEIGHT_COSET_LIMIT = 256
+"""Enumerate the whole solution coset when ``2**dim(ker H)`` is at most this."""
+
+
+def _column_masks(H: np.ndarray) -> List[int]:
+    """Pack each column of ``H`` into one integer bitmask over the checks."""
+    H = np.asarray(H)
+    if H.ndim != 2 or H.size == 0:
+        return []
+    masks = []
+    for i in range(H.shape[1]):
+        mask = 0
+        for a in np.nonzero(H[:, i])[0]:
+            mask |= 1 << int(a)
+        masks.append(mask)
+    return masks
+
+
+def _syndrome_mask(syndrome: np.ndarray) -> int:
+    """Pack a syndrome bit-vector into one integer bitmask."""
+    mask = 0
+    for a, value in enumerate(np.asarray(syndrome).ravel()):
+        if int(value) & 1:
+            mask |= 1 << a
+    return mask
+
+
+def _gf2_kernel(H: np.ndarray) -> List[int]:
+    """Basis of the GF(2) null space of ``H``, one integer bitmask per vector.
+
+    Every solution of ``H e == s`` is ``e0 XOR (a kernel element)`` for any one
+    solution ``e0``, so this basis is what makes the minimum-weight search
+    exact rather than a bounded scan.
+    """
+    H = np.asarray(H)
+    if H.ndim != 2 or H.size == 0:
+        return []
+    A = (H % 2).astype(np.uint8).copy()
+    rows, cols = A.shape
+    pivots: List[int] = []
+    r = 0
+    for c in range(cols):
+        pivot = None
+        for i in range(r, rows):
+            if A[i, c]:
+                pivot = i
+                break
+        if pivot is None:
+            continue
+        A[[r, pivot]] = A[[pivot, r]]
+        for i in range(rows):
+            if i != r and A[i, c]:
+                A[i] ^= A[r]
+        pivots.append(c)
+        r += 1
+        if r == rows:
+            break
+    pivot_set = set(pivots)
+    basis: List[int] = []
+    for free_col in range(cols):
+        if free_col in pivot_set:
+            continue
+        vec = 1 << free_col
+        for i, pivot_col in enumerate(pivots):
+            if A[i, free_col]:
+                vec |= 1 << pivot_col
+        basis.append(vec)
+    return basis
+
+
+def _lower_weight_correction(
+    H: np.ndarray, syndrome: np.ndarray, max_weight: int
+) -> Optional[List[int]]:
+    """Lowest-weight ``e`` with ``H e == syndrome (mod 2)``, for weight <= cap.
+
+    Returns the list of flipped data-qubit indices, or ``None`` when no such
+    pattern exists within ``max_weight``. The scan is exhaustive at each weight
+    level, so a returned list is genuinely minimum weight among all patterns of
+    weight ``<= max_weight``.
+    """
+    H = np.asarray(H)
+    if H.ndim != 2 or H.shape[1] == 0:
+        return None
+    target = _syndrome_mask(syndrome)
+    if target == 0:
+        return []
+    masks = _column_masks(H)
+    usable = [i for i, m in enumerate(masks) if m]
+    for level in range(1, min(max_weight, len(usable)) + 1):
+        if math.comb(len(usable), level) > MIN_WEIGHT_SEARCH_BUDGET:
+            break
+        for combo in itertools.combinations(usable, level):
+            acc = 0
+            for i in combo:
+                acc ^= masks[i]
+            if acc == target:
+                return list(combo)
+    return None
+
+
+def _minimize_correction(
+    H: np.ndarray,
+    syndrome: np.ndarray,
+    correction: List[Tuple[int, str]],
+    n_data: int,
+    kernel: Optional[List[int]] = None,
+) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
+    """Replace ``correction`` by a strictly lighter syndrome-equivalent one.
+
+    Two strategies, both exact within their regime:
+
+    * ``dim(ker H)`` small -- enumerate the entire solution coset ``e0 + ker H``
+      and take its lightest member. This is the true minimum weight, and for a
+      ring map ``ker H`` is one-dimensional, so it costs two candidates.
+    * ``dim(ker H)`` large -- fall back to an exhaustive scan of patterns up to
+      ``MAX_MIN_WEIGHT_SEARCH``.
+
+    Returns ``(correction, info)``; ``info['minimized']`` says whether a
+    lighter pattern was found, and ``info['search']`` which strategy ran.
+    """
+    flipped = sorted({q for q, _pauli in correction if 0 <= q < n_data})
+    weight_before = len(flipped)
+    info: Dict[str, Any] = {"weight": weight_before, "minimized": False}
+    if weight_before == 0 or np.ndim(H) != 2 or np.shape(H)[1] == 0:
+        return correction, info
+
+    basis = _gf2_kernel(H) if kernel is None else kernel
+    current = 0
+    for q in flipped:
+        current |= 1 << q
+    best_bits, best_weight = current, weight_before
+
+    if (1 << len(basis)) <= MIN_WEIGHT_COSET_LIMIT:
+        info["search"] = "coset"
+        for subset in range(1, 1 << len(basis)):
+            cand = current
+            for b, vec in enumerate(basis):
+                if subset >> b & 1:
+                    cand ^= vec
+            w = bin(cand).count("1")
+            if w < best_weight:
+                best_bits, best_weight = cand, w
+    else:
+        cap = min(weight_before - 1, MAX_MIN_WEIGHT_SEARCH)
+        info["search"] = "combinations"
+        info["search_cap"] = cap
+        lower = _lower_weight_correction(H, syndrome, cap) if cap >= 1 else None
+        if lower is not None and len(lower) < best_weight:
+            best_bits = 0
+            for q in lower:
+                best_bits |= 1 << q
+            best_weight = len(lower)
+
+    if best_weight >= weight_before:
+        return correction, info
+    pauli = next((sym for _q, sym in correction if sym in ("X", "Y", "Z")), "X")
+    info.update({
+        "weight": best_weight,
+        "weight_before": weight_before,
+        "minimized": True,
+    })
+    idx = [i for i in range(best_bits.bit_length()) if best_bits >> i & 1]
+    return [(int(q), pauli) for q in idx], info
+
+
+def _decode_with_rust(
+    inner: Any,
+    H: np.ndarray,
+    syndrome_map: List[List[int]],
+    n_data: int,
+    s: np.ndarray,
+    name: str,
+    kernel: Optional[List[int]] = None,
+) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
+    """Shared pipeline for the two Rust-backed decoders.
+
+    Order: Rust decoder -> minimum-weight repair -> BP+OSD fallback. Every step
+    is recorded in the returned ``info`` so a caller can tell which backend
+    answered, whether the answer was actually validated, and whether the
+    fallback itself failed (DEC-3, DEC-4).
+    """
+    info: Dict[str, Any] = {
+        "decoder": name,
+        "backend": "none",
+        "syndrome_valid": False,
+        "fallback_used": False,
+        "fallback_error": None,
+        "minimized": False,
+        "weight": 0,
+    }
+    result: Optional[List[Tuple[int, str]]] = None
+    if inner is not None:
+        result = inner.decode([int(x) for x in s])
+        if _validate_correction(H, s, result, n_data):
+            info["backend"] = "rust"
+            info["syndrome_valid"] = True
+    if not info["syndrome_valid"]:
+        if result is not None:
+            # Valid, well-formed, but reproduces the wrong syndrome.
+            info["rust_correction_rejected"] = True
+        result = _bposd_fallback(n_data, syndrome_map, s, info=info)
+        info["backend"] = "bposd-fallback"
+        info["syndrome_valid"] = _validate_correction(H, s, result, n_data)
+    if kernel is None:
+        # Cache the null-space basis in ``info`` so the caller can store it once
+        # instead of recomputing an O(n^3) elimination on every decode.
+        kernel = _gf2_kernel(H)
+        info["_kernel_used"] = kernel
+    result, minfo = _minimize_correction(H, s, result, n_data, kernel=kernel)
+    info.update(minfo)
+    if minfo.get("minimized"):
+        info["backend"] = f"{info['backend']}+min-weight"
+    return result, info
 
 
 # ── Decoder classes ─────────────────────────────────────────────────────────
@@ -99,6 +390,21 @@ class MWPMDecoder:
             self._inner = RustMWPM(n_data, syndrome_qubit_map)
         else:
             self._inner = None
+        # Filled in by every decode() call: which backend answered, whether the
+        # answer reproduced the syndrome, and whether a fallback failed.
+        self.last_info: Dict[str, Any] = {}
+        # Computed once: the solution coset e0 + ker(H) is what makes the
+        # minimum-weight repair exact (DEC-3).
+        self._kernel: Optional[List[int]] = None
+
+    @property
+    def name(self) -> str:
+        return "mwpm"
+
+    @property
+    def backend(self) -> str:
+        """The backend that produced the most recent correction."""
+        return self.last_info.get("backend", "rust" if self._inner else "bposd-fallback")
 
     @staticmethod
     def for_repetition(n: int) -> "MWPMDecoder":
@@ -107,19 +413,25 @@ class MWPMDecoder:
 
     def decode(self, syndrome: np.ndarray) -> List[Tuple[int, str]]:
         """Decode a syndrome bit-string into a correction."""
+        return self.decode_with_info(syndrome)[0]
+
+    def decode_with_info(
+        self, syndrome: np.ndarray
+    ) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
+        """Decode and report which backend produced the correction (DEC-4)."""
         # Fast path: avoid np.array(..., flatten()) copies when the caller
         # already passes an int array (measured ~5-10us saving per decode).
         if isinstance(syndrome, np.ndarray) and syndrome.dtype == np.int32:
             s = syndrome.ravel()
         else:
             s = np.array(syndrome, dtype=np.int32).flatten()
-        if self._inner:
-            s_list = [int(x) for x in s]
-            result = self._inner.decode(s_list)
-            if _validate_correction(self._H, s, result, self.n_data):
-                return result
-        # Fallback to BP+OSD (proven correct on all test cases)
-        return _bposd_fallback(self.n_data, self.map, s)
+        result, info = _decode_with_rust(
+            self._inner, self._H, self.map, self.n_data, s, self.name,
+            kernel=self._kernel,
+        )
+        self._kernel = info.pop("_kernel_used", self._kernel)
+        self.last_info = info
+        return result, info
 
 class UnionFindDecoder:
     """Fast Union-Find Decoder for Surface/Color codes.
@@ -135,20 +447,38 @@ class UnionFindDecoder:
             self._inner = RustUnionFind(n_data, syndrome_qubit_map)
         else:
             self._inner = None
+        self.last_info: Dict[str, Any] = {}
+        self._kernel: Optional[List[int]] = None
+
+    @property
+    def name(self) -> str:
+        return "union_find"
+
+    @property
+    def backend(self) -> str:
+        """The backend that produced the most recent correction."""
+        return self.last_info.get("backend", "rust" if self._inner else "bposd-fallback")
 
     def decode(self, syndrome: np.ndarray) -> List[Tuple[int, str]]:
+        return self.decode_with_info(syndrome)[0]
+
+    def decode_with_info(
+        self, syndrome: np.ndarray
+    ) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
+        """Decode and report which backend produced the correction (DEC-4)."""
         # Fast path: avoid np.array(..., flatten()) copies when the caller
         # already passes an int array (measured ~5-10us saving per decode).
         if isinstance(syndrome, np.ndarray) and syndrome.dtype == np.int32:
             s = syndrome.ravel()
         else:
             s = np.array(syndrome, dtype=np.int32).flatten()
-        if self._inner:
-            s_list = [int(x) for x in s]
-            result = self._inner.decode(s_list)
-            if _validate_correction(self._H, s, result, self.n_data):
-                return result
-        return _bposd_fallback(self.n_data, self.map, s)
+        result, info = _decode_with_rust(
+            self._inner, self._H, self.map, self.n_data, s, self.name,
+            kernel=self._kernel,
+        )
+        self._kernel = info.pop("_kernel_used", self._kernel)
+        self.last_info = info
+        return result, info
 
 class BPOSD_Decoder:
     """Belief Propagation + Ordered Statistics Decoding.
@@ -160,6 +490,23 @@ class BPOSD_Decoder:
     2. Ordered Statistics Decoding (OSD) — if BP fails to converge,
        sorts variables by reliability, performs Gaussian elimination
        modulo 2, and finds the most likely error pattern.
+
+    **This is a heuristic, not a minimum-weight decoder.**  BP is approximate,
+    and OSD's elimination step returns *a* solution consistent with the
+    syndrome, not the lightest one.  Measured against exhaustive minimum-weight
+    search over the same syndrome: on ``SteaneCode`` 1 of 7 single-error
+    syndromes came back heavier (``(6, 4, 1)`` ->
+    ``[(2,'X'),(4,'X'),(5,'X'),(6,'X')]``, weight 4 where weight 1 exists; mean
+    excess weight 3.00), and on ``ToricCode2D(distance=2)`` 8 of 8 did
+    (``(0, 3, 1)`` -> ``[(1,'X'),(5,'X'),(6,'X')]``, mean excess 2.00).
+
+    Every one of those corrections still reproduced the syndrome, so the output
+    is a *valid* coset representative — just not the representative of least
+    weight.  A heavier representative differs from the true error by a
+    stabiliser or by a logical operator, so a logical-error rate measured
+    through this decoder is an upper bound on the minimum-weight one.  Raising
+    ``osd_order`` searches more candidates; it does not make the result
+    provably minimal.
 
     Args:
         h_matrix: Parity-check matrix (n_checks × n_qubits).
@@ -212,13 +559,16 @@ class BPOSD_Decoder:
         return BPOSD_Decoder(n_data=n, syndrome_qubit_map=syndrome_map)
 
     def decode(self, syndrome: np.ndarray) -> List[Tuple[int, str]]:
-        """Decode a syndrome to find the most likely error correction.
+        """Decode a syndrome to find a valid error correction.
 
         Args:
             syndrome: Binary syndrome vector (n_checks,).
 
         Returns:
-            List of (qubit_index, pauli_type) correction pairs.
+            List of (qubit_index, pauli_type) correction pairs.  A correction
+            whose syndrome matches the input, but **not** guaranteed to be the
+            lightest such correction -- see the class docstring for the
+            measured excess weight on ``SteaneCode`` and ``ToricCode2D``.
         """
         s = np.array(syndrome, dtype=np.int32).flatten()
 
@@ -405,13 +755,38 @@ class NeuralDecoder:
         n_checks: int = 0,
         hidden_dims: Optional[List[int]] = None,
         model: Optional[Any] = None,
+        n_data: int = 0,
+        syndrome_qubit_map: Optional[List[List[int]]] = None,
     ):
-        self.n_qubits = n_qubits or (model.n_qubits if model else 0)
+        self.n_qubits = n_qubits or n_data or (model.n_qubits if model else 0)
         self.n_checks = n_checks or (model.n_checks if model else 0)
         self.hidden_dims = hidden_dims or [64, 64]
         self._model = model
         self._params: Optional[Dict[str, Any]] = None
         self._trained = model is not None
+        # ``syndrome_qubit_map`` / ``n_data`` exist so QECManager can construct
+        # this decoder like the others; without them the network output cannot
+        # be checked against ``H e == s``, so it is reported as unvalidated.
+        self._syndrome_map = syndrome_qubit_map or []
+        self._H = (
+            _build_H(self.n_qubits, self._syndrome_map) if self._syndrome_map else None
+        )
+        self._kernel: Optional[List[int]] = None
+        self.last_info: Dict[str, Any] = {}
+        # Populated by ``load_pretrained`` when the optional NN stack was not
+        # importable and a shape-matched heuristic decoder was substituted.
+        self._nn_unavailable: List[str] = []
+
+    @property
+    def name(self) -> str:
+        return "neural"
+
+    @property
+    def backend(self) -> str:
+        """The backend that produced the most recent correction."""
+        return self.last_info.get(
+            "backend", "trained-model" if self._params is not None else "untrained-heuristic"
+        )
 
     # ── Registry ───────────────────────────────────────────
 
@@ -426,60 +801,136 @@ class NeuralDecoder:
         cls._registry[name] = builder
 
     @classmethod
-    def load_pretrained(cls, name: str) -> "NeuralDecoder":
+    def load_pretrained(cls, name: str, strict: bool = False) -> "NeuralDecoder":
         """Load a pre-trained neural decoder by name.
 
         Args:
             name: Model name from the registry.
+            strict: When True, a missing neural-network stack raises. When
+                False (default) a usable heuristic decoder with the same shape
+                is returned and the substitution is recorded in
+                ``last_info['backend']``.
 
         Returns:
-            Trained NeuralDecoder instance.
+            Trained NeuralDecoder instance, or a shape-matched heuristic one
+            when the optional stack is unavailable and ``strict`` is False.
 
         Raises:
             KeyError: If model name is not in registry.
+            RuntimeError: If the neural stack is missing and ``strict`` is True.
+
+        DEC-2: this used to raise ``ModuleNotFoundError: No module named
+        'flax'`` from inside ``_build_model``, making the whole method unusable
+        on a machine without the optional NN stack.
         """
-        if name in cls._registry:
-            return cls._registry[name]()
+        builder = cls._registry.get(name)
+        shape = cls._shape_for_model(name)
+        if builder is None and shape is None:
+            raise KeyError(
+                f"Unknown pre-trained model '{name}'. "
+                f"Available: {list(cls._registry.keys())}. "
+                f"Use NeuralDecoder.register(name, builder) to add models."
+            )
 
-        # Fallback: build a simple model if not in registry
+        missing = _missing_neural_deps()
+        if missing:
+            if strict or shape is None:
+                _require_neural_deps(f"Loading a pre-trained model ('{name}')")
+            n_qubits, n_data, syndrome_map, n_checks = shape
+            decoder = cls(
+                n_qubits=n_qubits,
+                n_checks=n_checks,
+                n_data=n_data,
+                syndrome_qubit_map=syndrome_map or None,
+            )
+            decoder._nn_unavailable = list(missing)
+            warnings.warn(
+                f"NeuralDecoder.load_pretrained('{name}'): "
+                f"{', '.join(missing)} not importable, returning a heuristic "
+                f"decoder with the same shape ({n_qubits} qubits, "
+                f"{n_checks} checks). Outputs are syndrome-checked but not "
+                f"learned. Install with `{_NEURAL_INSTALL_HINT}`.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return decoder
+
+        if builder is not None:
+            return builder()
+
+        n_qubits, n_data, syndrome_map, n_checks = shape
         if name.startswith("repetition"):
-            # e.g., 'repetition_d5' → n=5
-            try:
-                n = int(name.split("d")[1])
-                return cls._build_repetition_model(n)
-            except (IndexError, ValueError):
-                pass
-        if name.startswith("surface"):
-            # e.g., 'surface_d3' → distance 3 → 9 data qubits, 8 checks
-            try:
-                d = int(name.split("d")[1])
-                n_data = d * d
-                n_checks = 2 * d * (d - 1)
-                return cls._build_surface_model(d, n_data, n_checks)
-            except (IndexError, ValueError):
-                pass
-
-        raise KeyError(
-            f"Unknown pre-trained model '{name}'. "
-            f"Available: {list(cls._registry.keys())}. "
-            f"Use NeuralDecoder.register(name, builder) to add models."
+            return cls._build_repetition_model(n_qubits)
+        return cls._build_surface_model(
+            int(name.split("d")[1]), n_data, n_checks
         )
 
     @classmethod
+    def _shape_for_model(
+        cls, name: str
+    ) -> Optional[Tuple[int, int, List[List[int]], int]]:
+        """``(n_qubits, n_data, syndrome_map, n_checks)`` for a built-in name.
+
+        Used to construct a usable decoder even when the neural stack is
+        missing, so ``load_pretrained`` never has to fail for a built-in name.
+        """
+        if name.startswith("repetition"):
+            try:
+                n = int(name.split("d")[1])
+            except (IndexError, ValueError):
+                return None
+            smap = [[k, k + 1] for k in range(max(0, n - 1))]
+            return n, n, smap, len(smap)
+        if name.startswith("surface"):
+            try:
+                d = int(name.split("d")[1])
+            except (IndexError, ValueError):
+                return None
+            smap = cls._surface_check_map(d) or []
+            return d * d, d * d, smap, len(smap)
+        return None
+
+    @staticmethod
+    def _surface_check_map(d: int) -> Optional[List[List[int]]]:
+        """Data-qubit lists of the 2D surface-code stabilisers, if available.
+
+        The registry used to hard-code 12 checks for ``surface_d3`` while
+        ``SurfaceCode2D(3).stabilizers()`` returns 8, so the network input size
+        and the validation matrix disagreed. Deriving the map keeps them equal.
+        """
+        try:
+            from ..codes.topological import SurfaceCode2D
+
+            x_checks, z_checks = SurfaceCode2D(distance=d).stabilizers()
+            return [list(c) for c in x_checks] + [list(c) for c in z_checks]
+        except Exception:  # noqa: BLE001 - shape hint only, never fatal
+            return None
+
+    @classmethod
     def list_pretrained(cls) -> List[str]:
-        """List all registered pre-trained model names."""
-        return list(cls._registry.keys()) + ["repetition_d3", "repetition_d5", "surface_d3"]
+        """List all registered pre-trained model names, each exactly once.
+
+        The built-in models are registered at import time, so appending their
+        names unconditionally (the previous body) listed every one of them
+        twice: ``[..., 'repetition_d3', 'repetition_d5', 'surface_d3',
+        'repetition_d3', ...]``. Duplicates are folded here, in registration
+        order, so a caller that iterates the list loads each model once.
+        (QEC-D7)
+        """
+        names = list(cls._registry.keys()) + [
+            "repetition_d3", "repetition_d5", "surface_d3",
+        ]
+        return list(dict.fromkeys(names))
 
     # ── Decode ─────────────────────────────────────────────
 
-    def decode(self, syndrome: np.ndarray) -> np.ndarray:
-        """Decode a syndrome using the trained neural network.
+    def predict_proba(self, syndrome: np.ndarray) -> np.ndarray:
+        """Per-qubit error probabilities.
 
-        Args:
-            syndrome: Binary syndrome vector.
-
-        Returns:
-            Error probability per qubit as numpy array.
+        This is exactly what :meth:`decode` used to return. It is kept as a
+        separate, honestly-named method because a probability vector is not a
+        correction: ``decode([0,1,1,0])`` returned ``[0. 0.6 0.6 0.6 0.]`` and
+        0/16 of those vectors were valid corrections (DEC-1).
         """
         if self._params is None:
             s = np.array(syndrome, dtype=np.float32).flatten()
@@ -499,6 +950,73 @@ class NeuralDecoder:
         logits = self._model.apply(self._params, s)
         probs = jax.nn.sigmoid(logits)
         return np.asarray(probs.reshape(-1))
+
+    def decode(self, syndrome: np.ndarray) -> List[Tuple[int, str]]:
+        """Decode a syndrome into a correction.
+
+        Returns:
+            List of ``(qubit_index, pauli)`` pairs, matching every other
+            decoder in this module. The previous implementation returned a
+            per-qubit probability vector, which no caller could consume as a
+            correction (DEC-1).
+        """
+        return self.decode_with_info(syndrome)[0]
+
+    def decode_with_info(
+        self, syndrome: np.ndarray
+    ) -> Tuple[List[Tuple[int, str]], Dict[str, Any]]:
+        """Decode and report the backend, validity and the raw probabilities."""
+        s = np.array(syndrome, dtype=np.int32).flatten()
+        probs = self.predict_proba(s)
+        info: Dict[str, Any] = {
+            "decoder": self.name,
+            "backend": (
+                "trained-model" if self._params is not None else "untrained-heuristic"
+            ),
+            "syndrome_valid": False,
+            "fallback_used": False,
+            "fallback_error": None,
+            "minimized": False,
+            "weight": 0,
+            "probabilities": probs,
+        }
+        candidate: List[Tuple[int, str]] = [
+            (int(q), "X") for q in np.nonzero(probs > 0.5)[0]
+        ]
+        if self._H is None:
+            info["note"] = (
+                "no syndrome_qubit_map was supplied, so the output cannot be "
+                "checked against H e == s"
+            )
+        else:
+            info["syndrome_valid"] = _validate_correction(
+                self._H, s, candidate, self.n_qubits
+            )
+            if not info["syndrome_valid"]:
+                # A thresholded probability vector generally does not reproduce
+                # the syndrome, so replace it with a genuinely valid pattern.
+                info["candidate_rejected"] = True
+                exact = _lower_weight_correction(self._H, s, MAX_MIN_WEIGHT_SEARCH)
+                if exact is not None:
+                    candidate = [(int(q), "X") for q in exact]
+                    info["backend"] = f"{info['backend']}+min-weight-search"
+                else:
+                    candidate = _bposd_fallback(
+                        self.n_qubits, self._syndrome_map, s, info=info
+                    )
+                    info["backend"] = "bposd-fallback"
+                info["syndrome_valid"] = _validate_correction(
+                    self._H, s, candidate, self.n_qubits
+                )
+            if self._kernel is None:
+                self._kernel = _gf2_kernel(self._H)
+            candidate, minfo = _minimize_correction(
+                self._H, s, candidate, self.n_qubits, kernel=self._kernel
+            )
+            info.update(minfo)
+        info["weight"] = len({q for q, _p in candidate})
+        self.last_info = info
+        return candidate, info
 
     # ── Training ───────────────────────────────────────────
 
@@ -528,9 +1046,10 @@ class NeuralDecoder:
         Returns:
             Dict with 'train_loss' and 'val_loss' histories.
         """
+        _require_neural_deps("NeuralDecoder.train")
         import jax
         import jax.numpy as jnp
-        import optax
+        import optax  # verified importable by _require_neural_deps
 
         syndromes = jnp.array(syndromes, dtype=jnp.float32)
         errors = jnp.array(errors, dtype=jnp.float32)
@@ -618,6 +1137,7 @@ class NeuralDecoder:
 
     def _build_model(self) -> None:
         """Build a feedforward neural network model."""
+        _require_neural_deps("NeuralDecoder._build_model")
         from flax import linen as nn
 
         class DecoderMLP(nn.Module):
@@ -642,7 +1162,14 @@ class NeuralDecoder:
         """Build a pre-initialized model for repetition code of length n."""
         import jax
         import jax.numpy as jnp
-        decoder = cls(n_qubits=n, n_checks=n - 1, hidden_dims=[32, 32])
+        decoder = cls(
+            n_qubits=n,
+            n_checks=n - 1,
+            hidden_dims=[32, 32],
+            # Repetition check k couples data qubits k and k+1, so the output
+            # is now checkable against H e == s instead of merely returned.
+            syndrome_qubit_map=[[k, k + 1] for k in range(max(0, n - 1))],
+        )
         decoder._build_model()
         key = jax.random.PRNGKey(0)
         dummy = jnp.zeros((1, n - 1), dtype=jnp.float32)
@@ -651,11 +1178,26 @@ class NeuralDecoder:
         return decoder
 
     @classmethod
-    def _build_surface_model(cls, d: int, n_data: int, n_checks: int) -> "NeuralDecoder":
+    def _build_surface_model(cls, d: int, n_data: int = 0, n_checks: int = 0) -> "NeuralDecoder":
         """Build a pre-initialized model for surface code of distance d."""
         import jax
         import jax.numpy as jnp
-        decoder = cls(n_qubits=n_data, n_checks=n_checks, hidden_dims=[128, 128, 64])
+        syndrome_map = cls._surface_check_map(d) or []
+        n_data = n_data or d * d
+        # Keep the network input width equal to the number of rows of the
+        # validation matrix; the old hard-coded 12 disagreed with the 8
+        # stabilisers that SurfaceCode2D(3) actually exposes.
+        if syndrome_map:
+            n_checks = len(syndrome_map)
+        elif n_checks <= 0:
+            n_checks = 2 * d * (d - 1)
+        decoder = cls(
+            n_qubits=n_data,
+            n_checks=n_checks,
+            hidden_dims=[128, 128, 64],
+            n_data=n_data,
+            syndrome_qubit_map=syndrome_map or None,
+        )
         decoder._build_model()
         key = jax.random.PRNGKey(42)
         dummy = jnp.zeros((1, n_checks), dtype=jnp.float32)

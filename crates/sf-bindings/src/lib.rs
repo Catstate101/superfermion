@@ -784,6 +784,32 @@ impl PyQuantumDAG {
             .collect()
     }
 
+    /// Batched MPS Pauli expvals **plus** the truncation telemetry from the
+    /// same evolution.
+    ///
+    /// Returns ``(values, report)`` where ``values`` is the same list as
+    /// :meth:`simulate_mps_pauli_expval_batch` and ``report`` is the dict
+    /// ``State.truncation_report()`` returns after ``run(method="mps")``:
+    /// ``discarded_weight``, ``max_discarded_weight``, ``truncation_events``
+    /// and ``fidelity_lower_bound``. Exists so a caller can warn about
+    /// truncation without paying for a second evolution.
+    fn simulate_mps_pauli_expval_batch_report<'py>(
+        &self,
+        py: Python<'py>,
+        bond_dim: usize,
+        paulis: Vec<Vec<u8>>,
+    ) -> PyResult<(Vec<(f64, f64)>, Bound<'py, pyo3::types::PyDict>)> {
+        let (values, discarded, max_step, events) = self
+            .inner
+            .simulate_mps_pauli_expval_batch_report(bond_dim, &paulis);
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("discarded_weight", discarded)?;
+        d.set_item("max_discarded_weight", max_step)?;
+        d.set_item("truncation_events", events)?;
+        d.set_item("fidelity_lower_bound", (1.0 - discarded).clamp(0.0, 1.0))?;
+        Ok((values.into_iter().map(|z| (z.re, z.im)).collect(), d))
+    }
+
     /// Diagnostic: MPS-evolve and report the squared norm via the same
     /// boundary contraction. For a unitary evolution this should be 1.
     ///

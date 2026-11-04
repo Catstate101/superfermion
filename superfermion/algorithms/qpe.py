@@ -25,6 +25,73 @@ import numpy as np
 import superfermion as sf
 
 
+def _param(gate, index: int, default: float = 0.0):
+    """Read ``gate.params[index]`` without assuming the list is long enough."""
+    try:
+        return gate.params[index]
+    except (IndexError, TypeError):
+        return default
+
+
+def _controlled_single(circuit, gate, control: int, q: int) -> bool:
+    """Emit the controlled version of a **single-qubit** gate.
+
+    Returns ``True`` when the gate was handled here and ``False`` when the
+    caller should fall back to :func:`_controlled_generic`.  Every entry uses
+    a real primitive rather than a hand-rolled decomposition, because the
+    decompositions that used to live here were wrong:
+
+    * controlled-RX was written ``RX(−θ/2), CX, RX(θ/2), CX``, which is the
+      wrong sign order and produced the identity for the QPE input;
+    * controlled-RZ was emitted as ``CP(θ)``, but ``CP(θ) = diag(1,1,1,e^{iθ})``
+      while ``CRZ(θ) = diag(1,1,e^{−iθ/2},e^{iθ/2})`` — they differ by a phase
+      on the control branch, so the QPE phase came out 8 bins low;
+    * controlled-U used a ``CP/CX/CP/CX/CP`` cascade that implements no
+      single-qubit unitary at all.
+
+    ``Circuit`` has ``crx``, ``cry``, ``crz``, ``cu``, ``cp`` and ``ch``
+    natively, and each has been checked against the analytic matrix on
+    ``to_unitary()``, so the exact primitives are used instead.
+    """
+    name = gate.name.upper()
+    if name == "H":
+        circuit.ch(control, q)
+    elif name in ("X", "NOT"):
+        circuit.cx(control, q)
+    elif name == "Y":
+        circuit.cy(control, q)
+    elif name == "Z":
+        circuit.cz(control, q)
+    elif name == "S":
+        circuit.cp(np.pi / 2, control, q)
+    elif name == "SDG":
+        circuit.cp(-np.pi / 2, control, q)
+    elif name == "T":
+        circuit.cp(np.pi / 4, control, q)
+    elif name == "TDG":
+        circuit.cp(-np.pi / 4, control, q)
+    elif name in ("P", "PHASE"):
+        circuit.cp(_param(gate, 0), control, q)
+    elif name in ("R1",):
+        circuit.cp(_param(gate, 0), control, q)
+    elif name in ("RX",):
+        circuit.crx(_param(gate, 0), control, q)
+    elif name in ("RY",):
+        circuit.cry(_param(gate, 0), control, q)
+    elif name in ("RZ",):
+        circuit.crz(_param(gate, 0), control, q)
+    elif name in ("U", "U3"):
+        circuit.cu(
+            _param(gate, 0), _param(gate, 1), _param(gate, 2), control, q
+        )
+    elif name in ("SX",):
+        # SX = U3(−π/2, π/2, π/2); CU carries the phase correctly.
+        circuit.cu(-np.pi / 2, np.pi / 2, np.pi / 2, control, q)
+    else:
+        return False
+    return True
+
+
 def _controlled_unitary(
     circuit: sf.Circuit,
     unitary_fn: Callable[[sf.Circuit], sf.Circuit],
@@ -44,77 +111,87 @@ def _controlled_unitary(
 
     # Apply each gate as controlled
     for gate in sub._gates:
-        _gate_qubits = [control] + [target_qubits[q] for q in gate.qubits]  # noqa: F841
-        if gate.name.upper() in ("H",):
-            circuit.ch(control, target_qubits[gate.qubits[0]])
-        elif gate.name.upper() in ("X",):
-            if len(gate.qubits) == 1:
-                circuit.cx(control, target_qubits[gate.qubits[0]])
-            else:
-                circuit.cx(control, target_qubits[gate.qubits[0]])
-                circuit.cx(control, target_qubits[gate.qubits[1]])
-        elif gate.name.upper() in ("Y",):
-            circuit.cy(control, target_qubits[gate.qubits[0]])
-        elif gate.name.upper() in ("Z",):
-            circuit.cz(control, target_qubits[gate.qubits[0]])
-        elif gate.name.upper() in ("S",):
-            circuit.cp(np.pi / 2, control, target_qubits[gate.qubits[0]])
-        elif gate.name.upper() in ("T",):
-            circuit.cp(np.pi / 4, control, target_qubits[gate.qubits[0]])
-        elif gate.name.upper() in ("P", "PHASE"):
-            theta = gate.params[0] if gate.params else 0.0
-            circuit.cp(theta, control, target_qubits[gate.qubits[0]])
-        elif gate.name.upper() in ("RX",):
-            # Controlled-RX: CRX(θ) = (I⊗RX(θ/2)) · CNOT · (I⊗RX(−θ/2)) · CNOT
-            theta = gate.params[0] if gate.params else 0.0
-            q = target_qubits[gate.qubits[0]]
-            circuit.rx(-theta / 2, q)
-            circuit.cx(control, q)
-            circuit.rx(theta / 2, q)
-            circuit.cx(control, q)
-        elif gate.name.upper() in ("RY",):
-            theta = gate.params[0] if gate.params else 0.0
-            q = target_qubits[gate.qubits[0]]
-            circuit.ry(-theta / 2, q)
-            circuit.cx(control, q)
-            circuit.ry(theta / 2, q)
-            circuit.cx(control, q)
-        elif gate.name.upper() in ("RZ",):
-            theta = gate.params[0] if gate.params else 0.0
-            circuit.cp(theta, control, target_qubits[gate.qubits[0]])
-        elif gate.name.upper() in ("U",):
-            # Controlled-U(θ,φ,λ): use 3 controlled rotations
-            theta, phi, lam = (
-                (gate.params[0], gate.params[1], gate.params[2])
-                if len(gate.params) >= 3
-                else (0, 0, 0)
-            )
-            q = target_qubits[gate.qubits[0]]
-            circuit.cp(lam, control, q)
-            circuit.cx(control, q)
-            circuit.cp(theta, control, q)
-            circuit.cx(control, q)
-            circuit.cp(phi, control, q)
-        else:
-            # Decompose generic gate into basis gates (best effort)
+        name = gate.name.upper()
+
+        if name == "UNITARY":
             _controlled_generic(circuit, gate, control, target_qubits)
+            continue
+
+        n_gate_qubits = len(gate.qubits)
+        phys = [target_qubits[i] for i in gate.qubits]
+
+        # ── single-qubit gates: exact primitives ─────────────────────────
+        if n_gate_qubits == 1 and _controlled_single(circuit, gate, control, phys[0]):
+            continue
+
+        # ── two-qubit gates with an exact primitive ──────────────────────
+        if n_gate_qubits == 2:
+            q0, q1 = phys
+            if name in ("CX", "CNOT"):
+                circuit.ccx(control, q0, q1)
+                continue
+            if name == "CZ":
+                circuit.h(q1)
+                circuit.ccx(control, q0, q1)
+                circuit.h(q1)
+                continue
+            if name == "SWAP":
+                circuit.fredkin(control, q0, q1)
+                continue
+
+        # ── anything else: exact block-diagonal embedding ────────────────
+        _controlled_generic(circuit, gate, control, target_qubits)
+
+
+def _gate_matrix(gate) -> "np.ndarray":
+    """Matrix of ``gate`` with **bit 0 = gate.qubits[0]** (little-endian).
+
+    Rebuilds the gate on a small ``len(gate.qubits)``-qubit circuit so the
+    result does not depend on where the gate sits in the caller's register.
+    """
+    k = len(gate.qubits)
+    name = gate.name.upper()
+    if name == "UNITARY":
+        m = getattr(gate, "matrix", None)
+        if m is None:
+            raise ValueError("UNITARY gate carries no matrix")
+        m = np.asarray(m, dtype=complex)
+        if m.shape != (2 ** k, 2 ** k):
+            raise ValueError(
+                f"UNITARY matrix shape {m.shape} does not match "
+                f"{k} qubit(s) (expected ({2 ** k}, {2 ** k}))"
+            )
+        return m
+    mini = sf.Circuit(k)
+    apply = getattr(mini, gate.name.lower(), None)
+    if apply is None:
+        raise ValueError(
+            f"QPE cannot build a controlled version of gate {gate.name!r}: "
+            f"Circuit has no method {gate.name.lower()!r}. "
+            "Rebuild the unitary out of named gates, or pass it as a single "
+            "circuit.unitary(...) gate (which is handled)."
+        )
+    apply(*list(gate.params), *range(k))
+    return np.asarray(mini.to_unitary(), dtype=complex)
 
 
 def _controlled_generic(
     circuit: sf.Circuit, gate, control: int, target_qubits: List[int]
 ):
-    """Best-effort controlled-gate decomposition via U = e^{iα} AXBXC."""
-    if len(gate.qubits) != 1:
-        return  # Skip multi-qubit gates for now
-    q = target_qubits[gate.qubits[0]]
-    # ABC decomposition: any 1-qubit U = e^{iα} R_z(β) R_y(γ) R_z(δ)
-    # Controlled-U = [I⊗C] · [I⊗B] · CNOT · [I⊗B†] · CNOT · [I⊗A]
-    # For simplicity, just apply CX-then-CX pattern
-    circuit.cx(control, q)
-    # Apply gate decomposition inline
-    if gate.name.upper() == "H":
-        circuit.h(q)
-    circuit.cx(control, q)
+    """Control an arbitrary (multi-qubit) gate by exact embedding.
+
+    Emits a single ``UNITARY`` gate holding ``blockdiag(I, U)`` instead of
+    dropping the gate.  ``Circuit.unitary(M, qubits)`` maps ``qubits[0]`` to
+    the **most significant** index bit of ``M``, so the control is listed
+    first and the targets follow in *reverse* order — that ordering is the
+    one measured against ``ccx`` and ``cx``, not assumed.
+    """
+    k = len(gate.qubits)
+    u = _gate_matrix(gate)
+    embedded = np.eye(2 ** (k + 1), dtype=complex)
+    embedded[2 ** k:, 2 ** k:] = u
+    qubits = [control] + [target_qubits[q] for q in reversed(gate.qubits)]
+    circuit.unitary(embedded, qubits)
 
 
 def _iqft(circuit: sf.Circuit, qubits: List[int]):
@@ -155,9 +232,22 @@ def quantum_phase_estimation(
         shots: If > 0, sample counting register.
 
     Returns:
-        Dict with keys ``"phase"`` (float in [0,1)), ``"phase_binary"``,
-        ``"int_value"``, ``"precision_bits"``, ``"eigenvalue"`` (= exp(2πi·phase)),
-        ``"statevector"`` (if shots=0).
+        Dict. Every mode carries ``"phase"`` (float in [0, 1)), ``"phase_binary"``
+        and ``"int_value"`` (the same bin, MSB-first / as an index),
+        ``"precision_bits"``, ``"eigenvalue"`` (= exp(2πi·phase)) and
+        ``"result"`` (the ``RunResult`` of the QPE circuit, kept so the raw
+        statevector or counts are reachable as ``result.statevector`` /
+        ``result.counts``).
+
+        Additional keys by mode:
+
+        * ``shots=0``: ``"probability"`` -- the population of the winning
+          counting bin after tracing out the target register.
+        * ``shots>0``: ``"counts"`` (the sampled distribution) and
+          ``"counting_bits"`` (the counting-register suffix that was read).
+        * when the run produced neither a statevector nor counts
+          (``shots=0`` on a target without one): ``"phase"`` is ``0.0`` and the
+          remaining keys above are absent -- the ``"result"`` is still there.
     """
     n_target = unitary_circuit.n_qubits
     t = precision_bits
@@ -219,8 +309,19 @@ def quantum_phase_estimation(
     # Sampling mode
     if result.counts:
         best_bits = max(result.counts, key=result.counts.get)
-        # Take only counting-register bits (first t bits, reversed for QFT order)
-        best = int(best_bits[:t][::-1], 2) if len(best_bits) >= t else 0
+        # In a counts key the **leftmost character is qubit n-1**, so the
+        # counting register (qubits 0..t-1, the least significant ones) is the
+        # *tail* of the string. Inside that tail the leftmost character is
+        # qubit t-1, so reading it left-to-right already gives the value
+        # MSB-first — `int(tail, 2)` is the bin index with no reversal.
+        # Reading the head instead (what this did before) parses the
+        # target-register bits, which is why the sampled phase was one bin low
+        # whenever the target ended in 1.
+        if len(best_bits) >= t:
+            counting_bits = best_bits[len(best_bits) - t:]
+        else:
+            counting_bits = best_bits.rjust(t, "0")
+        best = int(counting_bits, 2)
         phase = best / (2 ** t)
         return {
             "phase": phase,
@@ -229,6 +330,7 @@ def quantum_phase_estimation(
             "precision_bits": t,
             "eigenvalue": np.exp(2j * np.pi * phase),
             "counts": result.counts,
+            "counting_bits": counting_bits,
             "result": result,
         }
 
@@ -236,8 +338,22 @@ def quantum_phase_estimation(
 
 
 def _replay_gates(target: sf.Circuit, source: sf.Circuit):
-    """Copy all gates from source to target circuit (in-place)."""
+    """Copy all gates from source to target circuit (in-place).
+
+    ``UNITARY`` gates carry their matrix on ``gate.matrix`` instead of in
+    ``gate.params``, so a ``params + qubits`` replay would call
+    ``unitary(q0, q1, matrix)`` and fail. They are handled explicitly.
+    """
     for gate in source._gates:
+        if gate.name.upper() == "UNITARY":
+            matrix = getattr(gate, "matrix", None)
+            if matrix is None:
+                raise ValueError(
+                    "UNITARY gate has no matrix; cannot replay it into the "
+                    "QPE circuit"
+                )
+            target.unitary(matrix, list(gate.qubits))
+            continue
         method = getattr(target, gate.name.lower(), None)
         if method is not None:
             args = list(gate.params)

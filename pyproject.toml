@@ -61,11 +61,13 @@ qml = [
     "optax>=0.2.0",
 ]
 dev = [
-    # pytest 9 removed Function._nodeid, which pytest-benchmark 5.3 still reads
-    # while setting up its fixture: every benchmark test errors before its body
-    # runs. The ceiling stays until a plugin release supports pytest 9.
-    "pytest>=7.0,<9",
-    "pytest-benchmark>=4.0",
+    # pytest 9.2 dropped Function._nodeid, which pytest-benchmark still reads
+    # while setting up its fixture: on that pair every benchmark test errors
+    # before its body runs. Plugin 5.3.1 reads it defensively again, so the fix
+    # is a floor on the plugin rather than a ceiling on pytest -- 9.1.1 worked
+    # with the older plugin too.
+    "pytest>=7.0",
+    "pytest-benchmark>=5.3.1",
     "pytest-cov>=4.0",
     "pytest-timeout>=2.0",
     "black>=23.0",
@@ -104,8 +106,13 @@ interop = [
     # "not Windows" rather than "Linux": this extra must install on macOS too,
     # it only has to stay installable on the Windows dev boxes.
     "pyscf>=2.3; sys_platform != 'win32'",
-    # TensorFlow has no wheel for 3.13 or newer; same cap as the ml extra.
-    "tensorflow>=2.15; python_version < '3.13'",
+    # TensorFlow 2.21 declares ``Requires-Python: >=3.10`` with no upper bound
+    # and ships cp310..cp313 wheels, so the old ``< '3.13'`` cap withheld the
+    # package on an interpreter it supports: on CPython 3.13.3 tensorflow
+    # 2.21.0 installs and the nn-layer test passes.  The cap now sits one minor
+    # above the newest wheel, so a 3.14 without a release skips the tests
+    # instead of breaking the whole extra.
+    "tensorflow>=2.15; python_version < '3.14'",
 ]
 benchmarks = [
     "pennylane>=0.45.0",

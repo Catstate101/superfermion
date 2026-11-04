@@ -169,6 +169,7 @@ def entropies_from_integrals(
     n_orbitals: int,
     n_electrons: int,
     *,
+    nuclear_repulsion: float = 0.0,
     n_alpha: Optional[int] = None,
     n_beta: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
@@ -177,8 +178,16 @@ def entropies_from_integrals(
     Convenience wrapper so a caller does not have to hold the determinant
     basis and the eigenvector separately.
 
+    The Hamiltonian is built from ``h1``/``h2`` alone, so the eigenvalue is
+    purely electronic.  ``nuclear_repulsion`` is added to it on the way out,
+    which is what makes the third return value directly comparable with
+    :func:`superfermion.chemistry.exact_energy` -- that routine takes the same
+    keyword and adds it the same way.  Leaving it at the default reproduces
+    the historic electronic-only value.
+
     Returns:
-        ``(s_i, mutual_information, energy)``.
+        ``(s_i, mutual_information, energy)`` where ``energy`` includes
+        ``nuclear_repulsion`` and is therefore a total energy in Hartree.
     """
     from superfermion.chemistry import subspace as sub
 
@@ -200,5 +209,5 @@ def entropies_from_integrals(
     return (
         orbital_entropy(vector, dets, n_orbitals),
         mutual_information(vector, dets, n_orbitals),
-        float(energies[0]),
+        float(energies[0]) + float(nuclear_repulsion),
     )

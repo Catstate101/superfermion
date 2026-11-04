@@ -331,11 +331,12 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          # pytest 9 and pytest-benchmark 5.3 are an incompatible pair: the
-          # plugin reads Function._nodeid, which pytest 9 removed, so all 21
-          # benchmark tests error during fixture setup. The ceiling holds until
-          # a plugin release supports pytest 9.
-          python -m pip install numpy scipy "pytest>=7,<9" pytest-timeout pytest-benchmark
+          # pytest 9.2 dropped Function._nodeid, which pytest-benchmark reads
+          # during fixture setup, so on the older plugin all 21 benchmark tests
+          # error before running. Plugin 5.3.1 reads it defensively again, so
+          # the floor is on the plugin, not a ceiling on pytest.
+          python -m pip install numpy scipy "pytest>=7" pytest-timeout \
+            "pytest-benchmark>=5.3.1"
           # The suite guards framework tests with importorskip. Installing them
           # here is what makes this lane assert interop behaviour instead of
           # skipping it. cirq-core, flax and TensorFlow are the exceptions: each

@@ -107,28 +107,33 @@ def _shift_rule(gate_name: str, slot: int) -> tuple[tuple[int, float], ...]:
     return rule
 
 
-def _as_observable(observable: Any) -> Observable:
+def _as_observable(observable: Any, n_qubits: int) -> Observable:
     """Coerce the user-facing observable forms into an ``Observable``.
 
     ``str``/``dict``/list-of-str used to fail with
     ``AttributeError: 'str' object has no attribute '_fast_expval'``; they
     are now the same thing as the equivalent ``SparsePauliOp``.
+
+    The coercion itself is ``_observables.normalize_for_gradient``, which the
+    adjoint and finite-difference engines and ``RunResult.grad`` also use, so
+    the five entry points accept one spelling table instead of five
+    (E/V-3: ``list[PauliString]`` used to raise here and succeed in the
+    adjoint; E/V-4: the engine term form used to raise here and succeed in
+    ``RunResult.grad``).  ``n_qubits`` is required because the width check is
+    part of that shared contract: a label one character short used to act as
+    identity on the missing wire (E/V-7).
     """
-    if isinstance(observable, Observable):
-        return observable
-    if isinstance(observable, str):
-        return SparsePauliOp([observable])
-    if isinstance(observable, dict):
-        return SparsePauliOp.from_dict(observable)
-    if isinstance(observable, (list, tuple)) and all(
-        isinstance(o, str) for o in observable
-    ):
-        return SparsePauliOp(list(observable))
-    raise TypeError(
-        f"Cannot evaluate observable of type {type(observable).__name__}; "
-        f"expected str, dict, SparsePauliOp, Hamiltonian, PauliString, or a "
-        f"list of Pauli strings"
+    from superfermion.qml.gradient._observables import (
+        normalize_for_gradient,
+        terms_to_dict,
     )
+
+    # Every Observable subclass (PauliString, SparsePauliOp, Hamiltonian) is
+    # handled by the shared spelling table, so there is no separate branch: an
+    # already-built Observable goes through the same width and Hermiticity
+    # checks as a bare "ZZ" string.
+    terms = normalize_for_gradient(observable, n_qubits)
+    return SparsePauliOp.from_dict(terms_to_dict(terms))
 
 
 def _occurrences(circuit: sf.Circuit, name: str) -> list:
@@ -179,7 +184,7 @@ def parameter_shift_grad(
         >>> grad = parameter_shift_grad(circ, {'ZZ': 1.0}, {'theta': 0.5})
         >>> grad['theta']   # ∂⟨ZZ⟩/∂theta
     """
-    obs = _as_observable(observable)
+    obs = _as_observable(observable, circuit.n_qubits)
 
     def _expval_at(bound: sf.Circuit) -> float:
         result = sf.run(bound, device=device, method=method, shots=shots)
@@ -259,7 +264,7 @@ def finite_diff_grad(
     differentiates one *occurrence* at a time, so it is a valid reference
     for circuits that reuse a parameter name.
     """
-    obs = _as_observable(observable)
+    obs = _as_observable(observable, circuit.n_qubits)
 
     def _expval_at(bound: sf.Circuit) -> float:
         result = sf.run(bound, device=device, method=method, shots=0)

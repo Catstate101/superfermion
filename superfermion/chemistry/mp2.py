@@ -214,6 +214,21 @@ def mp2_density(
 ) -> Dict[str, Any]:
     """Unrelaxed MP2 1-RDM, spin-summed, in the MO basis.
 
+    Convention -- truncated at second order, not normalised
+    -------------------------------------------------------
+    The returned 1-RDM is the Fock-space expectation
+    ``<Psi|a^dagger_p a_q|Psi>`` evaluated to ``O(t^2)``, i.e. ``D_HF +
+    dD^(2)``.  It is *not* that expectation divided by ``<Psi|Psi> = 1 +
+    O(t^2)``: dividing by the norm folds in ``O(t^4)`` terms that a
+    second-order density is defined to omit.  The two differ by
+    ``(norm - 1) * (D_HF - D_normalised)``, which on H2/STO-3G
+    (``norm - 1 = 5.18e-3``) is ``2.67e-5`` in the largest entry and moves the
+    natural occupations by ``5e-5`` (0.0103598 against 0.0103064 for the weakly
+    occupied natural orbital).  Both keep ``tr(D)`` equal to the electron
+    count exactly, because the second-order correction is traceless, so the
+    trace does not separate the two conventions -- only the definition does.
+    The unrelaxed MP2 1-RDM used in practice is this truncated one.
+
     Returns:
         Dict with ``density`` ``(n, n)`` (trace = electron count),
         ``occupations`` its diagonal in the input basis, ``nat_occupations``

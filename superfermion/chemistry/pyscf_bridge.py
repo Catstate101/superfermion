@@ -1430,9 +1430,11 @@ def molecule_from_geometry(
             or (no PySCF) any of the three PySCF-only keywords.
     """
     if name is None:
-        # Auto-name from geometry
+        # Auto-name from geometry. The old code concatenated the symbols, so a
+        # hydrogen molecule came out as "HH" (CH-9); a Hill-ordered formula
+        # gives "H2" instead.
         atoms = _parse_geometry(geometry)
-        name = "".join(atoms)
+        name = _formula_from_atoms(atoms)
 
     mol = MolecularData(
         name=name,
@@ -1503,6 +1505,41 @@ def _parse_geometry(geometry: str) -> List[str]:
         if part:
             atoms.append(part.split()[0])
     return atoms
+
+
+def _formula_from_atoms(atoms: List[str]) -> str:
+    """Hill-ordered molecular formula, e.g. ``["O","H","H"] -> "H2O"``.
+
+    Carbon and hydrogen come first (then alphabetical) when carbon is present,
+    otherwise everything is alphabetical, which is the usual Hill convention.
+    A missing count means one. The previous auto-name simply concatenated the
+    symbols, so H2 was called "HH" (CH-9).
+    """
+    if not atoms:
+        return "molecule"
+
+    counts: dict[str, int] = {}
+    for symbol in atoms:
+        # Strip a trailing charge/spin decoration but keep the element symbol.
+        element = symbol.strip()
+        if not element:
+            continue
+        counts[element] = counts.get(element, 0) + 1
+
+    if not counts:
+        return "molecule"
+
+    if "C" in counts:
+        order = ["C"] + (["H"] if "H" in counts else [])
+        order += sorted(e for e in counts if e not in order)
+    else:
+        order = sorted(counts)
+
+    return "".join(
+        element + (str(counts[element]) if counts[element] > 1 else "")
+        for element in order
+        if element in counts
+    )
 
 
 def _compute_pyscf(

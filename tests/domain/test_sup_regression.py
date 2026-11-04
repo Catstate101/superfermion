@@ -646,11 +646,15 @@ class TestBoundDagWarning:
             g = st.grad(self._OBS, qc.to_ir(), {"t": 0.5})
         assert g == {}
 
-    def test_empty_param_values_stays_silent(self):
+    def test_empty_param_values_on_a_bound_dag_still_warns(self):
+        """F/V-6: the warning follows the DAG, not the value dict.
+
+        The check used to return early when ``param_values`` was empty, which
+        is exactly the bound-circuit case it exists for.
+        """
         qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
         st = self._state(qc)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
+        with pytest.warns(UserWarning, match="no symbolic parameters"):
             g = st.grad(self._OBS, qc.bind({"t": 0.5}).to_ir(), {})
         assert g == {}
 
@@ -661,12 +665,25 @@ class TestBoundDagWarning:
             qfim = st.qfim(qc.bind({"t": 0.5}).to_ir(), {"t": 0.5})
         assert qfim.shape == (0, 0)
 
-    def test_runresult_grad_warns_via_state(self):
+    def test_runresult_grad_refuses_a_bound_dag(self):
+        """F/V-6: ``RunResult.grad`` raises instead of returning ``{}``.
+
+        ``State.grad`` warns and returns empty so a low-level caller can see
+        the difference; ``RunResult.grad`` already holds the circuit, so it
+        turns the same condition into a ValueError with a fix in the message.
+        """
         qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
         res = sf.run(qc.bind({"t": 0.5}), shots=0)
-        with pytest.warns(UserWarning, match="symbolic"):
-            g = res.grad(self._OBS, qc.bind({"t": 0.5}).to_ir(), {"t": 0.5})
-        assert g == {}
+        with pytest.raises(ValueError, match="symbolic parameters"):
+            res.grad(self._OBS, qc.bind({"t": 0.5}).to_ir(), {"t": 0.5})
+
+    def test_runresult_grad_still_answers_on_the_symbolic_dag(self):
+        """F/V-6: the refusal is not a blanket one -- the symbolic DAG works."""
+        qc = Circuit(2).ry(sf.param("t"), 0).cnot(0, 1)
+        res = sf.run(qc.bind({"t": 0.5}), shots=0)
+        got = res.grad(self._OBS, qc.to_ir(), {"t": 0.5})
+        assert set(got) == {"t"}
+        assert got["t"] == pytest.approx(0.0, abs=1e-12)  # <ZZ> == 1 identically
 
 
 # ── SUP-6: missing param_values raise a catchable error, not a panic ──────────

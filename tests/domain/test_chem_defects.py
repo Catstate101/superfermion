@@ -18,10 +18,10 @@ fails against the pre-fix code rather than by a comment:
 import numpy as np
 import pytest
 
+import superfermion.chemistry.pyscf_bridge as pyscf_bridge
 from superfermion.chemistry import subspace as sub
 from superfermion.chemistry.pyscf_bridge import (
     MolecularData,
-    _HAS_PYSCF,
     _fold_constant,
     _spin_orbital_integrals,
     molecule_from_geometry,
@@ -125,14 +125,22 @@ class TestSingleIdentityTerm:
         assert _fold_constant(ham, 0.0, 2) is ham
 
 
-no_pyscf = pytest.mark.skipif(
-    _HAS_PYSCF, reason="PySCF is installed, so the tabulated fallback never runs"
-)
+@pytest.fixture
+def fallback_path(monkeypatch):
+    """Force the tabulated path even where PySCF is installed.
+
+    This was a ``skipif(_HAS_PYSCF)`` gate, so the fallback was only ever
+    exercised on machines without PySCF -- the same machines that cannot
+    cross-check the real SCF it stands in for.  ``molecule_from_geometry``
+    reads the module global on every call, so patching it covers the same code
+    here instead of skipping.  Measured on both arms: the record reproduces
+    bit-for-bit on this path, while live PySCF agrees to ~5e-13.
+    """
+    monkeypatch.setattr(pyscf_bridge, "_HAS_PYSCF", False)
 
 
 class TestTabulatedFallback:
-    @no_pyscf
-    def test_h2_matches_the_record(self):
+    def test_h2_matches_the_record(self, fallback_path):
         mol = molecule_from_geometry("H 0 0 0; H 0 0 0.735", basis="sto-3g")
         assert (mol.n_electrons, mol.n_orbitals) == (2, 2)
         assert mol.hf_energy == pytest.approx(-1.116998996754, abs=1e-12)
@@ -142,8 +150,7 @@ class TestTabulatedFallback:
         )
         assert exact == pytest.approx(-1.137306035753, abs=1e-9)
 
-    @no_pyscf
-    def test_water_never_resolves_to_hydrogen(self):
+    def test_water_never_resolves_to_hydrogen(self, fallback_path):
         """The pre-fix matcher returned 2 electrons / 2 orbitals for 'h2o'."""
         with pytest.raises(LookupError, match="not in it|no integrals"):
             molecule_from_geometry(
@@ -152,23 +159,19 @@ class TestTabulatedFallback:
                 name="h2o",
             )
 
-    @no_pyscf
-    def test_an_unmatched_geometry_raises_instead_of_zero_filling(self):
+    def test_an_unmatched_geometry_raises_instead_of_zero_filling(self, fallback_path):
         with pytest.raises(LookupError):
             molecule_from_geometry("H 0 0 0; H 0 0 0.9", basis="sto-3g")
 
-    @no_pyscf
-    def test_a_different_basis_is_not_silently_served(self):
+    def test_a_different_basis_is_not_silently_served(self, fallback_path):
         with pytest.raises(LookupError):
             molecule_from_geometry("H 0 0 0; H 0 0 0.735", basis="6-31g")
 
-    @no_pyscf
-    def test_an_ion_is_not_silently_served(self):
+    def test_an_ion_is_not_silently_served(self, fallback_path):
         with pytest.raises(LookupError):
             molecule_from_geometry("H 0 0 0; H 0 0 0.735", charge=1, spin=1)
 
-    @no_pyscf
-    def test_atom_order_and_trailing_zeros_do_not_matter(self):
+    def test_atom_order_and_trailing_zeros_do_not_matter(self, fallback_path):
         mol = molecule_from_geometry(
             "H 0.0000 0 0.735; H 0 0 -0.0000", basis="STO-3G"
         )

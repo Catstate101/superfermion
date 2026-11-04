@@ -61,11 +61,94 @@ _rust_state_qfim = _RustState.qfim
 
 
 def _state_grad_with_check(self, observable, dag, param_values):
+    """\u2202\u27e8O\u27e9/\u2202\u03b8 for every symbol of ``dag``, by adjoint differentiation.
+
+    Reverse mode: the state is already at the end of the circuit, so the bra
+    is walked backwards through the gates once and every parameter's
+    derivative falls out of that single sweep.  Cost is one forward plus one
+    backward pass for the *whole* gradient vector, independent of how many
+    parameters there are.  PennyLane analogue: ``qml.grad`` with
+    ``diff_method="adjoint"``.
+
+    Args:
+        observable: the engine's own term list
+            ``[(per-qubit Pauli codes, re, im)]`` with one code per wire
+            (0=I, 1=X, 2=Y, 3=Z).  This is the internal form that every
+            Python entry point coerces other spellings to; the label must be
+            as wide as the register (``self.n_qubits``) and the summed
+            operator must be Hermitian.
+        dag: the parameterised IR (a ``QuantumDAG``, or a ``Circuit``, which
+            ``RunResult.grad`` converts with ``to_ir()``).  Its symbols are
+            the keys of the result, in ``dag.parameter_names()`` order.
+        param_values: ``{name: value}`` for the symbols of ``dag``.
+
+    Returns:
+        ``{parameter_name: float}``.  A ``dag`` with no symbolic parameters
+        -- what a bound circuit reports, because ``.bind()`` erases the
+        symbols -- returns ``{}`` and emits a ``UserWarning`` rather than
+        looking like a gradient that happens to be zero.
+
+    Raises:
+        ValueError: the observable is malformed.  A label whose width is not
+            ``self.n_qubits`` used to be padded with ``I`` and came back as
+            a plausible zero (E/V-7), and a non-Hermitian operator used to be
+            differentiated three different ways by three engines (E/V-5);
+            both are refused here on the same rule the four standalone
+            engines use (``adjoint_grad``, ``parameter_shift_grad``,
+            ``finite_diff_grad``, ``RunResult.grad``).
+
+    Example:
+        >>> import superfermion as sf
+        >>> c = sf.Circuit(2)
+        >>> t = sf.param("t")
+        >>> c.h(0); c.ry(t, 1); c.cx(0, 1)
+        >>> st = sf.run(c, params={"t": 0.3}).state
+        >>> st.grad([([3, 3], 1.0, 0.0)], c.to_ir(), {"t": 0.3})
+        {'t': -0.2955202066613395}
+    """
+    from superfermion.qml.gradient._observables import normalize_for_gradient
+
+    terms = normalize_for_gradient(
+        observable, getattr(self, "n_qubits", 0), what="State.grad() observable"
+    )
     _warn_if_bound_dag(dag, param_values, what="State.grad()")
-    return _rust_state_grad(self, observable, dag, param_values)
+    return _rust_state_grad(self, terms, dag, param_values)
 
 
 def _state_qfim_with_check(self, dag, param_values):
+    """Quantum Fisher information matrix of this state over ``dag``'s symbols.
+
+    ``F_ij = 4 Re[ \u27e8\u2202_i\u03c8|\u2202_j\u03c8\u27e9 - \u27e8\u2202_i\u03c8|\u03c8\u27e9\u27e8\u03c8|\u2202_j\u03c8\u27e9 ]``
+    -- the Bures / Fubini-Study metric, i.e. the classical Fisher information
+    of the pure state itself.  It is real, symmetric and positive
+    semi-definite, and it is the metric tensor that a natural-gradient step
+    (``qng_step``) inverts.  Verified against Qiskit's
+    ``QFI(ReverseQGT)``/``QFI(LinCombQGT)`` to 5e-11 in the xq6 battery.
+
+    Args:
+        dag: the parameterised IR (a ``QuantumDAG``).  The matrix is laid out
+            in ``dag.parameter_names()`` order -- which is the gate insertion
+            order, so a caller holding its own ``param_names`` must not
+            assume the two agree.
+        param_values: ``{name: value}`` for the symbols of ``dag``.
+
+    Returns:
+        ``(k, k)`` float array with ``k = len(dag.parameter_names())``.  To
+        read it in a different parameter order, permute **rows and columns**:
+        ``F[np.ix_(perm, perm)]``.  A metric tensor is a matrix of
+        coordinates, so permuting only the gradient mixes two bases and moves
+        the step by 0.024420 on the F/V-10 circuit.
+
+    Returns (degenerate):
+        A rank-deficient ``F`` (for example two rotations of the same qubit
+        that enter the state symmetrically) has no inverse.  ``qfim`` still
+        reports it honestly; consumers fall back to ``np.linalg.pinv``
+        instead of solving a singular system (F/V-11).
+
+    Returns (no parameters):
+        An empty array plus a ``UserWarning`` when ``dag`` carries no
+        symbolic parameters, the same contract as ``State.grad``.
+    """
     _warn_if_bound_dag(dag, param_values, what="State.qfim()")
     return _rust_state_qfim(self, dag, param_values)
 
