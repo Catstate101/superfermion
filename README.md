@@ -83,8 +83,8 @@ install is best-effort rather than gated.
 
 ### What the wheels do not contain
 
-Two things are structurally absent from every published artifact. Both fail
-loudly instead of silently degrading:
+Three things are structurally absent from every published artifact. The first
+two fail loudly instead of silently degrading.
 
 **CUDA.** The GPU backend is a Rust feature (`gpu`, off by default in
 `crates/sf-bindings`), not a Python extra, so no published wheel carries it.
@@ -104,6 +104,17 @@ with CUDA for the QML layers and adds no CUDA simulator.
 published packages: `cargo add sf-ir` resolves nothing, and no release job
 publishes them. The Rust API reaches users only as the `_sf_core` extension
 module inside the Python wheel.
+
+**x86_64 CPUs older than 2008.** Every x86_64 wheel is compiled with
+`-C target-cpu=x86-64-v2` (`.cargo/config.toml`), so the binary assumes SSE4.2,
+POPCNT and CMPXCHG16B are present — the level Intel reached with Nehalem (2008)
+and AMD with Bulldozer (2011); earlier parts, including AMD's K10, do not have
+it. A machine below that level cannot run the wheel, and there is no fallback
+build: the flag is what lets LLVM vectorise the statevector kernel. Three
+qualifications, all read from the config: `aarch64` wheels are unaffected; the
+`x86_64-unknown-linux-musl` target is **not** listed, so the Alpine wheel keeps
+the generic x86-64 baseline; and the `windows-gnu` entry only affects local
+builds, since shipped Windows wheels use `msvc`.
 
 ### From source (development)
 

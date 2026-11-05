@@ -28,8 +28,8 @@ by `pip` and needs Rust 1.85+ and ~3 GB of free disk.
 
 ### What a `pip install` does not give you
 
-Three structural limits, all of which fail loudly rather than degrading
-silently:
+Four structural limits. The first two raise or refuse immediately; the other
+two are floors you only meet when you get there.
 
 **CUDA.** The GPU backend is a Rust feature, not a Python extra, so no
 published wheel contains it. `sf.run(..., device="gpu")` raises immediately
@@ -48,6 +48,14 @@ free-threaded builds before 3.15, so no `cp314t` wheel is published. `pip`
 falls back to the sdist and pyo3 emits a version-specific extension instead of
 an `abi3` one. The CI lane that runs this is advisory (`continue-on-error`),
 so treat free-threaded support as best-effort rather than gated.
+
+**x86_64 CPUs older than 2008.** x86_64 wheels are compiled with
+`-C target-cpu=x86-64-v2`, so they assume SSE4.2, POPCNT and CMPXCHG16B are
+present — the level Intel reached with Nehalem (2008) and AMD with Bulldozer
+(2011); earlier parts, including AMD's K10, do not have it. Older hardware
+cannot execute the wheel, and there is no fallback build. `aarch64` is
+unaffected, and `x86_64-unknown-linux-musl` is not listed in
+`.cargo/config.toml`, so the Alpine wheel keeps the generic x86-64 baseline.
 
 ### Optional extras
 
