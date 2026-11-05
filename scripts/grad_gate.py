@@ -28,7 +28,7 @@ F   ``u_ansatz`` + ``VQE(diff_method="adjoint")`` reaches the ground state
 Usage
 -----
     python scripts/grad_gate.py
-    python scripts/grad_gate.py --expect-version 0.1.24
+    python scripts/grad_gate.py --expect-version 0.1.25
     python scripts/grad_gate.py --expect-engine-root "$RUNNER_TEMP/venv"
     python scripts/grad_gate.py --json grad_gate.json
 

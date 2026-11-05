@@ -2,7 +2,7 @@
 
 All notable changes to the Superfermion framework.
 
-## [Unreleased]
+## [0.1.25] - 2026-11-05
 
 Correctness work across QEC, error mitigation, gradients, chemistry, algorithms, the
 compiler and the GPU lane, plus the documentation corrections that follow from it.

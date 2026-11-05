@@ -63,7 +63,7 @@ superfermion`, and check `python -c "import superfermion; print(superfermion.__f
 Every run prints the engine path and its sha256 in the pytest header, and
 
 ```bash
-python scripts/grad_gate.py --expect-version 0.1.24 \
+python scripts/grad_gate.py --expect-version 0.1.25 \
     --expect-engine-root "$PWD/superfermion"
 ```
 
