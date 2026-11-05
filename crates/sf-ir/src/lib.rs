@@ -81,6 +81,12 @@ pub fn gpu_diagnose() -> String {
     sf_gpu::diagnose()
 }
 
+/// Diagnostic: GPU not compiled.
+#[cfg(not(feature = "gpu"))]
+pub fn gpu_diagnose() -> String {
+    "GPU feature not compiled".to_string()
+}
+
 #[cfg(test)]
 mod mix_seed_tests {
     use super::mix_seed;
@@ -117,10 +123,4 @@ mod mix_seed_tests {
         assert_eq!(mix_seed(12345, 678), mix_seed(12345, 678));
         assert_ne!(mix_seed(12345, 678), mix_seed(678, 12345));
     }
-}
-
-/// Diagnostic: GPU not compiled.
-#[cfg(not(feature = "gpu"))]
-pub fn gpu_diagnose() -> String {
-    "GPU feature not compiled".to_string()
 }
