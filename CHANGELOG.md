@@ -6,7 +6,9 @@ All notable changes to the Superfermion framework.
 
 Committed after the `v0.1.25` tag, so it is in the tree but not in any published
 artifact. Everything here is covered by `tests/domain/test_v0125_fixes.py`, the
-`sf-cat` Rust tests, and `tests/unit/test_cat_density_matrix.py`.
+`sf-cat` Rust tests, `tests/unit/test_cat_density_matrix.py`, and
+`tests/unit/test_cat_vs_qiskit.py` (which compares every `cat` lane against
+Qiskit and skips when Qiskit is absent).
 
 ### Fixed
 
