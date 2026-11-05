@@ -207,14 +207,14 @@ def read_fcidump_text(
         ``n_electrons = NELEC`` and ``fcidump_notation`` set to the
         convention that was used.
     """
+    notation = "auto" if notation is None else str(notation).strip().lower()
+    if notation not in ("auto", "physicist", "chemist"):
+        raise ValueError(
+            f"notation must be 'physicist', 'chemist' or 'auto', got {notation!r}"
+        )
     if notation == "auto":
         notation, _reason = detect_fcidump_notation(text)
     else:
-        notation = str(notation).lower()
-        if notation not in ("physicist", "chemist"):
-            raise ValueError(
-                f"notation must be 'physicist', 'chemist' or 'auto', got {notation!r}"
-            )
         marked, mark_reason = detect_fcidump_notation(text)
         if mark_reason.startswith("NOTATION") and marked != notation:
             warnings.warn(
@@ -309,8 +309,12 @@ def write_fcidump_text(
         annotate: Record the convention as a ``NOTATION=`` variable in the
             ``&FCI`` header, so :func:`read_fcidump` reproduces the tensor
             exactly instead of inferring the layout.  Token-scanning readers
-            (PySCF's included) skip unknown header variables; set this to
-            ``False`` for a byte-for-byte standard header.
+            (PySCF's included) skip unknown header variables.  With
+            ``annotate=False`` there is no marker, and a physicist-labelled
+            file then carries a header that is *not* byte-identical to
+            PySCF's (one space before the final comma), so
+            :func:`detect_fcidump_notation` still recovers the right
+            convention; chemist output keeps PySCF's exact bytes.
 
     Returns:
         The file body as a string.
@@ -332,8 +336,17 @@ def write_fcidump_text(
     if spin is None:
         spin = 0
 
+    # PySCF's writer emits ``NORB=%4d,NELEC=%2d,MS2=%d,`` and the detector keys
+    # on exactly that spacing, so output a reader could mistake for PySCF's has
+    # to say chemist -- and our default is physicist.  A physicist-labelled file
+    # therefore leaves one space before the final comma: every field stays
+    # comma-separated (PySCF splits on "," and "=", so the space is inert) while
+    # the header drops out of the fingerprint, and the file re-detects as the
+    # physicist file it is.  Chemist output keeps PySCF's exact bytes, because
+    # there the labels and the header agree.
+    header_end = "," if notation == "chemist" else " ,"
     lines = [
-        f" &FCI NORB={norb:4d},NELEC={int(n_elec):2d},MS2={int(spin)},",
+        f" &FCI NORB={norb:4d},NELEC={int(n_elec):2d},MS2={int(spin)}{header_end}",
         "  ORBSYM=" + ",".join(str(int(x)) for x in (orbsym or [1] * norb)) + ",",
         f"  ISYM={int(isym)},",
     ]

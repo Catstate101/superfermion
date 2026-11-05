@@ -14,6 +14,8 @@ WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
 License for the specific language governing permissions and limitations
 under the License.
 
-This product includes software developed by third parties.  Those
-components carry their own notices, which are reproduced with the source
-they belong to; nothing in this file modifies the License.
+This product includes software developed by third parties: the Rust crates
+listed in Cargo.lock and the Python distributions listed in pyproject.toml.
+Those notices travel with their own sources -- inside each crate and each
+installed distribution -- and are not reproduced here; the wheels ship this
+file and LICENSE only.  Nothing in this file modifies the License.

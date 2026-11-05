@@ -32,6 +32,11 @@ file doubles as the record of what was wrong:
    was below the threshold, which is the *default* outcome for water with the O
    target.  It now returns the unrefined AVAS space with
    ``refinement_applied=False`` and a ``UserWarning``.
+8. **MPS ``bond_dim``.**  ``bond_dim=0`` was accepted and silently produced the
+   uniform distribution: the QR cap becomes ``min(0, rank) = 0``, every bond
+   collapses to a single state.  Measured on GHZ-3, all eight outcomes came back
+   at ~25 counts each out of 200.  Values below 1 are now refused, and the
+   refusal names the argument.
 """
 
 import numpy as np
@@ -205,10 +210,44 @@ class TestFcidumpNotationDetection:
             assert np.allclose(back.h2, h2)
             assert np.allclose(back.h1, h1)
 
-    def test_annotate_false_keeps_a_standard_header(self):
-        h1 = np.eye(2)
-        text = write_fcidump_text((h1, None, 0.0), n_elec=2, annotate=False)
-        assert "NOTATION" not in text
+    def test_annotate_false_keeps_a_standard_header_and_still_round_trips(self):
+        """Without the marker the header itself must still say which it is.
+
+        A physicist-labelled file is not PySCF output, so it must not carry
+        PySCF's writer fingerprint.  With the old byte-identical header the
+        detector called our own physicist file "chemist" and read every
+        two-electron integral back transposed -- h2[1,1,0,0] came back as
+        0.0625 instead of 0.25, silently.
+        """
+        h1 = np.array([[-1.25, 0.0], [0.0, -0.6]])
+        raw = np.zeros((2, 2, 2, 2))
+        raw[0, 0, 0, 0] = 1.0
+        raw[1, 1, 0, 0] = 0.25
+        raw[1, 1, 1, 1] = 0.75
+        h2 = _symmetrise(raw)
+
+        for notation in ("physicist", "chemist"):
+            text = write_fcidump_text(
+                (h1, h2, 0.0), n_elec=2, notation=notation, annotate=False
+            )
+            assert "NOTATION" not in text
+            detected, _reason = detect_fcidump_notation(text)
+            assert detected == notation, f"{notation} file detected as {detected}"
+            back = read_fcidump_text(text)
+            assert back.fcidump_notation == notation
+            assert np.allclose(back.h2, h2)
+            assert np.allclose(back.h1, h1)
+
+    def test_the_notation_argument_is_case_insensitive(self):
+        """"AUTO" used to be rejected by an error saying "auto" is valid."""
+        assert read_fcidump_text(_PYSCF_TEXT, notation="AUTO").fcidump_notation == (
+            "chemist"
+        )
+        assert read_fcidump_text(
+            _PYSCF_TEXT, notation="Physicist"
+        ).fcidump_notation == "physicist"
+        with pytest.raises(ValueError, match="'physicist', 'chemist' or 'auto'"):
+            read_fcidump_text(_PYSCF_TEXT, notation="nonsense")
 
     def test_contradicting_the_marker_warns(self):
         text = _PYSCF_TEXT.replace("  ISYM=1,\n", "  ISYM=1,\n  NOTATION=chemist,\n")
@@ -500,3 +539,51 @@ class TestAegissDoesNotGiveUp:
         assert result["refinement_applied"] is True
         assert 0 < result["n_active"] < result["avas"]["n_active"]
         assert result["energy_pruned"] > result["energy_avas"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 8. MPS bond dimension: 0 is not "unlimited"
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _ghz3():
+    circuit = sf.Circuit(3)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    circuit.cx(1, 2)
+    return circuit
+
+
+class TestBondDimensionIsValidated:
+    """``bond_dim=0`` sampled the uniform distribution instead of the circuit."""
+
+    def test_zero_and_negative_are_refused_with_the_reason(self):
+        from superfermion._limits import validate_bond_dim
+
+        assert validate_bond_dim(64) == 64
+        assert validate_bond_dim("8") == 8
+        for bad in (0, -1, -64):
+            with pytest.raises(ValueError, match="at least 1"):
+                validate_bond_dim(bad)
+        with pytest.raises(ValueError, match="positive integer"):
+            validate_bond_dim(None)
+
+    def test_a_run_with_bond_dim_zero_raises_instead_of_sampling_noise(self):
+        # Measured before the guard: all eight GHZ-3 outcomes at ~25 counts each
+        # out of 200 shots, i.e. a uniform distribution, with no error naming the
+        # argument.  A negative value surfaced as pyo3's OverflowError instead.
+        with pytest.raises(ValueError, match="bond_dim must be at least 1"):
+            sf.run(_ghz3(), method="mps", shots=200, bond_dim=0, seed=7)
+        with pytest.raises(ValueError, match="bond_dim must be at least 1"):
+            sf.run(_ghz3(), method="mps", shots=200, bond_dim=-1, seed=7)
+
+    def test_a_valid_bond_dimension_still_samples_the_state(self):
+        counts = sf.run(_ghz3(), method="mps", shots=200, bond_dim=4, seed=7).counts
+        assert set(counts) <= {"000", "111"}
+        assert sum(counts.values()) == 200
+
+    def test_the_observable_path_validates_the_same_way(self):
+        from superfermion.observables.core import mps_expval
+
+        with pytest.raises(ValueError, match="bond_dim must be at least 1"):
+            mps_expval(_ghz3(), "ZZZ", bond_dim=0)

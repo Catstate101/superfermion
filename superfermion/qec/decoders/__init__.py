@@ -500,8 +500,13 @@ class BPOSD_Decoder:
     (non-pivot) bits, so enumerating every free-bit pattern of weight
     ``<= osd_order`` enumerates every candidate the decoder can reach.  As soon
     as ``osd_order >= n_free`` -- the number of columns outside the pivot set,
-    which is ``n_qubits - rank(H)`` -- the enumeration is exhaustive over the
-    whole syndrome coset and returns a representative of least weight.
+    which is ``n_qubits - rank(H)`` -- *and* the coset is small enough to
+    enumerate under the cap below (``2**n_free - 1 <= _OSD_MAX_CANDIDATES``,
+    i.e. ``n_free <= 17``), the enumeration is exhaustive over the whole
+    syndrome coset and returns a representative of least weight.  Past 17 free
+    variables the cap turns the search into a budget rather than an exhaustive
+    scan: the result is the lightest pattern the budget reached, which need not
+    be the lightest that exists.
 
     Measured against brute-force search over all ``2**n`` error patterns:
 
@@ -517,10 +522,10 @@ class BPOSD_Decoder:
     * ``ToricCode2D(size=2)``: 30 logical failures at ``osd_order=0``, 26 at
       ``osd_order >= 1``.
 
-    ``osd_order`` beyond ``n_free`` cannot add candidates -- the search is
-    already exhaustive -- and the enumeration is additionally capped at
-    ``_OSD_MAX_CANDIDATES`` patterns so a wide code cannot turn one decode into
-    an unbounded search.
+    ``osd_order`` beyond ``n_free`` cannot add candidates once the coset fits
+    the budget, and the enumeration is capped at ``_OSD_MAX_CANDIDATES``
+    patterns regardless, so a wide code cannot turn one decode into an
+    unbounded search.
 
     Args:
         h_matrix: Parity-check matrix (n_checks × n_qubits).
@@ -588,9 +593,10 @@ class BPOSD_Decoder:
             List of (qubit_index, pauli_type) correction pairs.  The result
             always reproduces ``syndrome``.  With ``osd_order >= 1`` it is the
             lightest candidate the OSD search can reach, and that search is
-            exhaustive once ``osd_order >= n_free`` (``n_qubits - rank(H)``);
-            the class docstring gives the brute-force comparison and the
-            ``_OSD_MAX_CANDIDATES`` cap.  With the default ``osd_order=0`` OSD
+            exhaustive once ``osd_order >= n_free`` (``n_qubits - rank(H)``)
+            *and* ``2**n_free - 1`` fits the ``_OSD_MAX_CANDIDATES`` cap
+            (``n_free <= 17``); the class docstring gives the brute-force
+            comparison and what the cap costs.  With the default ``osd_order=0`` OSD
             scores only the systematic reconstruction when it runs at all, so
             the result is a valid correction but not necessarily a light one.
         """
@@ -747,9 +753,12 @@ class BPOSD_Decoder:
         # bits are chosen:  x[pivot_k] = s[k] ^ sum_f A[k, f] x[f].  The free
         # bits are the only degrees of freedom left, and enumerating all of
         # them up to weight `osd_order` searches every candidate OSD-l can
-        # reach.  With `osd_order >= n_free` that enumeration is exhaustive
-        # over the ~all~ solutions of the syndrome equation, i.e. exact
-        # minimum-weight decoding for that code.
+        # reach.  With `osd_order >= n_free` *and* the whole coset under the
+        # `_OSD_MAX_CANDIDATES` budget (2**n_free - 1 <= 200_000, n_free <= 17)
+        # that enumeration is exhaustive over every solution of the syndrome
+        # equation, i.e. exact minimum-weight decoding for that code.  A wider
+        # coset stops at the cap, and the result is then the lightest pattern
+        # the budget reached rather than the lightest that exists.
         #
         # The previous implementation flipped *pivot* bits and re-tested the
         # syndrome.  That test can never pass -- a pivot column has a 1 in its

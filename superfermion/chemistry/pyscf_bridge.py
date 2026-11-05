@@ -1803,11 +1803,35 @@ def _compute_pyscf(
     # the selection does not change when polarization functions are added.
     # Two overlap pieces are enough to reproduce that projection, and they are
     # cheap next to the SCF that just ran.
-    (
-        mol.minao_ao_labels,
-        mol._minao_cross,
-        mol._minao_overlap,
-    ) = _minao_projection_data(mol_obj)
+    #
+    # The minao build can fail for elements it carries no functions for (heavy
+    # atoms, ECP centres).  AVAS is optional but the SCF is not, so that failure
+    # must not take the molecule down with it: leaving the three fields None
+    # makes `projector_metric` fall back to the working basis, which is what
+    # every caller got before this projection existed.
+    try:
+        (
+            mol.minao_ao_labels,
+            mol._minao_cross,
+            mol._minao_overlap,
+        ) = _minao_projection_data(mol_obj)
+    except Exception as exc:  # noqa: BLE001 - optional stage, SCF already succeeded
+        # This function imports `warnings` locally further down, which makes the
+        # name local throughout; import here as well rather than reading the
+        # module-level one.
+        import warnings
+
+        mol.minao_ao_labels = None
+        mol._minao_cross = None
+        mol._minao_overlap = None
+        warnings.warn(
+            f"could not build the minao basis needed by AVAS "
+            f"({type(exc).__name__}: {exc}).  The SCF finished and its integrals "
+            "are valid; avas_active_space will project the working basis "
+            "instead, which over-selects once polarization functions are present.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # spin_square() is a method, not an attribute, and returns a tuple for the
     # classes whose <S^2> needs an S^+S^- correction.

@@ -12,19 +12,29 @@ artifact. Everything here is covered by `tests/domain/test_v0125_fixes.py`.
 - **Seeding**: adjacent integer seeds produced correlated shot streams, because Monte Carlo
   paths advanced the generator with `seed.wrapping_add(index)`. All five sites (`sf-ir` DAG
   sampling ×2, MPS, stabilizer, `sf-cat` Pauli-frame sampling) now mix through splitmix64
-  (`mix_seed`), so neighbouring seeds share no structure.
+  (`mix_seed`), so neighbouring seeds share no structure. **Counts for a given seed therefore
+  differ from 0.1.25** — a golden histogram pinned to one seed needs re-recording; a
+  seed-averaged result does not.
 - **FCIDUMP**: the default integral notation is now detected instead of assumed. Explicit
   `NOTATION=` wins, then a PySCF header fingerprint, then the standard. Reading a chemist-notation
-  file with the previous default silently mis-assigned every two-electron integral.
+  file with the previous default silently mis-assigned every two-electron integral. A
+  physicist-labelled file written with `annotate=False` no longer carries PySCF's writer
+  fingerprint, so it re-reads as physicist instead of as a transposed chemist file.
 - **BP+OSD**: `osd_order` is honoured. It was accepted and then ignored, so OSD ran with a
-  fixed order regardless of the argument; the search is now exhaustive once
-  `osd_order >= n_qubits - rank(H)`.
+  fixed order regardless of the argument; the search now enumerates the free variables and is
+  exhaustive once `osd_order >= n_qubits - rank(H)` *and* the coset fits the
+  `_OSD_MAX_CANDIDATES` budget (`n_free <= 17`). Past that budget the result is the lightest
+  pattern found, not the lightest that exists.
 - **AVAS**: the active-space size is the requested count, projected onto PySCF's `minao`
   minimal basis rather than the working basis, which over-returned orbitals.
 - **XYZ**: parsing accepts blank lines and trailing comments and raises a located error instead
   of failing obscurely; SCF reports its converged flag truthfully instead of always `True`.
-- **AEGISS**: raises where it previously returned silently when it could not do the work.
-- **MPS bond dimension**: the documented limit is enforced.
+- **AEGISS**: the entropy refinement no longer raises when every orbital falls below the
+  threshold. It warns and returns the unrefined AVAS space with `refinement_applied=False`,
+  which is what the default threshold did to water with the O target.
+- **MPS `bond_dim`**: values below 1 are refused with a `ValueError`. `bond_dim=0` used to be
+  accepted and sample the uniform distribution — the QR cap becomes `min(0, rank) = 0` — and a
+  negative value surfaced as pyo3's `OverflowError` instead of naming the argument.
 
 ### Added
 

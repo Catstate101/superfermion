@@ -104,11 +104,18 @@ mod mix_seed_tests {
         }
     }
 
-    /// The mapping is a bijection in each argument (splitmix64's finalizer is
-    /// invertible), so distinct (seed, index) pairs never alias to the same
-    /// stream.
+    /// No two of the first 1024 `(seed, index)` pairs share a stream.
+    ///
+    /// This is a window, not a proof.  The construction is injective in each
+    /// argument on its own -- `index` enters as a product with an odd constant
+    /// and the splitmix64 finalizer is a bijection -- but not over the pair:
+    /// `mix_seed(0, 0) == mix_seed(0x9E37_79B9_7F4A_7C15, 1) == 0`, because
+    /// both feed the finalizer a zero.  That is harmless for sampling: within
+    /// one run only the index varies (so streams never alias), and two runs
+    /// collide only when `seed1 ^ seed2` happens to be the exact odd multiple
+    /// of the mixing constant that the two indices differ by.
     #[test]
-    fn distinct_pairs_stay_distinct() {
+    fn a_thousand_pairs_do_not_alias() {
         let mut seen = std::collections::HashSet::new();
         for s in 0..32u64 {
             for i in 0..32u64 {
