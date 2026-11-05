@@ -1,0 +1,5 @@
+# The licence and notice are legal texts, not source.  Pin them to LF so a
+# checkout on Windows (core.autocrlf=true) does not hand anyone a CRLF copy of
+# the Apache text, and so the bytes match what the sdist and wheel carry.
+LICENSE text eol=lf
+NOTICE  text eol=lf

@@ -14,6 +14,9 @@ features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 # Ship the crate sources in the sdist (wheels do not need them).
 include = [
     { path = "crates/sf-gpu/**/*", format = "sdist" },
+    # The sdist is the only artifact a reader can unpack; ship the changelog so
+    # the release history travels with the source.
+    { path = "CHANGELOG.md", format = "sdist" },
 ]
 
 [project]
@@ -22,7 +25,10 @@ version = "0.1.25"
 description = "High-performance quantum computing framework with a Python API and Rust simulation core"
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+# LICENSE is the verbatim Apache-2.0 text with the two copyright lines filled
+# in (the same shape Qiskit ships).  NOTICE carries the attribution that
+# Apache-2.0 section 4(d) asks distributors to reproduce, so both are packaged.
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.10"
 authors = [
     {name = "Faisal Ahmed Sifat", email = "faisalahmed531@gmail.com"},
