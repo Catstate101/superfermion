@@ -1271,7 +1271,7 @@ impl FrameTableau {
 
         let gen_block = |packed: &mut [u64], b: usize| {
             let cnt = (shots - b * BLOCK).min(BLOCK);
-            let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(b as u64));
+            let mut rng = StdRng::seed_from_u64(sf_ir::mix_seed(base_seed, b as u64));
             let mut vars = vec![0u64; var_count];
             rng.fill(&mut vars[..]);
             // Evaluate the plan into one u64 outcome lane per qubit.

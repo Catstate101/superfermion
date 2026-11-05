@@ -7,30 +7,45 @@ set of atomic orbitals that *should* matter (the metal 3d shell, the O 2p
 shell, the pi system), project them onto the molecular orbitals, and keep the
 MOs that carry most of that projection.
 
-For a set ``T`` of target AOs the projection is
+For a set ``T`` of target functions the projection is
 
-    M = (C^T S X)(C^T S X)^T,      X[T, :] = S_T^{-1/2}
+    M = (X K C)^T (X K C),      X = S_T^{-1/2}
 
-a Hermitian matrix in the MO basis with eigenvalues in ``[0, 1]``.  Two
-properties make it trustworthy rather than just plausible:
+where ``K`` is the overlap of the target functions with the working basis and
+``S_T`` their overlap among themselves.  ``M`` is Hermitian in the MO basis
+with eigenvalues in ``[0, 1]``.  Two properties make it trustworthy rather
+than just plausible:
 
-* ``trace(M) = |T|``, because ``X`` is ``S``-orthonormal and ``C`` is square.
-  So the eigenvalues *partition* the target-space dimension: anything not
+* ``trace(M) = |T|`` when the target functions lie inside the span of the
+  working basis -- automatic when ``T`` is a subset of the working AOs.  So
+  the eigenvalues *partition* the target-space dimension: anything not
   selected leaked somewhere else, which is exactly the information a
   threshold needs.
 * ``0 <= M <= 1``, so ``M`` really is a projector.
+* ``M`` is block-diagonal in the occupied/virtual split only if the target
+  space is, so the rotation is applied inside each block separately.  That
+  keeps the electron count well defined -- rotating an occupied orbital into
+  a virtual one would change the determinant without telling anyone.
+
+**Which basis the targets live in matters.**  The AVAS paper, and PySCF's
+``mcscf.avas``, pick the target set in the *minimal* basis (PySCF's
+``minao``), not in the working basis: the O valence shell is five functions
+whatever polarization functions the calculation uses.  Projecting the working
+basis' AOs instead makes the answer basis-set dependent -- on water/STO-3G
+with ``target_atoms=['O']`` and ``threshold=0.2`` that selects 6 orbitals
+where PySCF selects 5, and the gap grows with the basis.  When the molecule
+carries the minao overlaps (built by :func:`molecule_from_geometry`), the
+chemical selectors therefore use them; explicit ``target_aos`` still index
+the working basis.
 
 The ``S_T^{-1/2}`` is not decoration.  The common short form
 ``M_ij = sum_{mu,nu in T} C_{mu i} S_{mu nu} C_{nu j}`` is only a projector
 when the target AOs are already orthonormal; on the O ``2p`` shell of water it
 produces eigenvalues up to ``1.34`` and ``trace(M) = 3.51`` for a 3-dimensional
 target, which is both unphysical and enough to select the wrong orbitals.  The
-orthogonalised form satisfies ``trace(M) = |T|`` to machine precision, and the
-tests assert that identity.
-* ``M`` is block-diagonal in the occupied/virtual split only if the target
-  space is, so the rotation is applied inside each block separately.  That
-  keeps the electron count well defined -- rotating an occupied orbital into
-  a virtual one would change the determinant without telling anyone.
+orthogonalised form satisfies ``trace(M) = |T|`` to machine precision whenever
+the target set is a subset of the working AOs, and the tests assert that
+identity.
 
 The result composes with the existing active-space machinery through
 ``active_orbitals=(n_elec, n_orb)``: the rotated MOs are ordered as
@@ -85,21 +100,32 @@ def projector_metric(
     mo_coeff: np.ndarray,
     overlap: np.ndarray,
     target_aos: Sequence[int],
+    *,
+    target_cross: Optional[np.ndarray] = None,
+    target_overlap: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Projector of the (S-orthonormalised) target AOs in the MO basis.
 
     Args:
         mo_coeff: ``(n_ao, n_mo)`` MO coefficients, ``C[:, i]`` for MO ``i``.
         overlap: ``(n_ao, n_ao)`` AO overlap matrix ``S``.
-        target_aos: AO indices defining the chemically interesting set.
+        target_aos: Indices of the target functions.  With ``target_cross``
+            these index the target basis (PySCF's ``minao``), otherwise the
+            working basis.
+        target_cross: Optional ``(n_target, n_ao)`` overlap between every
+            target function and the working basis.  PySCF's AVAS projects the
+            *minimal* basis, so ``target_aos`` then refers to ``minao``
+            functions while the MOs stay in the working basis.
+        target_overlap: ``(n_target, n_target)`` metric of the target basis;
+            required together with ``target_cross``.
 
     Returns:
         Hermitian ``(n_mo, n_mo)`` matrix ``M`` with eigenvalues in ``[0, 1]``.
-        ``trace(M) == len(target_aos)`` when the MOs span the target AOs --
-        true whenever there are as many MOs as AOs, which is the case for a
-        converged SCF coefficient matrix.  A truncated (``n_mo < n_ao``) set
-        reaches only part of the target space and the trace falls short; that
-        is a property of the input, not of the projection.
+        ``trace(M) == len(target_aos)`` when the target functions lie inside
+        the span of the working basis -- automatic when the target set is a
+        subset of the working AOs, and true to the extent that the minimal
+        basis is contained in the working one otherwise (PySCF's own AVAS
+        gives 4.9345 for the five O ``minao`` functions of water/STO-3G).
     """
     C = np.asarray(mo_coeff, dtype=float)
     S = np.asarray(overlap, dtype=float)
@@ -110,17 +136,31 @@ def projector_metric(
             f"shape mismatch: mo_coeff {C.shape}, overlap {S.shape}; "
             f"expected ({S.shape[0]}, n_mo)"
         )
-    if idx[-1] >= C.shape[0]:
-        raise ValueError(
-            f"target AO {idx[-1]} is out of range for {C.shape[0]} AOs"
-        )
 
-    n_ao = C.shape[0]
-    X = np.zeros((n_ao, len(idx)))
-    X[idx, :] = _inverse_sqrt(S[np.ix_(idx, idx)])
+    if target_cross is None or target_overlap is None:
+        if idx[-1] >= C.shape[0]:
+            raise ValueError(
+                f"target AO {idx[-1]} is out of range for {C.shape[0]} AOs"
+            )
+        metric_basis = S[np.ix_(idx, idx)]
+        cross = S[idx, :]
+    else:
+        target_cross = np.asarray(target_cross, dtype=float)
+        target_overlap = np.asarray(target_overlap, dtype=float)
+        n_target = target_cross.shape[0]
+        if idx[-1] >= n_target:
+            raise ValueError(
+                f"target AO {idx[-1]} is out of range for {n_target} minimal-basis "
+                "functions"
+            )
+        metric_basis = target_overlap[np.ix_(idx, idx)]
+        cross = target_cross[idx, :]
 
-    projected = C.T @ (S @ X)          # (n_mo, |T|)
-    metric = projected @ projected.T
+    # ``cross @ C`` are the target functions expanded in the MO basis; the
+    # S_T^{-1/2} factor makes the target set orthonormal, which is what keeps
+    # the eigenvalues inside [0, 1] and the trace equal to the target dimension.
+    projected = _inverse_sqrt(metric_basis) @ (cross @ C)
+    metric = projected.T @ projected
     return 0.5 * (metric + metric.T)
 
 
@@ -132,6 +172,8 @@ def avas_rotation(
     n_occupied: Optional[int] = None,
     threshold: float = 0.2,
     max_orbitals: Optional[int] = None,
+    target_cross: Optional[np.ndarray] = None,
+    target_overlap: Optional[np.ndarray] = None,
 ) -> Dict[str, object]:
     """Rotate the MOs so the AVAS-selected orbitals come first.
 
@@ -147,6 +189,9 @@ def avas_rotation(
             valence target set; ``0.5`` gives a tighter, more literal space.
         max_orbitals: Optional cap on the number of selected orbitals per
             block, highest eigenvalue first.
+        target_cross, target_overlap: Overlaps of a target basis that is *not*
+            the working basis (PySCF's ``minao``); see
+            :func:`projector_metric`.
 
     Returns:
         Dict with
@@ -175,7 +220,13 @@ def avas_rotation(
             f"n_occupied must be in [0, {n_mo}], got {n_occupied}"
         )
 
-    metric = projector_metric(C, overlap, target_aos)
+    metric = projector_metric(
+        C,
+        overlap,
+        target_aos,
+        target_cross=target_cross,
+        target_overlap=target_overlap,
+    )
     blocks = [(0, n_occupied), (n_occupied, n_mo)] if 0 < n_occupied < n_mo else [(0, n_mo)]
 
     rotation = np.zeros((n_mo, n_mo))
@@ -252,10 +303,17 @@ def _resolve_target_aos(
     target_atoms: Optional[Sequence[object]],
     target_shells: Optional[Sequence[str]],
 ) -> List[int]:
-    """Turn a chemical description ("O 2p", "all d AOs") into AO indices."""
+    """Turn a chemical description ("O 2p", "all d AOs") into AO indices.
+
+    Chemical selectors resolve against PySCF's ``minao`` labels when the
+    molecule carries them, because that is the basis PySCF's AVAS projects.
+    Explicit ``target_aos`` index ``mol.ao_labels`` (the working basis), which
+    keeps the low-level call usable without PySCF metadata.
+    """
     if target_aos is not None:
         return _as_index_list(target_aos)
-    if mol.ao_labels is None:
+    labels = mol.minao_ao_labels or mol.ao_labels
+    if labels is None:
         raise ValueError(
             "no AO labels on this MolecularData (it was built without PySCF); "
             "pass target_aos= explicitly"
@@ -273,7 +331,7 @@ def _resolve_target_aos(
     shells = None if target_shells is None else [s.lower() for s in target_shells]
 
     selected = []
-    for ao, label in enumerate(mol.ao_labels):
+    for ao, label in enumerate(labels):
         parts = label.split()
         if len(parts) < 3:
             continue
@@ -338,6 +396,13 @@ def avas_active_space(
     aos = _resolve_target_aos(mol, target_aos, target_atoms, target_shells)
     n_occupied = mol.n_electrons // 2
 
+    # Chemical selectors index the minimal basis, so the projection has to use
+    # the minao overlaps; explicit ``target_aos`` index the working basis.
+    if target_aos is None and mol._minao_cross is not None:
+        cross, target_overlap = mol._minao_cross, mol._minao_overlap
+    else:
+        cross, target_overlap = None, None
+
     info = avas_rotation(
         mol._mo_coeffs,
         mol._ao_overlap,
@@ -345,6 +410,8 @@ def avas_active_space(
         n_occupied=n_occupied,
         threshold=threshold,
         max_orbitals=max_orbitals,
+        target_cross=cross,
+        target_overlap=target_overlap,
     )
     if info["n_active"] == 0:
         raise ValueError(

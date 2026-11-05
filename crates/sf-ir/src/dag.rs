@@ -949,7 +949,7 @@ impl QuantumDAG {
         // qubits (same orientation and cumulative-search scheme as the
         // non-dynamic samplers).
         let run_shot = |shot_idx: u64| -> String {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(shot_idx));
+            let mut rng = rand::rngs::StdRng::seed_from_u64(crate::mix_seed(seed, shot_idx));
             let mut creg = vec![0u64; self.n_cbits];
             let mut state = vec![num_complex::Complex64::new(0.0, 0.0); dim];
             state[0] = num_complex::Complex64::new(1.0, 0.0);
@@ -1091,7 +1091,7 @@ impl QuantumDAG {
         // right-canonicalize, sample over all qubits, and un-permute to
         // virtual-qubit order (q0-last) exactly like `sample_mps`.
         let run_shot = |shot_idx: u64| -> String {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(shot_idx));
+            let mut rng = rand::rngs::StdRng::seed_from_u64(crate::mix_seed(seed, shot_idx));
             let mut creg = vec![0u64; self.n_cbits];
             let mut state = crate::mps::MPSState::new(n, bond_dim);
 

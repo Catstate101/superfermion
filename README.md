@@ -77,7 +77,33 @@ Anything not covered by a wheel — PyPy, 32-bit targets, other architectures,
 and free-threaded builds (3.14t, 3.15t) — is built from the source distribution
 by `pip`, which needs Rust 1.85+ and ~3 GB of free disk. Free-threaded
 interpreters get a version-specific extension instead of a limited-API one;
-prebuilt free-threaded wheels are not published yet.
+prebuilt free-threaded wheels are not published yet, and the CI lane that
+exercises 3.14t is advisory (`continue-on-error: true`), so a free-threaded
+install is best-effort rather than gated.
+
+### What the wheels do not contain
+
+Two things are structurally absent from every published artifact. Both fail
+loudly instead of silently degrading:
+
+**CUDA.** The GPU backend is a Rust feature (`gpu`, off by default in
+`crates/sf-bindings`), not a Python extra, so no published wheel carries it.
+`sf.run(..., device="gpu")` on a PyPI install raises immediately:
+
+```
+RuntimeError: GPU not available. Diagnostic: GPU feature not compiled
+```
+
+To get it, rebuild the extension yourself —
+`maturin develop --release --features gpu` — which needs the CUDA 12 toolkit and
+a matching driver. The `[gpu]` pip extra is a different thing: it installs JAX
+with CUDA for the QML layers and adds no CUDA simulator.
+
+**crates.io.** The eight crates (`sf-ir`, `sf-cat`, `sf-qec`, `sf-pulse`,
+`sf-router`, `sf-compiler`, `sf-gpu`, `sf-bindings`) are workspace members, not
+published packages: `cargo add sf-ir` resolves nothing, and no release job
+publishes them. The Rust API reaches users only as the `_sf_core` extension
+module inside the Python wheel.
 
 ### From source (development)
 

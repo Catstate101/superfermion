@@ -18,14 +18,42 @@ same tensor with the middle indices swapped::
 so reading a standard file needs ``h2[p,q,r,s] = raw[p,r,s,q]`` and not the
 identity.  Getting this backwards still produces a Hermitian operator with
 plausible energies; only a comparison against an independent solver catches
-it.  Both conventions are therefore selectable, ``notation="physicist"`` is
-the default (the standard), and ``notation="chemist"`` is provided because
-PySCF's own ``fcidump.from_integrals`` writes the chemist tensor under
-unpermuted labels.  ``_verify_fcidump.py`` pins the choice against PySCF FCI.
+it.  Both conventions are therefore selectable.
+
+PySCF's ``tools.fcidump`` writer does **not** follow the standard: it writes
+the chemist tensor ``(ij|kl)`` under the labels ``i j k l``, which a standard
+reader interprets as ``<ij|kl> = (ik|jl)``.  Reading a PySCF-written LiH file
+with the standard labelling gives -10.543477 Ha instead of the correct
+-7.880982 Ha, with no error.  Because both layouts use the same canonical
+index ordering (``i>=j``, ``k>=l``, ``ij>=kl``), the numbers themselves are
+ambiguous: no amount of symmetry inspection can tell the two apart.
+
+``notation="auto"`` (the default) therefore decides from the file:
+
+1. a ``NOTATION=`` variable in the ``&FCI`` header wins -- every file written
+   by :func:`write_fcidump` carries one, so round trips are exact;
+2. otherwise a file matching PySCF's writer fingerprint -- its header, which
+   ``write_head`` emits as ``' &FCI NORB=%4d,NELEC=%2d,MS2=%d,'`` with the
+   commas butted against the values -- is read as ``"chemist"``, which is what
+   PySCF actually wrote;
+3. otherwise the FCIDUMP standard labelling, ``"physicist"``.
+
+Exponent fields are deliberately *not* part of the fingerprint.  The obvious
+idea -- "PySCF prints ``%.16g``, so a Fortran ``E``/``D`` field means some other
+writer" -- is wrong on real files: on water/STO-3G, 128 of the 547 lines of a
+file written by ``pyscf.tools.fcidump.from_mo`` carry values such as
+``4.040691484975394e-05``, because ``%g`` switches to exponent form for small
+magnitudes.  Keying on that turned a genuine PySCF file into ``"physicist"``
+and reintroduced the very transposition this detection exists to avoid.
+
+The choice is recorded on the result as ``MolecularData.fcidump_notation`` so
+it can be checked instead of assumed.  Pass ``notation=`` explicitly to
+override the detection (e.g. for a Molpro file that also lacks a marker).
 
 Usage:
     >>> from superfermion.chemistry.fcidump import read_fcidump, write_fcidump
     >>> mol = read_fcidump("h2o.fcidump", geometry="O 0 0 0; H 0 0 1; H 0 1 0")
+    >>> mol.fcidump_notation  # 'physicist' or 'chemist'
     >>> H = mol.to_hamiltonian(active_space=(6, 6))
     >>> write_fcidump(mol, "copy.fcidump")
 """
@@ -33,6 +61,7 @@ Usage:
 from __future__ import annotations
 
 import re
+import warnings
 from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -44,11 +73,45 @@ __all__ = [
     "write_fcidump",
     "read_fcidump_text",
     "write_fcidump_text",
+    "detect_fcidump_notation",
     "to_hdf5",
     "from_hdf5",
 ]
 
 _DEFAULT_FLOAT_FORMAT = "%22.16f"
+
+# ``NOTATION=physicist`` inside the &FCI namelist.  Extra namelist variables
+# are skipped by token-scanning readers (PySCF's included), and a file that
+# carries it is read exactly as written, so a PySCF-vs-standard guess is never
+# needed for superfermion's own output.
+_NOTATION_RE = re.compile(r"\bNOTATION\s*=\s*[\"']?(physicist|chemist)\b", re.IGNORECASE)
+
+# PySCF's ``tools.fcidump.write_head`` emits
+# ``' &FCI NORB=%4d,NELEC=%2d,MS2=%d,'`` -- note the commas butted directly
+# against the values, and the space padding that ``%4d``/``%2d`` leave behind.
+# A hand-written or Molpro-style header writes ``NORB=7, NELEC=2`` instead, so
+# this is a writer fingerprint rather than a format requirement.
+#
+# Exponent fields are NOT evidence against PySCF: ``write_eri`` uses ``%.16g``,
+# which prints ``4.040691484975394e-05`` for small integrals (measured: 128 of
+# 547 lines on water/STO-3G).  An earlier version of this detector vetoed the
+# fingerprint on any ``E``/``D`` exponent and therefore mis-read every PySCF
+# file that happened to contain a small integral -- which is most of them.
+_PYSCF_HEADER_RE = re.compile(r"&\s*FCI\s+NORB=\s*\d+,NELEC=\s*\d+,MS2=-?\d+,")
+
+
+def detect_fcidump_notation(text: str) -> Tuple[str, str]:
+    """Return ``(notation, reason)`` for an FCIDUMP body.
+
+    ``notation`` is ``"physicist"`` or ``"chemist"``; ``reason`` is a short
+    human-readable explanation of the evidence used.
+    """
+    match = _NOTATION_RE.search(text)
+    if match is not None:
+        return match.group(1).lower(), "NOTATION= marker in the &FCI header"
+    if _PYSCF_HEADER_RE.search(text):
+        return "chemist", "PySCF writer fingerprint"
+    return "physicist", "FCIDUMP standard labelling (no writer marker)"
 
 
 def _parse_header(text: str) -> Dict[str, Any]:
@@ -78,7 +141,12 @@ def _parse_header(text: str) -> Dict[str, Any]:
         if key == "ORBSYM":
             fields[key] = [int(float(v)) for v in values]
         else:
-            fields[key] = int(float(values[0]))
+            try:
+                fields[key] = int(float(values[0]))
+            except ValueError:
+                # Non-numeric namelist variables (``NOTATION=physicist``) are
+                # metadata, not counts; keep them as text instead of failing.
+                fields[key] = "".join(values)
     return fields
 
 
@@ -95,7 +163,7 @@ def _to_chemist(
             p, q, r, s = i, k, j, l
         else:
             raise ValueError(
-                f"notation must be 'physicist' or 'chemist', got {notation!r}"
+                f"notation must be 'physicist', 'chemist' or 'auto', got {notation!r}"
             )
         h2[p, q, r, s] = value
         h2[q, p, r, s] = value
@@ -111,7 +179,7 @@ def _to_chemist(
 def read_fcidump_text(
     text: str,
     *,
-    notation: str = "physicist",
+    notation: str = "auto",
     geometry: Optional[str] = None,
     basis: str = "fcidump",
     name: Optional[str] = None,
@@ -122,8 +190,9 @@ def read_fcidump_text(
 
     Args:
         text: Full file contents.
-        notation: ``"physicist"`` (FCIDUMP standard, default) or ``"chemist"``
-            (PySCF's writer).  See the module docstring.
+        notation: ``"auto"`` (default) decides from the file itself -- see
+            :func:`detect_fcidump_notation`; ``"physicist"`` and
+            ``"chemist"`` force the labelling.
         geometry: Optional geometry string.  FCIDUMP carries no geometry, so
             this is only metadata unless you also want to re-run SCF.
         basis: Basis label recorded on the result.  Defaults to ``"fcidump"``
@@ -134,9 +203,26 @@ def read_fcidump_text(
 
     Returns:
         ``MolecularData`` with ``h1``, ``h2`` (chemist), ``nuclear_repulsion``
-        set to the FCIDUMP core energy, ``n_orbitals = NORB`` and
-        ``n_electrons = NELEC``.
+        set to the FCIDUMP core energy, ``n_orbitals = NORB``,
+        ``n_electrons = NELEC`` and ``fcidump_notation`` set to the
+        convention that was used.
     """
+    if notation == "auto":
+        notation, _reason = detect_fcidump_notation(text)
+    else:
+        notation = str(notation).lower()
+        if notation not in ("physicist", "chemist"):
+            raise ValueError(
+                f"notation must be 'physicist', 'chemist' or 'auto', got {notation!r}"
+            )
+        marked, mark_reason = detect_fcidump_notation(text)
+        if mark_reason.startswith("NOTATION") and marked != notation:
+            warnings.warn(
+                f"the file is marked {marked!r} but was read as {notation!r}; "
+                "the explicit argument wins, so the integrals may be wrong",
+                UserWarning,
+                stacklevel=2,
+            )
     header = _parse_header(text)
     norb = int(header["NORB"])
     nelec = int(header["NELEC"])
@@ -179,6 +265,7 @@ def read_fcidump_text(
         hf_energy=0.0,
         n_orbitals=norb,
         n_electrons=nelec,
+        fcidump_notation=notation,
     )
 
 
@@ -200,6 +287,7 @@ def write_fcidump_text(
     notation: str = "physicist",
     tol: float = 1e-12,
     float_format: str = _DEFAULT_FLOAT_FORMAT,
+    annotate: bool = True,
 ) -> str:
     """Serialise integrals to FCIDUMP text.
 
@@ -218,6 +306,11 @@ def write_fcidump_text(
             the standard) writes ``<pr|qs>`` for the stored ``(pq|rs)``.
         tol: Skip entries below this magnitude.
         float_format: ``printf`` format for the integral value.
+        annotate: Record the convention as a ``NOTATION=`` variable in the
+            ``&FCI`` header, so :func:`read_fcidump` reproduces the tensor
+            exactly instead of inferring the layout.  Token-scanning readers
+            (PySCF's included) skip unknown header variables; set this to
+            ``False`` for a byte-for-byte standard header.
 
     Returns:
         The file body as a string.
@@ -243,8 +336,10 @@ def write_fcidump_text(
         f" &FCI NORB={norb:4d},NELEC={int(n_elec):2d},MS2={int(spin)},",
         "  ORBSYM=" + ",".join(str(int(x)) for x in (orbsym or [1] * norb)) + ",",
         f"  ISYM={int(isym)},",
-        " &END",
     ]
+    if annotate:
+        lines.append(f"  NOTATION={notation},")
+    lines.append(" &END")
 
     if h2 is not None:
         h2 = np.asarray(h2, dtype=float)
