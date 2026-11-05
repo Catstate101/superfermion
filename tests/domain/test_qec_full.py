@@ -138,7 +138,11 @@ class TestLinearCodes:
     def test_generic_css_code_construction_and_build(self):
         hx = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.int32)
         hz = np.array([[1, 0, 1]], dtype=np.int32)
-        code = GenericCSSCode(hx, hz)
+        # This hx/hz pair does not commute, which is the point: construction and
+        # build() still work, and the library warns instead of silently pretending
+        # the two sectors are independent.
+        with pytest.warns(RuntimeWarning, match="do not commute"):
+            code = GenericCSSCode(hx, hz)
         assert code.n == 3
         circuit = code.build()
         assert circuit.n_qubits == code.n + hx.shape[0] + hz.shape[0]

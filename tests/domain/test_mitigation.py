@@ -31,22 +31,26 @@ def _bell_zz_observable(sv):
 
 class TestZNE:
     def test_zne_on_bell_circuit_noiseless(self, bell_circuit):
-        result = mitigation.zne(
-            bell_circuit,
-            _bell_zz_observable,
-            scale_factors=[1, 2, 3],
-            device="cpu",
-        )
+        # Folding is unitary-exact without a noise model, so every scale returns
+        # the same expectation; the library says so rather than extrapolating.
+        with pytest.warns(RuntimeWarning, match="extrapolation changed nothing"):
+            result = mitigation.zne(
+                bell_circuit,
+                _bell_zz_observable,
+                scale_factors=[1, 2, 3],
+                device="cpu",
+            )
         assert isinstance(result, float)
         assert abs(result - 1.0) < 0.05
 
     def test_zne_richardson_extrapolation_two_points(self, bell_circuit):
-        result = mitigation.zne(
-            bell_circuit,
-            _bell_zz_observable,
-            scale_factors=[1, 2],
-            device="cpu",
-        )
+        with pytest.warns(RuntimeWarning, match="extrapolation changed nothing"):
+            result = mitigation.zne(
+                bell_circuit,
+                _bell_zz_observable,
+                scale_factors=[1, 2],
+                device="cpu",
+            )
         assert np.isfinite(result)
 
     def test_fold_circuit_amplifies_gate_count(self, bell_circuit):
