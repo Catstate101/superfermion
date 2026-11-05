@@ -5,16 +5,31 @@ All notable changes to the Superfermion framework.
 ## [Unreleased]
 
 Committed after the `v0.1.25` tag, so it is in the tree but not in any published
-artifact. Everything here is covered by `tests/domain/test_v0125_fixes.py`.
+artifact. Everything here is covered by `tests/domain/test_v0125_fixes.py`, the
+`sf-cat` Rust tests, and `tests/unit/test_cat_density_matrix.py`.
 
 ### Fixed
 
+- **`sf.cat` density matrix**: the `mode` docstring said `density_matrix` "is not implemented and
+  raises `ValueError`". It is implemented and exact — `simulate()` returns a `rho` matching
+  Qiskit's `DensityMatrix` bit for bit (max abs diff `0.0` on a 4-qubit circuit) — and it is the
+  only lane that can carry a `Reset` after use or an unread mid-circuit measurement. The
+  docstring now describes it, and names the one refusal that is real: `sample()` on a
+  density-matrix handle.
+- **Density-matrix read-out**: `State.numpy()` flattens row-major, but the helper in
+  `tests/unit/test_cat_density_matrix.py` reshaped it F-order, which returns `rho.T`. Every state
+  in that file was real, where the two coincide, so a transposed `rho` passed all twelve tests. The
+  helper is C-order now, and a new test pins a complex off-diagonal that a transpose cannot fake.
+- **`cat.sample()` refusal**: the error said `plan is not a stabilizer plan`, which does not say
+  which mode the handle holds. It now names it (`compiled in 'density_matrix' mode`).
 - **Seeding**: adjacent integer seeds produced correlated shot streams, because Monte Carlo
   paths advanced the generator with `seed.wrapping_add(index)`. All five sites (`sf-ir` DAG
   sampling ×2, MPS, stabilizer, `sf-cat` Pauli-frame sampling) now mix through splitmix64
   (`mix_seed`), so neighbouring seeds share no structure. **Counts for a given seed therefore
   differ from 0.1.25** — a golden histogram pinned to one seed needs re-recording; a
-  seed-averaged result does not.
+  seed-averaged result does not. `sf-cat` is pinned by `adjacent_seeds_do_not_share_blocks`, which
+  compares whole 64-shot blocks of packed keys (exact, not a correlation threshold): under the old
+  code the second block of seed `s` was byte-identical to the first block of seed `s + 1`.
 - **FCIDUMP**: the default integral notation is now detected instead of assumed. Explicit
   `NOTATION=` wins, then a PySCF header fingerprint, then the standard. Reading a chemist-notation
   file with the previous default silently mis-assigned every two-electron integral. A

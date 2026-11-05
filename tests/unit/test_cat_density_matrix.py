@@ -31,10 +31,16 @@ def _ghz(n=2):
 
 
 def _rho(state):
-    """Flat engine buffer (``data[ket + bra*dim]``) -> ``(dim, dim)`` matrix."""
+    """Row-major engine buffer (``data[ket*dim + bra]``) -> ``(dim, dim)`` matrix.
+
+    ``State.numpy()`` flattens row-major (see ``noisy_dm_state``), so the reshape
+    is C-order.  It was F-order here, which silently returns ``rho.T``; every
+    state in this file happened to be real, where the two are identical, until
+    a complex ``rx`` exposed it.
+    """
     flat = np.asarray(state.numpy())
     dim = int(round(np.sqrt(flat.size)))
-    return flat.reshape((dim, dim), order="F")
+    return flat.reshape((dim, dim), order="C")
 
 
 def test_dm_mode_returns_a_density_matrix_state():
@@ -51,6 +57,28 @@ def test_both_mode_spellings_agree():
     a = _rho(sf.cat(circuit, mode="dm").simulate({}))
     b = _rho(sf.cat(circuit, mode="density_matrix").simulate({}))
     np.testing.assert_array_equal(a, b)
+
+
+def test_complex_offdiagonals_are_not_transposed():
+    """Reading the flat buffer in the wrong order returns ``rho.T``.
+
+    For a real state that is invisible: ``rho == rho.T``.  A rotation applied to
+    an already-entangled qubit makes the off-diagonals complex, and then the
+    transpose is the conjugate -- still Hermitian, still trace 1, still the same
+    diagonal.  Only ``|rho - |psi><psi||`` can tell them apart, so that is what
+    this pins.
+    """
+    circuit = sf.Circuit(2)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    circuit.rx(-0.81, 1)
+
+    rho = _rho(sf.cat(circuit, mode="density_matrix").simulate({}))
+    sv = np.asarray(sf.cat(circuit, mode="statevector").simulate({}).numpy())
+    pure = np.outer(sv.ravel(), sv.ravel().conj())
+
+    assert np.max(np.abs(rho.imag)) > 1e-3, "state is not complex; test is blind"
+    np.testing.assert_allclose(rho, pure, atol=1e-12)
 
 
 def test_reset_after_use_is_the_exact_mixed_state():

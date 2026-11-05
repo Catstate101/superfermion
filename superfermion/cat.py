@@ -46,12 +46,16 @@ def cat(circuit_or_dag: Any, mode: str = "statevector") -> Any:
         already-built Rust ``QuantumDAG``.
     mode
         One of ``statevector`` (default), ``density_matrix``, ``adjoint``,
-        ``stabilizer``, ``clifford``. ``statevector`` executes via
-        :meth:`CatCircuit.simulate`; ``adjoint`` via
+        ``stabilizer``, ``clifford``. ``statevector`` and ``density_matrix``
+        both execute via :meth:`CatCircuit.simulate`: the first returns a state
+        vector, the second a ``rho`` of shape ``(2**n, 2**n)``, which is the
+        only lane that can carry a ``Reset`` after use or a mid-circuit readout
+        without a later conditioned gate. A ``rho`` cannot represent a mixture
+        over measurement branches, so :meth:`CatCircuit.sample` on this mode
+        raises ``ValueError``. ``adjoint`` executes via
         :meth:`CatCircuit.run_gradient` (Pauli-string observable, coefficient
         1.0); ``stabilizer``/``clifford`` via :meth:`CatCircuit.sample`
-        (little-endian counts). ``density_matrix`` is not implemented and
-        raises ``ValueError`` rather than returning a wrong result.
+        (little-endian counts).
     """
     if not _HAS_CAT:
         raise ImportError(
