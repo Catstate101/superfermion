@@ -358,6 +358,18 @@ Full documentation is available at [superfermion.com](https://superfermion.com) 
 
 ---
 
+## Contributing
+
+The API is Python and the engine is Rust, so a change is finished only when both
+suites agree — `cargo test --workspace` and `python -m pytest tests/ -q`.
+
+- [Contributing guide](CONTRIBUTING.md) — build the extension, then run the six gates CI runs.
+- [Contributing page](https://superfermion.com/docs/contributing) — the same recipe, plus the import-shadowing trap that lets a stale `_sf_core` pass the whole suite.
+- [Open a pull request](https://github.com/Catstate101/superfermion/compare) — one topic per PR, with a test that fails before the fix.
+- [Issues](https://github.com/Catstate101/superfermion/issues) — bugs, questions, and design discussion.
+
+---
+
 ## Citing
 
 ```bibtex

@@ -13,7 +13,7 @@ Rust simulation core. Python is the API, Rust does the work.
 - **Python package** (`superfermion/`) — public API, simulation device layer,
   quantum algorithms, QML gradient methods, neural network layers, QEC,
   chemistry, compiler, device adapters, experiment tracking
-- **Rust workspace** (`crates/`, 7 crates) — in-place statevector engine, MPS
+- **Rust workspace** (`crates/`, 8 crates) — in-place statevector engine, MPS
   tensor network, stabilizer tableau, density matrix, compiler passes, SABRE
   router, pulse-level control, QEC codes/decoders, PyO3 bindings
 - **Tests** (`tests/`) — pytest suite organized as `unit/`, `integration/`,
@@ -23,12 +23,16 @@ Rust simulation core. Python is the API, Rust does the work.
 ## Critical Rules
 
 ### 1. Rust-Python Bridge
-After any Rust change, rebuild:
+After any Rust change, rebuild — from the **repository root**, because the root
+`pyproject.toml` holds `module-name`, `manifest-path` and `python-source`:
 ```bash
-cd crates/sf-bindings && maturin develop --release && cd ../..
-# Copy built extension into package (Linux):
-cp target/release/lib_sf_core.so superfermion/_sf_core.so
+maturin build --release --out dist && pip install --force-reinstall dist/*.whl
+# or: maturin develop --release
+python -c "import superfermion._sf_core as m; print(m.__file__)"   # confirm which engine loads
 ```
+Never copy an artifact into `superfermion/` by hand: a leftover ABI-tagged module
+wins the import (`EXTENSION_SUFFIXES` is `['.cp313-win_amd64.pyd', '.pyd']` on
+Windows), so the suite passes against a build nobody edited.
 
 ### 2. Endianness
 Superfermion's statevector, Qiskit, and the Rust core all use **q0=LSB**

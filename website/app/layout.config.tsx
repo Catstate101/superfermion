@@ -17,6 +17,10 @@ export const baseOptions: BaseLayoutProps = {
   },
   links: [
     { text: "GitHub", url: "https://github.com/Catstate101/superfermion" },
+    {
+      text: "Pull requests",
+      url: "https://github.com/Catstate101/superfermion/pulls",
+    },
     { text: "PyPI", url: "https://pypi.org/project/superfermion" },
   ],
 };
