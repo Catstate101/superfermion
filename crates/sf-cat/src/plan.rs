@@ -237,6 +237,22 @@ pub enum Mode {
     Cliff,
 }
 
+impl Mode {
+    /// The name `sf.cat` accepts for this mode.
+    ///
+    /// Errors that name a mode have to use these strings: `Debug` prints
+    /// `Dm`/`Stab`, which matches nothing a caller passed in.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Sv => "statevector",
+            Mode::Dm => "density_matrix",
+            Mode::Adj => "adjoint",
+            Mode::Stab => "stabilizer",
+            Mode::Cliff => "clifford",
+        }
+    }
+}
+
 /// Compile-once handle.  The cached snapshot owns everything that does not
 /// depend on parameter values; only the cheap per-call bind is repeated.
 pub struct CatPlan {
@@ -455,10 +471,15 @@ impl CatPlan {
         shots: usize,
         seed: Option<u64>,
     ) -> Result<HashMap<String, usize>, String> {
-        let tab = self
-            .stab
-            .as_ref()
-            .ok_or_else(|| "cat: plan is not a stabilizer plan".to_string())?;
+        // Name the mode the handle actually holds: "not a stabilizer plan"
+        // alone left the caller guessing which handle they were holding.
+        let tab = self.stab.as_ref().ok_or_else(|| {
+            format!(
+                "cat: sample() needs a stabilizer or clifford plan; this handle was \
+                 compiled in '{}' mode",
+                self.mode.as_str()
+            )
+        })?;
         Ok(tab.sample(shots, seed))
     }
 }

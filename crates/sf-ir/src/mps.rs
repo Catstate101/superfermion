@@ -1981,8 +1981,9 @@ impl MPSState {
         }
 
         for shot_idx in 0..shots {
-            // Unique seed for this shot to ensure diversity
-            let mut rng = StdRng::seed_from_u64(_seed.wrapping_add(shot_idx as u64));
+            // Per-shot RNG derived from (seed, shot) through `mix_seed`, so
+            // neighbouring seeds share no randomness (see `crate::mix_seed`).
+            let mut rng = StdRng::seed_from_u64(crate::mix_seed(_seed, shot_idx as u64));
             let key = self.sample_one_with_rng(&mut rng);
             *counts.entry(key).or_insert(0) += 1;
         }

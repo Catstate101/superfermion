@@ -1271,7 +1271,7 @@ impl FrameTableau {
 
         let gen_block = |packed: &mut [u64], b: usize| {
             let cnt = (shots - b * BLOCK).min(BLOCK);
-            let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(b as u64));
+            let mut rng = StdRng::seed_from_u64(sf_ir::mix_seed(base_seed, b as u64));
             let mut vars = vec![0u64; var_count];
             rng.fill(&mut vars[..]);
             // Evaluate the plan into one u64 outcome lane per qubit.
@@ -1965,6 +1965,44 @@ mod tests {
         let a = tab.sample_packed(300, Some(1234));
         let b = tab.sample_packed(300, Some(1234));
         assert_eq!(a, b);
+    }
+
+    /// Adjacent seeds must not share shot blocks.
+    ///
+    /// With `seed.wrapping_add(block)` the block `b` of seed `s` was the block
+    /// `b + 1` of seed `s + 1`, so two runs differed in exactly one block and
+    /// their histograms correlated by `(blocks - 1) / blocks` -- measured
+    /// 0.984 at 4000 shots, where the binomial answer is 0.
+    ///
+    /// The aliasing is exact, so the test is exact: it compares whole blocks of
+    /// packed per-shot keys instead of correlating histograms, which keeps it
+    /// deterministic and above the noise floor at every shot count.
+    #[test]
+    fn adjacent_seeds_do_not_share_blocks() {
+        let n = 32;
+        let gates = brick(n, 2, 9);
+        let tab = FrameTableau::from_gate_list(n, &gates).unwrap();
+        let block = 64 * tab.words;
+
+        let s7 = tab.sample_packed(256, Some(7));
+        let s8 = tab.sample_packed(256, Some(8));
+
+        for b in 1..4 {
+            assert_ne!(
+                &s7[(b - 1) * block..b * block],
+                &s7[b * block..(b + 1) * block],
+                "separate blocks of one seed are separate draws"
+            );
+            assert_ne!(
+                &s7[b * block..(b + 1) * block],
+                &s8[(b - 1) * block..b * block],
+                "block {b} of seed 7 aliased with block {} of seed 8",
+                b - 1
+            );
+        }
+
+        // Determinism still holds -- which is what kept the aliasing invisible.
+        assert_eq!(s7, tab.sample_packed(256, Some(7)));
     }
 
     #[test]

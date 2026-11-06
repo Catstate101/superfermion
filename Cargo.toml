@@ -17,7 +17,7 @@ edition = "2021"
 # PyO3 0.30 and the numpy crate both require Rust 1.85+.
 rust-version = "1.85"
 license = "Apache-2.0"
-authors = ["Superfermion Team"]
+authors = ["Faisal Ahmed Sifat", "Tamim Muhebbullah"]
 description = "High-performance quantum computing framework with a Python API and Rust simulation core"
 repository = "https://github.com/Catstate101/superfermion"
 documentation = "https://github.com/Catstate101/superfermion"

@@ -77,7 +77,44 @@ Anything not covered by a wheel — PyPy, 32-bit targets, other architectures,
 and free-threaded builds (3.14t, 3.15t) — is built from the source distribution
 by `pip`, which needs Rust 1.85+ and ~3 GB of free disk. Free-threaded
 interpreters get a version-specific extension instead of a limited-API one;
-prebuilt free-threaded wheels are not published yet.
+prebuilt free-threaded wheels are not published yet, and the CI lane that
+exercises 3.14t is advisory (`continue-on-error: true`), so a free-threaded
+install is best-effort rather than gated.
+
+### What the wheels do not contain
+
+Three things are structurally absent from every published artifact. The first
+two fail loudly instead of silently degrading.
+
+**CUDA.** The GPU backend is a Rust feature (`gpu`, off by default in
+`crates/sf-bindings`), not a Python extra, so no published wheel carries it.
+`sf.run(..., device="gpu")` on a PyPI install raises immediately:
+
+```
+RuntimeError: GPU not available. Diagnostic: GPU feature not compiled
+```
+
+To get it, rebuild the extension yourself —
+`maturin develop --release --features gpu` — which needs the CUDA 12 toolkit and
+a matching driver. The `[gpu]` pip extra is a different thing: it installs JAX
+with CUDA for the QML layers and adds no CUDA simulator.
+
+**crates.io.** The eight crates (`sf-ir`, `sf-cat`, `sf-qec`, `sf-pulse`,
+`sf-router`, `sf-compiler`, `sf-gpu`, `sf-bindings`) are workspace members, not
+published packages: `cargo add sf-ir` resolves nothing, and no release job
+publishes them. The Rust API reaches users only as the `_sf_core` extension
+module inside the Python wheel.
+
+**x86_64 CPUs older than 2008.** Every x86_64 wheel is compiled with
+`-C target-cpu=x86-64-v2` (`.cargo/config.toml`), so the binary assumes SSE4.2,
+POPCNT and CMPXCHG16B are present — the level Intel reached with Nehalem (2008)
+and AMD with Bulldozer (2011); earlier parts, including AMD's K10, do not have
+it. A machine below that level cannot run the wheel, and there is no fallback
+build: the flag is what lets LLVM vectorise the statevector kernel. Three
+qualifications, all read from the config: `aarch64` wheels are unaffected; the
+`x86_64-unknown-linux-musl` target is **not** listed, so the Alpine wheel keeps
+the generic x86-64 baseline; and the `windows-gnu` entry only affects local
+builds, since shipped Windows wheels use `msvc`.
 
 ### From source (development)
 
@@ -157,10 +194,13 @@ Python API (superfermion/)
 Rust workspace (crates/)
     |-- sf-ir/        QuantumStateImpl trait, DAG, statevector, MPS,
     |                 stabilizer, density matrix simulation engines
+    |-- sf-cat/       Compile-once, multi-mode execution core
+    |                 (statevector / density matrix / adjoint / stabilizer / Clifford)
     |-- sf-compiler/  Pass manager, gate cancellation, rotation merge
     |-- sf-router/    SABRE routing, hardware topology
     |-- sf-qec/       Stabilizer codes, MWPM/UnionFind decoders
     |-- sf-gpu/       CUDA statevector simulation (cudarc, sm_75+)
+    |-- sf-pulse/     Pulse-level control — waveforms, schedules, calibration
     |-- sf-bindings/  PyO3 FFI — State, QuantumDAG, compile
 ```
 
@@ -206,6 +246,45 @@ result = sf.run(clifford_circuit, device="cpu", method="stabilizer", shots=10000
 # GPU simulation (requires CUDA)
 result = sf.run(circuit, device="gpu", shots=0)
 ```
+
+### Compile-once handles: `sf.cat()`
+
+`sf.run()` rebuilds the DAG on every call. `sf.cat()` lowers the circuit into a
+reusable handle **once** — topological order, constant gate matrices and fusion
+metadata are cached — and then re-executes it with new parameter values:
+
+```python
+theta = sf.param("theta")
+circuit = sf.Circuit(2).ry(theta, 0).cx(0, 1)
+
+rho = sf.cat(circuit, mode="density_matrix").simulate({"theta": 0.5})
+```
+
+| `mode` | Call | Returns |
+|---|---|---|
+| `statevector` (default) | `simulate(values)` | state vector |
+| `density_matrix` | `simulate(values)` | `rho`; the only lane that accepts a `Reset` after use or an unread mid-circuit readout |
+| `adjoint` | `run_gradient(pauli, values)` | gradient of one Pauli string; RY/RZ parameters and CNOT only |
+| `stabilizer`, `clifford` | `sample(shots, seed=None)` | counts with little-endian keys; the same seed reproduces, different seeds are decorrelated |
+
+Three details that bite:
+
+- A single `rho` cannot stand for a mixture over measurement branches, so
+  `sample()` on a `density_matrix` handle raises `ValueError`. Execute it and
+  read `probabilities()` from the returned state instead.
+- `State.numpy()` flattens a `rho` **row-major**; read it back with
+  `reshape(2**n, 2**n)` in C order. An F-order reshape silently returns `rho.T`,
+  which is identical for real states and wrong for complex ones.
+- Pauli strings (`run_gradient`, `State.expectation`) are indexed from the left:
+  `"ZI"` is Z on qubit 0. Count keys are indexed the other way — leftmost
+  character is the highest qubit.
+
+Checked against Qiskit 2.1.2 on a 4-qubit circuit, by
+[`tests/unit/test_cat_vs_qiskit.py`](tests/unit/test_cat_vs_qiskit.py):
+statevector amplitudes agree to 1.1e-16, the density matrix to 0.0, adjoint
+gradients to 1.9e-11 against a central finite difference, and Clifford sampling
+sits 0.0041 total variation from the exact distribution at 20k shots (Qiskit
+Aer: 0.0058 at the same shot count).
 
 ---
 

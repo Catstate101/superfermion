@@ -11,7 +11,51 @@ Welcome. This page gets you from zero to a running quantum circuit with gradient
 pip install superfermion
 ```
 
-That's it. Python 3.10–3.13 on Linux, macOS, or Windows. Pre-built wheels for all three platforms — no Rust toolchain required.
+That's it. Python 3.10 or newer on Linux, macOS, or Windows. The wheels are
+built once against the CPython stable ABI and tagged `cp310-abi3`, so one
+binary per platform serves 3.10 through 3.15 — no Rust toolchain required.
+
+| Platform | Architectures | Wheel tag |
+| --- | --- | --- |
+| Linux | x86_64, aarch64 | `manylinux_2_28` (glibc 2.28+, i.e. RHEL 8+, Ubuntu 20.04+, Debian 10+) |
+| Linux (musl) | x86_64, aarch64 | `musllinux_1_2` (Alpine 3.15+) |
+| macOS | universal2 (Intel + Apple Silicon) | `macosx_10_12_universal2`, plus `macosx_11_0_arm64` |
+| Windows | amd64, arm64 | `win_amd64`, `win_arm64` |
+
+Anything outside that table — PyPy, 32-bit targets, older glibc, other
+architectures, free-threaded builds — is compiled from the source distribution
+by `pip` and needs Rust 1.85+ and ~3 GB of free disk.
+
+### What a `pip install` does not give you
+
+Four structural limits. The first two raise or refuse immediately; the other
+two are floors you only meet when you get there.
+
+**CUDA.** The GPU backend is a Rust feature, not a Python extra, so no
+published wheel contains it. `sf.run(..., device="gpu")` raises immediately
+with `GPU not available. Diagnostic: GPU feature not compiled`. Build it
+yourself with `maturin develop --release --features gpu` (CUDA 12 toolkit and a
+matching driver required). The `[gpu]` extra is unrelated — it installs JAX
+with CUDA for the QML layers and adds no CUDA simulator.
+
+**crates.io.** The Rust crates (`sf-ir`, `sf-cat`, `sf-qec`, `sf-pulse`,
+`sf-router`, `sf-compiler`, `sf-gpu`, `sf-bindings`) are workspace members, not
+published packages. There is no `cargo add sf-ir`; the Rust API ships only as
+the `_sf_core` extension module inside the Python wheel.
+
+**Free-threaded CPython (3.14t, 3.15t).** No limited API exists for
+free-threaded builds before 3.15, so no `cp314t` wheel is published. `pip`
+falls back to the sdist and pyo3 emits a version-specific extension instead of
+an `abi3` one. The CI lane that runs this is advisory (`continue-on-error`),
+so treat free-threaded support as best-effort rather than gated.
+
+**x86_64 CPUs older than 2008.** x86_64 wheels are compiled with
+`-C target-cpu=x86-64-v2`, so they assume SSE4.2, POPCNT and CMPXCHG16B are
+present — the level Intel reached with Nehalem (2008) and AMD with Bulldozer
+(2011); earlier parts, including AMD's K10, do not have it. Older hardware
+cannot execute the wheel, and there is no fallback build. `aarch64` is
+unaffected, and `x86_64-unknown-linux-musl` is not listed in
+`.cargo/config.toml`, so the Alpine wheel keeps the generic x86-64 baseline.
 
 ### Optional extras
 

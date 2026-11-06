@@ -818,8 +818,9 @@ impl StabilizerTableau {
     /// output, so `RunResult.counts` is unchanged.
     ///
     /// Determinism: with an explicit `seed`, the shot→randomness mapping is
-    /// fixed per build (block b draws from `seed + b`); two calls with the
-    /// same arguments return identical counts.
+    /// fixed per build (block b draws from `mix_seed(seed, b)`); two calls
+    /// with the same arguments return identical counts, and two calls with
+    /// different seeds share no random streams.
     ///
     /// The measurement plan is cached per tableau revision, so all calls
     /// after the first pay only the block evaluation.
@@ -849,7 +850,7 @@ impl StabilizerTableau {
         // (bit i = shot i's outcome for q); bits >= cnt are garbage and never
         // read. Shared by both packing paths below.
         let eval_block = |b: usize| -> Vec<u64> {
-            let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(b as u64));
+            let mut rng = StdRng::seed_from_u64(crate::mix_seed(base_seed, b as u64));
             let mut vars = vec![0u64; var_count];
             rng.fill(&mut vars[..]);
             let mut out = vec![0u64; n];

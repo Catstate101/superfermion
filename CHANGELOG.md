@@ -2,6 +2,73 @@
 
 All notable changes to the Superfermion framework.
 
+## [Unreleased]
+
+Committed after the `v0.1.25` tag, so it is in the tree but not in any published
+artifact. Everything here is covered by `tests/domain/test_v0125_fixes.py`, the
+`sf-cat` Rust tests, `tests/unit/test_cat_density_matrix.py`, and
+`tests/unit/test_cat_vs_qiskit.py` (which compares every `cat` lane against
+Qiskit and skips when Qiskit is absent).
+
+### Fixed
+
+- **`sf.cat` density matrix**: the `mode` docstring said `density_matrix` "is not implemented and
+  raises `ValueError`". It is implemented and exact — `simulate()` returns a `rho` matching
+  Qiskit's `DensityMatrix` bit for bit (max abs diff `0.0` on a 4-qubit circuit) — and it is the
+  only lane that can carry a `Reset` after use or an unread mid-circuit measurement. The
+  docstring now describes it, and names the one refusal that is real: `sample()` on a
+  density-matrix handle.
+- **Density-matrix read-out**: `State.numpy()` flattens row-major, but the helper in
+  `tests/unit/test_cat_density_matrix.py` reshaped it F-order, which returns `rho.T`. Every state
+  in that file was real, where the two coincide, so a transposed `rho` passed all twelve tests. The
+  helper is C-order now, and a new test pins a complex off-diagonal that a transpose cannot fake.
+- **`cat.sample()` refusal**: the error said `plan is not a stabilizer plan`, which does not say
+  which mode the handle holds. It now names it (`compiled in 'density_matrix' mode`).
+- **Seeding**: adjacent integer seeds produced correlated shot streams, because Monte Carlo
+  paths advanced the generator with `seed.wrapping_add(index)`. All five sites (`sf-ir` DAG
+  sampling ×2, MPS, stabilizer, `sf-cat` Pauli-frame sampling) now mix through splitmix64
+  (`mix_seed`), so neighbouring seeds share no structure. **Counts for a given seed therefore
+  differ from 0.1.25** — a golden histogram pinned to one seed needs re-recording; a
+  seed-averaged result does not. `sf-cat` is pinned by `adjacent_seeds_do_not_share_blocks`, which
+  compares whole 64-shot blocks of packed keys (exact, not a correlation threshold): under the old
+  code the second block of seed `s` was byte-identical to the first block of seed `s + 1`.
+- **FCIDUMP**: the default integral notation is now detected instead of assumed. Explicit
+  `NOTATION=` wins, then a PySCF header fingerprint, then the standard. Reading a chemist-notation
+  file with the previous default silently mis-assigned every two-electron integral. A
+  physicist-labelled file written with `annotate=False` no longer carries PySCF's writer
+  fingerprint, so it re-reads as physicist instead of as a transposed chemist file.
+- **BP+OSD**: `osd_order` is honoured. It was accepted and then ignored, so OSD ran with a
+  fixed order regardless of the argument; the search now enumerates the free variables and is
+  exhaustive once `osd_order >= n_qubits - rank(H)` *and* the coset fits the
+  `_OSD_MAX_CANDIDATES` budget (`n_free <= 17`). Past that budget the result is the lightest
+  pattern found, not the lightest that exists.
+- **AVAS**: the active-space size is the requested count, projected onto PySCF's `minao`
+  minimal basis rather than the working basis, which over-returned orbitals.
+- **XYZ**: parsing accepts blank lines and trailing comments and raises a located error instead
+  of failing obscurely; SCF reports its converged flag truthfully instead of always `True`.
+- **AEGISS**: the entropy refinement no longer raises when every orbital falls below the
+  threshold. It warns and returns the unrefined AVAS space with `refinement_applied=False`,
+  which is what the default threshold did to water with the O target.
+- **MPS `bond_dim`**: values below 1 are refused with a `ValueError`. `bond_dim=0` used to be
+  accepted and sample the uniform distribution — the QR cap becomes `min(0, rank) = 0` — and a
+  negative value surfaced as pyo3's `OverflowError` instead of naming the argument.
+
+### Added
+
+- **LICENSE** is now the verbatim Apache-2.0 text with the copyright lines filled in, the same
+  shape Qiskit ships; the previous file was a paraphrase, which is why GitHub reported
+  `NOASSERTION`. A `NOTICE` file carries the section 4(d) attribution, and both are packaged
+  through `license-files`.
+- **`scripts/release_notes.py`** renders a GitHub Release body from this changelog, falling back
+  to a labelled commit list for versions the changelog predates.
+
+### Docs
+
+- **README / getting-started**: the wheel matrix now lists the tags PyPI actually publishes, and
+  a new section states what a `pip install` does not provide — CUDA (the `gpu` Cargo feature is
+  off by default and is not in any wheel), the crates.io crates (workspace members, unpublished),
+  and free-threaded CPython (no limited API before 3.15, so 3.14t installs from source).
+
 ## [0.1.25] - 2026-11-05
 
 Correctness work across QEC, error mitigation, gradients, chemistry, algorithms, the

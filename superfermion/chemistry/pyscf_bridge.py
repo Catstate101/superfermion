@@ -36,6 +36,8 @@ Environment notes
 
 from __future__ import annotations
 
+import re
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -332,6 +334,15 @@ class MolecularData:
     # selection (AVAS) can run without rebuilding the molecule in PySCF.
     _ao_overlap: Optional[np.ndarray] = field(default=None, repr=False)
     ao_labels: Optional[Tuple[str, ...]] = None
+    # AVAS targets live in PySCF's `minao` basis, not in the working basis:
+    # `minao_ao_labels` names those functions, `_minao_cross` is the
+    # (n_minao, n_ao) overlap against the working basis and `_minao_overlap`
+    # the (n_minao, n_minao) metric.  Keeping them makes AVAS reproduce
+    # PySCF's selection on any working basis, including ones with polarization
+    # functions the minimal basis does not have.
+    minao_ao_labels: Optional[Tuple[str, ...]] = None
+    _minao_cross: Optional[np.ndarray] = field(default=None, repr=False)
+    _minao_overlap: Optional[np.ndarray] = field(default=None, repr=False)
     # Set by chemistry.avas: projector eigenvalues, selected counts and the MO
     # transformation that produced this object.
     avas_info: Optional[Dict[str, Any]] = None
@@ -361,6 +372,14 @@ class MolecularData:
     mo_irreps: Optional[Tuple[str, ...]] = None
     # Whether the two-electron integrals came from density fitting.
     density_fit: bool = False
+    # Whether the SCF that produced these integrals converged to a stationary
+    # point.  `run_pyscf` also warns when it did not; this is the queryable
+    # form, so a script can branch on it instead of parsing a warning.
+    converged: bool = True
+    # Notation `read_fcidump` used for the two-electron labels: "physicist"
+    # (FCIDUMP standard) or "chemist" (PySCF's writer).  None when the
+    # integrals did not come from an FCIDUMP file.
+    fcidump_notation: Optional[str] = None
     # General (unrestricted) spin-orbital integrals, in the interleaved layout
     # P = 2p + s that everything else in this package uses.  Present only for a
     # UHF reference, where alpha and beta spatial orbitals differ and the
@@ -1456,6 +1475,132 @@ def molecule_from_geometry(
     return mol
 
 
+#: Element symbols an XYZ atom line may start with.
+_XYZ_SYMBOL_RE = re.compile(r"[A-Za-z]{1,3}")
+
+
+def parse_xyz_text(
+    text: str,
+    *,
+    source: str = "<xyz string>",
+) -> Tuple[str, str]:
+    """Parse XYZ text into ``(title, "symbol x y z; ...")``.
+
+    An XYZ file is four things: the atom count on line 1, a title on line 2,
+    one ``symbol x y z`` line per atom, and nothing else that matters.  The
+    previous reader assumed that layout without checking it -- it took
+    ``lines[1]`` as the title and everything from ``lines[2]`` on as atoms --
+    so a blank title produced a nameless molecule, a wrong count was never
+    noticed, an extra leading header silently became an atom, and the failure
+    surfaced later as a PySCF parse error with no line number in it.
+
+    Everything here is validated against the declared count, and every
+    complaint names the line and quotes it.
+
+    Args:
+        text: Contents of an XYZ file.
+        source: Name used in error and warning messages (usually the path).
+
+    Returns:
+        ``(title, geometry)`` where ``geometry`` is the ``"; "``-joined form
+        :func:`molecule_from_geometry` expects.  Atom coordinates keep the
+        precision they had in the file.
+
+    Raises:
+        ValueError: for an empty file, a first line that is not an atom count,
+            a file shorter than its declared count, or an atom line that is
+            not ``symbol x y z``.
+
+    Warns:
+        UserWarning: when the file holds more atom lines than it declares (a
+            multi-frame trajectory, or trailing garbage).  Only the first
+            frame is read; saying so is cheaper than guessing.
+    """
+    lines = [line.rstrip("\r\n") for line in text.splitlines()]
+    # Tolerate leading blank lines, which some exporters emit and no reader
+    # should punish.  Only leading ones: the count has to be findable.
+    while lines and not lines[0].strip():
+        lines.pop(0)
+
+    if not lines:
+        raise ValueError(
+            f"{source}: the file is empty; an XYZ file starts with the "
+            "number of atoms"
+        )
+
+    header = lines[0].strip()
+    try:
+        n_atoms = int(header)
+    except ValueError:
+        raise ValueError(
+            f"{source}: line 1 of an XYZ file must be the atom count, but it "
+            f"reads {header[:60]!r}. XYZ is: line 1 = number of atoms, "
+            "line 2 = free-text title, then one 'symbol x y z' per atom. If "
+            "this file is a MOL/PDB/coordinate table, convert it first."
+        ) from None
+    if n_atoms < 1:
+        raise ValueError(
+            f"{source}: the atom count on line 1 is {n_atoms}; it must be at "
+            "least 1"
+        )
+
+    if len(lines) < 2:
+        raise ValueError(
+            f"{source}: declares {n_atoms} atom(s) but the file ends before "
+            "the title line XYZ puts on line 2"
+        )
+    title = lines[1].strip()
+
+    body = [
+        (number, line)
+        for number, line in enumerate(lines[2:], start=3)
+        if line.strip()
+    ]
+    if len(body) < n_atoms:
+        raise ValueError(
+            f"{source}: the header declares {n_atoms} atom(s) but only "
+            f"{len(body)} non-blank line(s) follow the title"
+        )
+
+    atoms: List[str] = []
+    for number, line in body[:n_atoms]:
+        fields = line.split()
+        if len(fields) < 4:
+            raise ValueError(
+                f"{source}:{number}: expected 'symbol x y z', got "
+                f"{line.strip()!r}"
+            )
+        symbol = fields[0]
+        if _XYZ_SYMBOL_RE.fullmatch(symbol) is None:
+            raise ValueError(
+                f"{source}:{number}: {symbol!r} is not an element symbol; "
+                f"the line reads {line.strip()!r}"
+            )
+        try:
+            [float(value) for value in fields[1:4]]
+        except ValueError:
+            raise ValueError(
+                f"{source}:{number}: the coordinates of {symbol!r} are not "
+                f"numbers: {line.strip()!r}"
+            ) from None
+        # Extended XYZ puts partial charges, forces or velocities after the
+        # coordinates.  PySCF's atom string has no field for them, and
+        # quietly handing them over made PySCF reject the whole geometry.
+        atoms.append(" ".join(fields[:4]))
+
+    extra = body[n_atoms:]
+    if extra:
+        warnings.warn(
+            f"{source}: {len(extra)} line(s) follow the {n_atoms} declared "
+            f"atom(s) (first at line {extra[0][0]}); only the first frame "
+            "is read",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    return title, "; ".join(atoms)
+
+
 def molecule_from_xyz(
     xyz_path: str,
     basis: str = "sto-3g",
@@ -1476,21 +1621,26 @@ def molecule_from_xyz(
         scf: Reference choice; see :func:`molecule_from_geometry`.
         density_fit: Use the density-fitted ERIs.
         symmetry: Detect the point group and label the MO irreps.
-    """
-    with open(xyz_path, "r") as f:
-        xyz_content = f.read()
 
-    # Parse standard XYZ format
-    lines = xyz_content.strip().split("\n")
-    name = lines[1].strip() if len(lines) > 1 else "molecule"
-    geometry = "; ".join(line.strip() for line in lines[2:] if line.strip())
+    Raises:
+        OSError: when the file cannot be read.
+        ValueError: when the contents are not a valid XYZ file; the message
+            names the offending line.  See :func:`parse_xyz_text`.
+    """
+    # ``errors="replace"`` rather than a UnicodeDecodeError: XYZ files written
+    # on Windows are frequently cp1252 (a title with a degree sign, say) and a
+    # mangled title is harmless next to a refused geometry.
+    with open(xyz_path, "r", encoding="utf-8", errors="replace") as handle:
+        xyz_content = handle.read()
+
+    title, geometry = parse_xyz_text(xyz_content, source=str(xyz_path))
 
     return molecule_from_geometry(
         geometry,
         basis,
         charge,
         spin,
-        name,
+        title or None,
         scf=scf,
         density_fit=density_fit,
         symmetry=symmetry,
@@ -1540,6 +1690,30 @@ def _formula_from_atoms(atoms: List[str]) -> str:
         for element in order
         if element in counts
     )
+
+
+def _minao_projection_data(
+    mol_obj: Any,
+) -> tuple:
+    """Minimal-basis labels plus the overlaps AVAS needs (PySCF layout).
+
+    PySCF's ``mcscf.avas`` projects the ``minao`` functions, not the working
+    basis, so a target such as ``["O"]`` means the five valence functions of
+    oxygen regardless of whether the calculation runs in STO-3G or cc-pVTZ.
+    Reproducing that needs the minao-vs-working overlap and the minao metric.
+    """
+    from pyscf import gto
+
+    pmol = mol_obj.copy()
+    pmol.atom = mol_obj._atom
+    pmol.unit = "B"
+    pmol.symmetry = False
+    pmol.basis = "minao"
+    pmol.verbose = 0
+    pmol.build(False, False)
+    cross = np.asarray(gto.intor_cross("int1e_ovlp", pmol, mol_obj), dtype=float)
+    overlap = np.asarray(pmol.intor_symmetric("int1e_ovlp"), dtype=float)
+    return tuple(pmol.ao_labels()), cross, overlap
 
 
 def _compute_pyscf(
@@ -1621,8 +1795,43 @@ def _compute_pyscf(
     mol.scf_method = method.upper() if method != "auto" else "RHF"
     mol.density_fit = bool(density_fit)
     mol.hf_energy = float(mf.e_tot)
+    mol.converged = bool(mf.converged)
     mol._ao_overlap = np.asarray(mol_obj.intor("int1e_ovlp"), dtype=float)
     mol.ao_labels = tuple(mol_obj.ao_labels())
+    # AVAS projects the *minimal* basis functions, not the working basis: the
+    # AVAS paper and PySCF's mcscf.avas both pick the target set in `minao`, so
+    # the selection does not change when polarization functions are added.
+    # Two overlap pieces are enough to reproduce that projection, and they are
+    # cheap next to the SCF that just ran.
+    #
+    # The minao build can fail for elements it carries no functions for (heavy
+    # atoms, ECP centres).  AVAS is optional but the SCF is not, so that failure
+    # must not take the molecule down with it: leaving the three fields None
+    # makes `projector_metric` fall back to the working basis, which is what
+    # every caller got before this projection existed.
+    try:
+        (
+            mol.minao_ao_labels,
+            mol._minao_cross,
+            mol._minao_overlap,
+        ) = _minao_projection_data(mol_obj)
+    except Exception as exc:  # noqa: BLE001 - optional stage, SCF already succeeded
+        # This function imports `warnings` locally further down, which makes the
+        # name local throughout; import here as well rather than reading the
+        # module-level one.
+        import warnings
+
+        mol.minao_ao_labels = None
+        mol._minao_cross = None
+        mol._minao_overlap = None
+        warnings.warn(
+            f"could not build the minao basis needed by AVAS "
+            f"({type(exc).__name__}: {exc}).  The SCF finished and its integrals "
+            "are valid; avas_active_space will project the working basis "
+            "instead, which over-selects once polarization functions are present.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # spin_square() is a method, not an attribute, and returns a tuple for the
     # classes whose <S^2> needs an S^+S^- correction.

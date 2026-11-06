@@ -27,6 +27,7 @@ from superfermion._fixes import (
 from superfermion._limits import (
     guard_state_allocation,
     limit_from_kwargs,
+    validate_bond_dim,
 )
 
 # Above this qubit count the exact |c|² probability table costs more to
@@ -577,7 +578,7 @@ class RustDevice:
         dag = self._prepare_dag(circuit)
         bond_dim = None
         if self._method == "mps":
-            bond_dim = int(kwargs.get("bond_dim", 64))
+            bond_dim = validate_bond_dim(kwargs.get("bond_dim", 64))
             counts = dag.simulate_dynamic_mps(shots, seed, bond_dim)
         else:
             counts = dag.simulate_dynamic(shots, seed)
@@ -690,7 +691,7 @@ class RustDevice:
                 MPS state handle — then sample via shots>0 runs or call
                 ``result.state.numpy()`` once. Recommended for n > 20.
         """
-        bond_dim = kwargs.get("bond_dim", 64)
+        bond_dim = validate_bond_dim(kwargs.get("bond_dim", 64))
         seed = kwargs.get("seed", 42)
         densify = kwargs.get("densify", True)
         dag = circuit.to_ir()

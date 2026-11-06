@@ -214,3 +214,40 @@ def guard_state_allocation(
         "return_statevector=False to sample without keeping the state, or "
         "raise the ceiling with max_state_gib= / SF_STATE_MEMORY_LIMIT_GIB."
     )
+
+
+def validate_bond_dim(bond_dim: Any) -> int:
+    """Return ``bond_dim`` as an ``int``, refusing values the MPS cannot use.
+
+    ``bond_dim=0`` is not "no truncation".  The QR step caps the bond at
+    ``min(bond_dim, rank) = 0``, so every bond collapses to a single state and
+    the sampler draws from the uniform distribution instead of the circuit:
+    measured on a GHZ-3 circuit, ``bond_dim=0`` returned all eight bitstrings
+    at ~25 counts each out of 200 shots, where the state has weight on two.
+    A negative value never reaches the truncation logic at all -- pyo3 raises
+    ``OverflowError: can't convert negative int to unsigned``, which names
+    nothing the caller can act on.
+
+    Args:
+        bond_dim: Caller-supplied bond dimension.
+
+    Returns:
+        The value as an ``int``.
+
+    Raises:
+        ValueError: when the value is not an integer, or is below 1.
+    """
+    try:
+        value = int(bond_dim)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"bond_dim must be a positive integer, got {bond_dim!r}"
+        ) from None
+    if value < 1:
+        raise ValueError(
+            f"bond_dim must be at least 1, got {value}.  A bond dimension of "
+            "0 collapses every MPS bond to a single state, so the result is "
+            "sampled from the uniform distribution rather than from the "
+            "circuit; negative values are not convertible to a bond index."
+        )
+    return value

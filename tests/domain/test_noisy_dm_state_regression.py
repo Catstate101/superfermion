@@ -335,10 +335,14 @@ class TestProxySurface:
         # Native handle: grad/qfim are unsupported on the density-matrix
         # method (Rust MethodError); non-state args fail pyo3 conversion.
         dag = c.to_ir()
-        with pytest.raises(MethodError):
-            st.grad(OBS_Z, dag, {})
-        with pytest.raises(MethodError):
-            st.qfim(dag, {})
+        # The guard warns that the dag carries no symbolic parameters before it
+        # raises; both are part of the contract this test pins.
+        with pytest.warns(UserWarning, match="no symbolic parameters"):
+            with pytest.raises(MethodError):
+                st.grad(OBS_Z, dag, {})
+        with pytest.warns(UserWarning, match="no symbolic parameters"):
+            with pytest.raises(MethodError):
+                st.qfim(dag, {})
         with pytest.raises(TypeError):
             st.fidelity(object())
 

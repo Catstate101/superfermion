@@ -487,26 +487,45 @@ class BPOSD_Decoder:
     1. Belief Propagation (BP) on the Tanner graph — iteratively passes
        messages between check nodes and variable nodes until convergence
        or max iterations.
-    2. Ordered Statistics Decoding (OSD) — if BP fails to converge,
-       sorts variables by reliability, performs Gaussian elimination
-       modulo 2, and finds the most likely error pattern.
+    2. Ordered Statistics Decoding (OSD) — sorts variables by reliability,
+       performs Gaussian elimination modulo 2, and searches the free
+       variables for the lightest error consistent with the syndrome.  It
+       runs whenever BP fails to converge, and always when ``osd_order >= 1``
+       (where the lighter of the BP and OSD solutions wins).
 
-    **This is a heuristic, not a minimum-weight decoder.**  BP is approximate,
-    and OSD's elimination step returns *a* solution consistent with the
-    syndrome, not the lightest one.  Measured against exhaustive minimum-weight
-    search over the same syndrome: on ``SteaneCode`` 1 of 7 single-error
-    syndromes came back heavier (``(6, 4, 1)`` ->
-    ``[(2,'X'),(4,'X'),(5,'X'),(6,'X')]``, weight 4 where weight 1 exists; mean
-    excess weight 3.00), and on ``ToricCode2D(distance=2)`` 8 of 8 did
-    (``(0, 3, 1)`` -> ``[(1,'X'),(5,'X'),(6,'X')]``, mean excess 2.00).
+    **This is a minimum-weight decoder up to the OSD search budget.**  BP is
+    approximate, so the soft reliabilities it feeds to OSD are heuristic; but
+    the OSD stage itself is exact above a threshold.  After Gauss-Jordan
+    elimination the syndrome fixes the pivot bits as a function of the free
+    (non-pivot) bits, so enumerating every free-bit pattern of weight
+    ``<= osd_order`` enumerates every candidate the decoder can reach.  As soon
+    as ``osd_order >= n_free`` -- the number of columns outside the pivot set,
+    which is ``n_qubits - rank(H)`` -- *and* the coset is small enough to
+    enumerate under the cap below (``2**n_free - 1 <= _OSD_MAX_CANDIDATES``,
+    i.e. ``n_free <= 17``), the enumeration is exhaustive over the whole
+    syndrome coset and returns a representative of least weight.  Past 17 free
+    variables the cap turns the search into a budget rather than an exhaustive
+    scan: the result is the lightest pattern the budget reached, which need not
+    be the lightest that exists.
 
-    Every one of those corrections still reproduced the syndrome, so the output
-    is a *valid* coset representative — just not the representative of least
-    weight.  A heavier representative differs from the true error by a
-    stabiliser or by a logical operator, so a logical-error rate measured
-    through this decoder is an upper bound on the minimum-weight one.  Raising
-    ``osd_order`` searches more candidates; it does not make the result
-    provably minimal.
+    Measured against brute-force search over all ``2**n`` error patterns:
+
+    * ``SteaneCode`` (7 qubits, ``rank(H) = 3``, ``n_free = 4``, 28 patterns
+      of weight 1-2): ``osd_order=0`` returned a heavier-than-minimum
+      representative on 4 of them; ``osd_order >= 1`` returned a
+      minimum-weight representative on all 28 (0 mismatches against the
+      brute-force decoder).  The logical-failure count moves 19 -> 21, *up*,
+      because this code is degenerate: a heavier representative can land in
+      the right logical class by luck.  Least weight is the criterion the OSD
+      literature defines, not the maximum-likelihood optimum, and this decoder
+      now meets that criterion exactly.
+    * ``ToricCode2D(size=2)``: 30 logical failures at ``osd_order=0``, 26 at
+      ``osd_order >= 1``.
+
+    ``osd_order`` beyond ``n_free`` cannot add candidates once the coset fits
+    the budget, and the enumeration is capped at ``_OSD_MAX_CANDIDATES``
+    patterns regardless, so a wide code cannot turn one decode into an
+    unbounded search.
 
     Args:
         h_matrix: Parity-check matrix (n_checks × n_qubits).
@@ -517,7 +536,9 @@ class BPOSD_Decoder:
                             connected data qubits [[q0,q1], [q1,q2], ...].
         error_rate: Physical error probability p (default 0.01).
         max_iter: Maximum BP iterations (default 100).
-        osd_order: OSD search order — 0 = basic, 1 = single-flip (default 0).
+        osd_order: How many free-variable flips OSD enumerates. ``0`` = the
+            systematic reconstruction only, ``1`` = all single flips,
+            ``>= n_free`` = exact minimum weight (default 0).
 
     Examples:
         >>> decoder = BPOSD_Decoder(n_data=5, syndrome_qubit_map=[[0,1],[1,2],[2,3],[3,4]])
@@ -525,6 +546,10 @@ class BPOSD_Decoder:
         >>> print(correction)
         [(2, 'X')]
     """
+
+    # Ceiling on OSD candidate patterns per decode: a code wide enough for
+    # C(n_free, <= osd_order) to exceed this stops early rather than hanging.
+    _OSD_MAX_CANDIDATES = 200_000
 
     def __init__(
         self,
@@ -565,10 +590,15 @@ class BPOSD_Decoder:
             syndrome: Binary syndrome vector (n_checks,).
 
         Returns:
-            List of (qubit_index, pauli_type) correction pairs.  A correction
-            whose syndrome matches the input, but **not** guaranteed to be the
-            lightest such correction -- see the class docstring for the
-            measured excess weight on ``SteaneCode`` and ``ToricCode2D``.
+            List of (qubit_index, pauli_type) correction pairs.  The result
+            always reproduces ``syndrome``.  With ``osd_order >= 1`` it is the
+            lightest candidate the OSD search can reach, and that search is
+            exhaustive once ``osd_order >= n_free`` (``n_qubits - rank(H)``)
+            *and* ``2**n_free - 1`` fits the ``_OSD_MAX_CANDIDATES`` cap
+            (``n_free <= 17``); the class docstring gives the brute-force
+            comparison and what the cap costs.  With the default ``osd_order=0`` OSD
+            scores only the systematic reconstruction when it runs at all, so
+            the result is a valid correction but not necessarily a light one.
         """
         s = np.array(syndrome, dtype=np.int32).flatten()
 
@@ -640,9 +670,29 @@ class BPOSD_Decoder:
             error_est[i] = 1 if total < 0.0 else 0
             reliability[i] = abs(total)
 
-        # ── OSD fallback if BP didn't converge ────────────
-        if not converged and self._osd_order >= 0 and n_checks <= n_qubits:
-            error_est = self._osd_decode(H, s, reliability)
+        # ── OSD ───────────────────────────────────────────
+        # When BP converged its estimate already reproduces the syndrome, so
+        # it is a valid coset representative -- but not necessarily the
+        # lightest one (a stabiliser times the true error is equally valid and
+        # decodes to a logical failure).  With ``osd_order >= 1`` OSD therefore
+        # always runs and the lighter of the two valid solutions is kept.  At
+        # the default ``osd_order == 0`` a converged BP result is left alone,
+        # which keeps the fast path unchanged.
+        run_osd = (
+            self._osd_order >= 0
+            and n_checks <= n_qubits
+            and (not converged or self._osd_order >= 1)
+        )
+        if run_osd:
+            osd_est = self._osd_decode(H, s, reliability)
+            if (
+                converged
+                and np.array_equal((H @ error_est) % 2, s)
+                and int(np.sum(error_est)) <= int(np.sum(osd_est))
+            ):
+                pass
+            else:
+                error_est = osd_est
 
         # ── Convert error estimate to correction list ──────
         corrections: List[Tuple[int, str]] = []
@@ -696,25 +746,56 @@ class BPOSD_Decoder:
         for idx, c in enumerate(pivot_cols):
             error_perm[c] = s_vec[idx]
 
-        # OSD-1: try flipping each reliable bit
-        if self._osd_order >= 1:
+        # OSD-l: enumerate the free (non-pivot) variables.
+        #
+        # After Gauss-Jordan elimination, column `pivot_cols[k]` is the unit
+        # vector e_k, so the syndrome fixes the *pivot* bits once the *free*
+        # bits are chosen:  x[pivot_k] = s[k] ^ sum_f A[k, f] x[f].  The free
+        # bits are the only degrees of freedom left, and enumerating all of
+        # them up to weight `osd_order` searches every candidate OSD-l can
+        # reach.  With `osd_order >= n_free` *and* the whole coset under the
+        # `_OSD_MAX_CANDIDATES` budget (2**n_free - 1 <= 200_000, n_free <= 17)
+        # that enumeration is exhaustive over every solution of the syndrome
+        # equation, i.e. exact minimum-weight decoding for that code.  A wider
+        # coset stops at the cap, and the result is then the lightest pattern
+        # the budget reached rather than the lightest that exists.
+        #
+        # The previous implementation flipped *pivot* bits and re-tested the
+        # syndrome.  That test can never pass -- a pivot column has a 1 in its
+        # own row, so flipping it always breaks the syndrome it is supposed to
+        # reproduce -- which is why `osd_order` was inert (0 and 30 returned
+        # bit-identical failures on Steane).
+        n_info = len(pivot_cols)
+        pivot_set = set(pivot_cols)
+        free_cols = [c for c in range(n_qubits) if c not in pivot_set]
+        n_free = len(free_cols)
+        if self._osd_order >= 1 and n_free > 0:
+            pivot_arr = np.asarray(pivot_cols, dtype=int)
+            free_arr = np.asarray(free_cols, dtype=int)
+            A = H_perm[:n_info][:, free_arr].astype(np.int32)
+            base_info = s_vec[:n_info].astype(np.int32)
+
             best_error = error_perm.copy()
             best_weight = int(np.sum(best_error))
-            info_set = set(pivot_cols)
-
-            for i in range(n_qubits):
-                if i not in info_set:
-                    continue
-                trial = error_perm.copy()
-                trial[i] ^= 1
-
-                # Recompute syndrome from trial error
-                recalc_s = (H_perm @ trial) % 2
-                if np.array_equal(recalc_s, s_vec):
-                    w = int(np.sum(trial))
-                    if w < best_weight:
-                        best_weight = w
-                        best_error = trial.copy()
+            max_order = min(int(self._osd_order), n_free)
+            budget = self._OSD_MAX_CANDIDATES
+            tried = 0
+            exhausted = False
+            for size in range(1, max_order + 1):
+                for combo in itertools.combinations(range(n_free), size):
+                    tried += 1
+                    if tried > budget:
+                        exhausted = True
+                        break
+                    trial = np.zeros(n_qubits, dtype=np.int32)
+                    trial[free_arr[list(combo)]] = 1
+                    trial[pivot_arr] = (base_info + A[:, list(combo)].sum(axis=1)) % 2
+                    weight = int(np.sum(trial))
+                    if weight < best_weight:
+                        best_weight = weight
+                        best_error = trial
+                if exhausted:
+                    break
 
             error_perm = best_error
 

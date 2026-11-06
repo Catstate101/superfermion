@@ -128,13 +128,27 @@ class TestVarianceRecoversWithVaryingSeeds:
         assert abs(samples.mean() - 100.0) < 3.0
         assert 0.75 < samples.std() / 7.071 < 1.25
 
-    def test_stabilizer_spread_is_pinned_below_binomial(self):
-        """Known, measured, and NOT fixed here.
+    def test_stabilizer_spread_matches_the_binomial_prediction(self):
+        """The spread over seeds is binomial; the *correlation* was the defect.
 
-        The Rust tableau sampler has a variance deficit (~0.71x binomial at
-        200 seeds, chi2 ~142 on 199 df).  A Rust-side fix would move this
-        ratio toward 1.0, which the upper bound allows; a gross regression
-        is what this pins.
+        The Rust tableau sampler drew block ``b`` of seed ``s`` from
+        ``seed_from_u64(s + b)``, so seeds ``s`` and ``s+1`` shared 62 of the
+        63 blocks a run consumes.  Measured on this build (GHZ-6, 200 shots,
+        200 seeds):
+
+        ===========  ==============  ==============
+        sampler      spread ratio    adjacent corr
+        ===========  ==============  ==============
+        stabilizer   0.928 -> 0.961  +0.949 -> -0.052
+        mps          0.819 -> 0.986  +0.998 -> +0.076
+        ===========  ==============  ==============
+
+        Both old ratios sit inside the band below, so this test guards the
+        magnitude and not the defect: what fails on the pre-fix engine is the
+        adjacent-seed correlation, pinned in
+        ``test_v0125_fixes.TestSeedsDoNotShareRandomness``.  ``mps`` carried a
+        separate symptom -- a mean of 90.7 instead of 100 -- that the same
+        sweep shows and the mean assertion here guards on ``stabilizer``.
         """
         circuit = _ghz()
         samples = np.array(
@@ -147,4 +161,4 @@ class TestVarianceRecoversWithVaryingSeeds:
         )
         ratio = samples.std() / 7.071
         assert abs(samples.mean() - 100.0) < 4.0
-        assert 0.55 < ratio < 1.05
+        assert 0.80 < ratio < 1.20

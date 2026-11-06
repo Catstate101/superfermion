@@ -89,4 +89,6 @@ class TestTorchFeatures:
             circuit, params={"x0": 0.5, "w0": 0.4}
         ).numpy()
         want = float(np.abs(sv[0]) ** 2 - np.abs(sv[1]) ** 2)
-        assert abs(float(out) - want) < 1e-9
+        # detach(): the comparison is about the value, and converting a tensor
+        # that still carries grad makes torch emit its own UserWarning.
+        assert abs(float(out.detach()) - want) < 1e-9

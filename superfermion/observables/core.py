@@ -15,6 +15,8 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+from superfermion._limits import validate_bond_dim
+
 _PAULI_ENCODE = {"I": 0, "X": 1, "Y": 2, "Z": 3}
 
 try:
@@ -144,6 +146,7 @@ def mps_expval(
     """
     from superfermion.qml.gradient.adjoint import _observable_to_rust_terms
 
+    bond_dim = validate_bond_dim(bond_dim)
     if params is not None:
         circuit = circuit.bind(params)
     n = circuit.n_qubits
@@ -248,6 +251,7 @@ def mps_todense(circuit, bond_dim: int = 64, params=None) -> "np.ndarray":
         )
     import numpy as _np
 
+    bond_dim = validate_bond_dim(bond_dim)
     if params is not None:
         circuit = circuit.bind(params)
     _step = _get_numba_site_step()

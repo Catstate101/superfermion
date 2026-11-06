@@ -33,11 +33,24 @@ orbitals the same way rather than dropping their potential on the floor.
 
 The refinement can only restrict the space, so ``E_pruned >= E_avas``
 necessarily; a large gap is the signal that the entropy threshold is too
-aggressive, and it is reported rather than hidden.
+aggressive, and it is reported rather than hidden.  At the extreme -- every
+orbital below the threshold -- the space would be empty, which is not an
+answer; the AVAS space is returned unrefined with ``refinement_applied=False``
+and a ``UserWarning`` rather than an exception.
+
+That fallback is not hypothetical.  With the minao-based AVAS selection PySCF
+uses, ``target_atoms=['O']`` on water at the default ``avas_threshold=0.2``
+selects all five occupied orbitals and no virtual, in STO-3G, 6-31G and
+cc-pVDZ alike: the window is a single determinant, ``E_avas`` *is* the HF
+energy (measured -74.93058470 Ha for water/STO-3G), every ``s_i`` is zero, and
+the entropy stage has nothing to keep.  Dropping to ``avas_threshold=0.1``
+widens the same selection to (10e, 7o) in STO-3G and (10e, 6o) in cc-pVDZ,
+which is where correlation -- and therefore something to prune -- appears.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -164,11 +177,21 @@ def aegiss_selection(
         energies), ``entropies``, ``occupations``, ``mutual_information``,
         ``kept``, ``pruned``, ``active_indices`` (original MO basis),
         ``n_active_electrons``, ``n_active``, ``n_core`` and ``avas`` (the raw
-        AVAS info).
+        AVAS info).  ``refinement_applied`` is ``False`` when the entropy
+        filter would have removed every orbital and was skipped.
 
     Raises:
         ValueError: when neither a target set nor ``active_space`` is given,
-            or when no orbital survives the refinement.
+            or when ``active_space`` does not fit the molecule.
+
+    Warns:
+        UserWarning: when ``entropy_threshold`` prunes the whole space.  The
+            AVAS space is then returned unchanged rather than raising: the
+            threshold, or the window it is applied to, carries too little
+            correlation to keep anything (the default 0.05 does it for
+            water/STO-3G with the O target, whose window is a single
+            determinant), and a caller asking for a space should get one it
+            can inspect, not a failure.
     """
     if active_space is not None:
         basis = mol
@@ -249,11 +272,30 @@ def aegiss_selection(
 
     kept = [i for i in range(n_orb) if not removable[i]]
     pruned = [i for i in range(n_orb) if removable[i]]
+    refinement_applied = True
     if not kept:
-        raise ValueError(
-            f"every orbital was pruned at entropy_threshold="
-            f"{entropy_threshold}; lower the threshold"
+        # The refinement only ever removes orbitals, so a threshold that
+        # removes *all* of them has nothing left to hand to the solver.  That
+        # is a property of the threshold, not of the molecule: the AVAS stage
+        # already produced a valid space.  Falling back to it keeps the
+        # workflow usable (water/STO-3G with the O target prunes all five
+        # orbitals at the default 0.05) while saying out loud that the
+        # entropy filter was skipped, so `refinement_applied` and the warning
+        # carry the information a caller would otherwise lose.
+        warnings.warn(
+            f"the entropy refinement at entropy_threshold={entropy_threshold} "
+            f"would remove all {n_orb} orbitals of the AVAS space (largest "
+            f"s_i = {float(np.max(s_i)):.4g}); returning the unrefined AVAS "
+            "space (refinement_applied=False) instead of failing. A window "
+            "with entropies this small carries no correlation to keep -- "
+            "widen it with a lower avas_threshold, not a lower "
+            "entropy_threshold.",
+            UserWarning,
+            stacklevel=2,
         )
+        kept = list(range(n_orb))
+        pruned = []
+        refinement_applied = False
 
     # Removing a doubly occupied orbital takes its two electrons with it; an
     # empty one takes none. Anything else was excluded above.
@@ -288,6 +330,10 @@ def aegiss_selection(
         "mutual_information": i_ij,
         "kept": kept,
         "pruned": pruned,
+        # False when the entropy filter would have emptied the space and was
+        # therefore skipped; the caller then gets the plain AVAS result and
+        # ``energy_pruned == energy_avas``.
+        "refinement_applied": refinement_applied,
         "active_indices": tuple(perm[window[i]] for i in kept),
         "n_active_electrons": int(n_elec_pruned),
         "n_active": len(kept),

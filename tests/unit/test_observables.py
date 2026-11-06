@@ -269,8 +269,9 @@ class TestMpsTruncationReporting:
     def test_asking_for_the_report_does_not_change_the_value(self):
         c = self._circuit()
         obs = "Z" + "I" * 7
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
+        # bond_dim=4 truncates, so the call warns; asking for the report must
+        # still return the same value as running with the warning suppressed.
+        with pytest.warns(RuntimeWarning, match="truncated"):
             reported = mps_expval(c, obs, bond_dim=4)
         plain = mps_expval(c, obs, bond_dim=4, warn_truncation=False)
         assert reported == plain
