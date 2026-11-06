@@ -68,6 +68,18 @@ Qiskit and skips when Qiskit is absent).
   a new section states what a `pip install` does not provide — CUDA (the `gpu` Cargo feature is
   off by default and is not in any wheel), the crates.io crates (workspace members, unpublished),
   and free-threaded CPython (no limited API before 3.15, so 3.14t installs from source).
+- **Contributor path**: `CONTRIBUTING.md` pointed at `github.com/superfermion/superfermion` (not
+  this repository), required Rust 1.75 (the README and CI need 1.85), told contributors to run
+  maturin inside `crates/sf-bindings` — which drops the root `pyproject.toml` that declares
+  `module-name`, `manifest-path` and `python-source` — and ended with a hand `cp` of the built
+  library into `superfermion/`, the exact move that lets a stale ABI-tagged module win the import.
+  It now uses the wheel CI builds, prints the extension path to verify which engine loaded, and
+  links `AGENTS.md` instead of a `docs/conventions.md` that does not exist. `AGENTS.md` carried the
+  same broken build block.
+- **Docs site**: new [Contributing page](https://superfermion.com/docs/contributing) carrying the
+  setup, the six gates CI runs, the import-shadowing trap above, and what a PR is expected to
+  contain; `Pull requests` is in the site header, and the README gained a Contributing section
+  linking the guide, the page, the compare view and the issue tracker.
 
 ## [0.1.25] - 2026-11-05
 

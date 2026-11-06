@@ -1,0 +1,135 @@
+---
+title: "Contributing"
+description: "Build the Rust engine, run the same gates CI runs, and open a pull request."
+---
+
+Superfermion is a fluent Python API over a Rust simulation core. Most real changes
+touch both sides, so the loop below builds the extension first and then tests the
+Python that calls into it.
+
+<Cards>
+  <Card title="Open a pull request" href="https://github.com/Catstate101/superfermion/compare">
+    Compare your branch against `main` and open it. One topic per PR.
+  </Card>
+  <Card title="Report a bug" href="https://github.com/Catstate101/superfermion/issues/new">
+    A minimal reproduction beats a description: the circuit, the call, the output.
+  </Card>
+  <Card title="Read the open PRs" href="https://github.com/Catstate101/superfermion/pulls">
+    Reviewing is the fastest way to learn which invariants the suite protects.
+  </Card>
+</Cards>
+
+## Where the code is
+
+| Path | What lives there |
+|---|---|
+| `superfermion/` | The Python API: circuits, execution, gradients, chemistry, QEC, ML layers |
+| `crates/` | Eight Rust crates — `sf-ir`, `sf-cat`, `sf-qec`, `sf-pulse`, `sf-router`, `sf-compiler`, `sf-gpu`, `sf-bindings` |
+| `superfermion/_sf_core.*` | The compiled extension module; the only thing Rust hands to users |
+| `tests/` | The Python suite, one directory per layer |
+| `website/` | This site (Next.js + Fumadocs) |
+
+## Setup
+
+Rust 1.85+ ([rustup](https://rustup.rs/)) and Python 3.10+ — the wheels are
+`abi3-py310`, so anything older cannot load the extension.
+
+```bash
+git clone https://github.com/Catstate101/superfermion.git
+cd superfermion
+
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+pip install -e ".[dev]"
+pip install maturin
+```
+
+## Build the engine
+
+Run maturin from the **repository root**, never from inside a crate. The root
+`pyproject.toml` is what declares `module-name = "superfermion._sf_core"`,
+`manifest-path = "crates/sf-bindings/Cargo.toml"`, `python-source = "."` and the
+`abi3-py310` feature; maturin started inside `crates/sf-bindings` has none of
+that context.
+
+```bash
+# what CI builds and tests
+maturin build --release --out dist
+pip install --force-reinstall dist/*.whl
+```
+
+```bash
+# convenience: build straight into the active virtualenv
+maturin develop --release
+```
+
+Rebuild after **any** Rust change — a green suite against a stale extension
+proves nothing about the code you just edited.
+
+## Test the engine you think you are testing
+
+The suite imports a compiled artifact, so "green" only means "this binary is
+correct". A leftover copy in the package directory can win the import without
+any complaint. That is not hypothetical: on Windows the import machinery tries
+these suffixes in order,
+
+```text
+['.cp313-win_amd64.pyd', '.pyd']
+```
+
+so an ABI-tagged `_sf_core.cp313-win_amd64.pyd` from an earlier build shadows a
+fresh plain `_sf_core.pyd` sitting next to it. Every test passes, against the
+wrong file.
+
+Two rules follow:
+
+- Do not hand-copy the built artifact into `superfermion/`. `maturin develop`
+  and the wheel both install it where the import will find it; a copy only
+  adds a second candidate to the race.
+- Print the path before you trust a run:
+
+```bash
+python -c "import superfermion._sf_core as m; print(m.__file__)"
+python -c "import superfermion as sf; print(sf.__version__, sf.__file__)"
+```
+
+The path must be the artifact you just built. The pytest header prints the
+engine path and its sha256 on every run for the same reason.
+
+## What CI runs
+
+| Gate | Command |
+|---|---|
+| Rust formatting | `cargo fmt --check --all` |
+| Rust lints | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Rust tests | `cargo test --workspace` |
+| Python lints | `ruff check superfermion/ scripts/ --select=F --ignore=F401,F821` |
+| Python whitespace | `ruff check superfermion/ tests/ scripts/ --preview --select=W391` |
+| Python tests | `python -m pytest tests/ -q --timeout=120` |
+
+All six have to be clean. The Python suite is about 1,600 tests and takes under
+three minutes; a few geometry/chemistry paths are skipped when PySCF is absent.
+
+## What a pull request should contain
+
+- **A test that fails before the fix.** For a deterministic bug that means an
+  exact assertion on the wrong value you observed, not a statistical one — a
+  tolerance wide enough to pass on the broken build is not a regression test.
+  When the fix is statistical (a sampler, a shot budget), assert the property
+  the bug violated, and say in the PR what you measured and what you did not.
+- **A `CHANGELOG.md` entry** under `[Unreleased]`, naming the symptom a user
+  would have seen rather than the internal change.
+- **Docs in the same PR**: the docstring, and the page on this site that would
+  otherwise be wrong. A stale "not implemented" note costs more than a missing
+  feature.
+- **One topic per PR.** Unrelated refactors make a fix impossible to review.
+
+Numbers in a PR body need their conditions: hardware, versions, shot count, and
+whether the comparison is like-for-like. "Faster" without the machine it was
+measured on is not a measurement.
+
+## Questions
+
+Open an issue, or ask in the pull request itself — a draft PR with a failing
+test is a fine way to start a design discussion.
