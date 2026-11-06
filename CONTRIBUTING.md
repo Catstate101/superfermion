@@ -73,7 +73,7 @@ Every run prints the engine path and its sha256 in the pytest header, and
 `scripts/grad_gate.py` asserts it:
 
 ```bash
-python scripts/grad_gate.py --expect-version 0.1.25 \
+python scripts/grad_gate.py --expect-version 0.1.26 \
     --expect-engine-root "$PWD/superfermion"
 ```
 
