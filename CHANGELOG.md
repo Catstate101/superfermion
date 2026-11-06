@@ -2,13 +2,15 @@
 
 All notable changes to the Superfermion framework.
 
-## [Unreleased]
+## [0.1.26] - 2026-11-06
 
-Committed after the `v0.1.25` tag, so it is in the tree but not in any published
-artifact. Everything here is covered by `tests/domain/test_v0125_fixes.py`, the
+Correctness work across circuit sampling, `sf.cat`, chemistry (FCIDUMP notation, AVAS, AEGISS,
+XYZ), QEC decoding, the MPS bond cap, and the licensing and documentation corrections that
+follow from them. The sampler change is the one that moves numbers: counts for a fixed seed
+differ from 0.1.25. Everything below is covered by `tests/domain/test_v0125_fixes.py`, the
 `sf-cat` Rust tests, `tests/unit/test_cat_density_matrix.py`, and
-`tests/unit/test_cat_vs_qiskit.py` (which compares every `cat` lane against
-Qiskit and skips when Qiskit is absent).
+`tests/unit/test_cat_vs_qiskit.py` (which compares every `cat` lane against Qiskit and skips
+when Qiskit is absent).
 
 ### Fixed
 
