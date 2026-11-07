@@ -319,7 +319,8 @@ jobs:
       - name: Run the pySCF-backed chemistry tests
         run: |
           python -m pytest tests/domain/test_chemistry.py \
-            tests/domain/test_chemistry_parity.py -q --timeout=300
+            tests/domain/test_chemistry_parity.py \
+            tests/domain/test_v0125_fixes.py -q --timeout=300
 
   # ── Free-threaded CPython ────────────────────────────────
   # A limited API does not exist for free-threaded builds before 3.15, so no
