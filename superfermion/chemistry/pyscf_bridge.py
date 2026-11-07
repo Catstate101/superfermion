@@ -334,15 +334,6 @@ class MolecularData:
     # selection (AVAS) can run without rebuilding the molecule in PySCF.
     _ao_overlap: Optional[np.ndarray] = field(default=None, repr=False)
     ao_labels: Optional[Tuple[str, ...]] = None
-    # AVAS targets live in PySCF's `minao` basis, not in the working basis:
-    # `minao_ao_labels` names those functions, `_minao_cross` is the
-    # (n_minao, n_ao) overlap against the working basis and `_minao_overlap`
-    # the (n_minao, n_minao) metric.  Keeping them makes AVAS reproduce
-    # PySCF's selection on any working basis, including ones with polarization
-    # functions the minimal basis does not have.
-    minao_ao_labels: Optional[Tuple[str, ...]] = None
-    _minao_cross: Optional[np.ndarray] = field(default=None, repr=False)
-    _minao_overlap: Optional[np.ndarray] = field(default=None, repr=False)
     # Set by chemistry.avas: projector eigenvalues, selected counts and the MO
     # transformation that produced this object.
     avas_info: Optional[Dict[str, Any]] = None
@@ -372,6 +363,24 @@ class MolecularData:
     mo_irreps: Optional[Tuple[str, ...]] = None
     # Whether the two-electron integrals came from density fitting.
     density_fit: bool = False
+    # General (unrestricted) spin-orbital integrals, in the interleaved layout
+    # P = 2p + s that everything else in this package uses.  Present only for a
+    # UHF reference, where alpha and beta spatial orbitals differ and the
+    # spin-free `h1`/`h2` pair cannot describe the operator.
+    h1_spin_orbitals: Optional[np.ndarray] = field(default=None, repr=False)
+    h2_spin_orbitals: Optional[np.ndarray] = field(default=None, repr=False)
+
+    # ---- fields added in 0.1.26, appended to keep the positional order of
+    # everything above identical to 0.1.25 -----------------------------------
+    # AVAS targets live in PySCF's `minao` basis, not in the working basis:
+    # `minao_ao_labels` names those functions, `_minao_cross` is the
+    # (n_minao, n_ao) overlap against the working basis and `_minao_overlap`
+    # the (n_minao, n_minao) metric.  Keeping them makes AVAS reproduce
+    # PySCF's selection on any working basis, including ones with polarization
+    # functions the minimal basis does not have.
+    minao_ao_labels: Optional[Tuple[str, ...]] = None
+    _minao_cross: Optional[np.ndarray] = field(default=None, repr=False)
+    _minao_overlap: Optional[np.ndarray] = field(default=None, repr=False)
     # Whether the SCF that produced these integrals converged to a stationary
     # point.  `run_pyscf` also warns when it did not; this is the queryable
     # form, so a script can branch on it instead of parsing a warning.
@@ -380,12 +389,6 @@ class MolecularData:
     # (FCIDUMP standard) or "chemist" (PySCF's writer).  None when the
     # integrals did not come from an FCIDUMP file.
     fcidump_notation: Optional[str] = None
-    # General (unrestricted) spin-orbital integrals, in the interleaved layout
-    # P = 2p + s that everything else in this package uses.  Present only for a
-    # UHF reference, where alpha and beta spatial orbitals differ and the
-    # spin-free `h1`/`h2` pair cannot describe the operator.
-    h1_spin_orbitals: Optional[np.ndarray] = field(default=None, repr=False)
-    h2_spin_orbitals: Optional[np.ndarray] = field(default=None, repr=False)
 
     @property
     def n_qubits(self) -> int:
