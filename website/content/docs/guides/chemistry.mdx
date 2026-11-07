@@ -74,6 +74,28 @@ four-index sum costs. Benzene/6-31G — `nao = 66`, 132 spin orbitals — builds
 reports `E_HF = -230.6235 Ha`. Before 0.1.21 the same call used that naive sum and did not
 finish in practice. What stays expensive at that size is the next step, not this one.
 
+### Integrals you already have
+
+A saved FCIDUMP enters at the same point, so only this step changes:
+
+```python
+from superfermion.chemistry.fcidump import read_fcidump
+
+mol = read_fcidump("water.fcidump")
+print(mol.n_orbitals, mol.n_electrons, mol.nuclear_repulsion)
+print(mol.h2[0, 0, 0, 0])  # (00|00), always chemist order
+```
+
+`mol.h2` is converted to **chemist** order whatever the file held, and `mol.fcidump_notation` records what was decided. The file does not say which convention it used, and the two are not interchangeable: read a physicist-ordered file as chemist and every Coulomb integral `J_ij = (ii|jj)` is replaced by the exchange integral `K_ij = (ij|ij)`.
+
+`notation="auto"` (the default) decides in this order:
+
+1. a `NOTATION=` header, if the writer left one — 0.1.26 and later do;
+2. PySCF's header fingerprint, `&FCI NORB=…,NELEC=…,MS2=…,`, which selects chemist;
+3. otherwise the FCIDUMP standard, physicist.
+
+Superfermion 0.1.25 and earlier wrote physicist-ordered data with PySCF's header, so rule 2 cannot tell such a file from a PySCF one and now warns instead of guessing silently. The guess is not a rounding error: on a water/STO-3G file written by 0.1.25, FCI from the auto-detected order is −124.099 Ha against −75.013 Ha for the correct one. Pass `notation="physicist"` for anything written by 0.1.25 or earlier; passing a convention explicitly also silences the warning. PySCF reads Superfermion's files either way, treating `NOTATION=` as an extra namelist key it ignores.
+
 ## Step 2 — Choose the active space
 
 Four selectors ship. They answer different questions, so they are separate functions rather than one switch.
