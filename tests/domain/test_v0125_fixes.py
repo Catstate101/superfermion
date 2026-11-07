@@ -159,7 +159,10 @@ class TestFcidumpNotationDetection:
         assert notation == "chemist"
         assert "PySCF" in reason
 
-        mol = read_fcidump_text(_PYSCF_TEXT)
+        # The header is also what Superfermion <= 0.1.25 wrote, so the read has
+        # to say so instead of choosing silently.
+        with pytest.warns(UserWarning, match="0.1.25"):
+            mol = read_fcidump_text(_PYSCF_TEXT)
         assert mol.fcidump_notation == "chemist"
         assert mol.h2[1, 1, 0, 0] == pytest.approx(0.5)
         assert mol.h2[1, 0, 1, 0] == pytest.approx(0.0)
@@ -176,7 +179,8 @@ class TestFcidumpNotationDetection:
         assert notation == "chemist"
         assert "PySCF" in reason
 
-        mol = read_fcidump_text(_SMALL_VALUE_TEXT)
+        with pytest.warns(UserWarning, match="0.1.25"):
+            mol = read_fcidump_text(_SMALL_VALUE_TEXT)
         assert mol.h2[1, 1, 0, 0] == pytest.approx(_SMALL_VALUE)
 
     def test_a_file_with_no_writer_evidence_defaults_to_the_standard(self):
@@ -233,16 +237,23 @@ class TestFcidumpNotationDetection:
             assert "NOTATION" not in text
             detected, _reason = detect_fcidump_notation(text)
             assert detected == notation, f"{notation} file detected as {detected}"
-            back = read_fcidump_text(text)
+            if notation == "chemist":
+                # A chemist file without the marker is indistinguishable from a
+                # legacy Superfermion file, so the warning is expected here.
+                with pytest.warns(UserWarning, match="0.1.25"):
+                    back = read_fcidump_text(text)
+            else:
+                back = read_fcidump_text(text)
             assert back.fcidump_notation == notation
             assert np.allclose(back.h2, h2)
             assert np.allclose(back.h1, h1)
 
     def test_the_notation_argument_is_case_insensitive(self):
         """"AUTO" used to be rejected by an error saying "auto" is valid."""
-        assert read_fcidump_text(_PYSCF_TEXT, notation="AUTO").fcidump_notation == (
-            "chemist"
-        )
+        with pytest.warns(UserWarning, match="0.1.25"):
+            assert read_fcidump_text(
+                _PYSCF_TEXT, notation="AUTO"
+            ).fcidump_notation == ("chemist")
         assert read_fcidump_text(
             _PYSCF_TEXT, notation="Physicist"
         ).fcidump_notation == "physicist"
@@ -253,6 +264,48 @@ class TestFcidumpNotationDetection:
         text = _PYSCF_TEXT.replace("  ISYM=1,\n", "  ISYM=1,\n  NOTATION=chemist,\n")
         with pytest.warns(UserWarning, match="marked 'chemist'"):
             read_fcidump_text(text, notation="physicist")
+
+
+class TestLegacySuperfermionFiles:
+    """A file written by <= 0.1.25 carries PySCF's header, not PySCF's order.
+
+    ``_PYSCF_TEXT`` above is byte-identical to what the 0.1.25 wheel emitted for
+    ``write_fcidump_text((h1, h2, 0.0), n_elec=2)`` -- measured by writing the
+    file with the 0.1.25 wheel and diffing the header.  Detecting ``chemist``
+    from that header is right for PySCF and wrong for those files, and nothing
+    in the text distinguishes them, so the reader must warn and the caller must
+    be able to force the reading.
+    """
+
+    def test_the_legacy_header_warns_and_names_the_override(self):
+        with pytest.warns(UserWarning, match="notation='physicist'"):
+            mol = read_fcidump_text(_PYSCF_TEXT)
+        assert mol.fcidump_notation == "chemist"
+        # The auto reading transposes the two-electron block.
+        assert mol.h2[1, 1, 0, 0] == pytest.approx(0.5)
+        assert mol.h2[1, 0, 1, 0] == pytest.approx(0.0)
+
+    def test_forcing_physicist_recovers_the_written_values(self):
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            mol = read_fcidump_text(_PYSCF_TEXT, notation="physicist")
+        assert [str(w.message) for w in caught] == []
+        assert mol.fcidump_notation == "physicist"
+        assert mol.h2[1, 1, 0, 0] == pytest.approx(0.0)
+        assert mol.h2[1, 0, 1, 0] == pytest.approx(0.5)
+
+    def test_a_marked_file_does_not_warn(self):
+        import warnings as _warnings
+
+        text = _PYSCF_TEXT.replace("  ISYM=1,\n", "  ISYM=1,\n  NOTATION=physicist,\n")
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            mol = read_fcidump_text(text)
+        assert [str(w.message) for w in caught] == []
+        assert mol.fcidump_notation == "physicist"
+        assert mol.h2[1, 0, 1, 0] == pytest.approx(0.5)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -587,3 +640,16 @@ class TestBondDimensionIsValidated:
 
         with pytest.raises(ValueError, match="bond_dim must be at least 1"):
             mps_expval(_ghz3(), "ZZZ", bond_dim=0)
+
+    def test_fractional_and_bool_values_are_refused(self):
+        """``int()`` would truncate 3.7 to 3 and accept ``True`` as 1."""
+        from superfermion._limits import validate_bond_dim
+
+        with pytest.raises(ValueError, match="whole number"):
+            validate_bond_dim(3.7)
+        with pytest.raises(ValueError, match="bool is an int subclass"):
+            validate_bond_dim(True)
+        # An integral float, string or numpy scalar still names a real cap.
+        assert validate_bond_dim(64.0) == 64
+        assert validate_bond_dim(np.float64(64.0)) == 64
+        assert validate_bond_dim(np.int64(16)) == 16
