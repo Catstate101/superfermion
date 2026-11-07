@@ -235,8 +235,26 @@ def validate_bond_dim(bond_dim: Any) -> int:
         The value as an ``int``.
 
     Raises:
-        ValueError: when the value is not an integer, or is below 1.
+        ValueError: when the value is not a whole number, is a ``bool``, or is
+            below 1.
     """
+    if isinstance(bond_dim, bool):
+        # ``True`` is an int subclass, so int() would accept it as 1 and
+        # silently produce a maximally truncated state.
+        raise ValueError(
+            f"bond_dim must be a positive integer, got {bond_dim!r}; bool is an "
+            "int subclass but names no truncation"
+        )
+    try:
+        as_float = float(bond_dim)
+    except (TypeError, ValueError, OverflowError):
+        as_float = None
+    if as_float is not None and as_float != int(as_float):
+        # int(3.7) == 3 would drop the fraction without saying so.
+        raise ValueError(
+            f"bond_dim must be a whole number, got {bond_dim!r}; the fractional "
+            "part would be dropped silently"
+        )
     try:
         value = int(bond_dim)
     except (TypeError, ValueError):

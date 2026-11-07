@@ -2,6 +2,47 @@
 
 All notable changes to the Superfermion framework.
 
+## [0.1.27] - 2026-11-07
+
+Follow-up to 0.1.26, whose FCIDUMP change broke a case it could not see: 0.1.26
+moved the reader's default from `notation="physicist"` to `notation="auto"`
+and keyed the new heuristic on PySCF's writer header — the same header
+Superfermion 0.1.25 and earlier printed for **physicist**-ordered data. A file
+from one of those releases was therefore read as `"chemist"` and transposed,
+silently. Measured with a water/STO-3G FCIDUMP written by the 0.1.25 wheel and
+scored by PySCF's FCI solver: -75.012647 Ha correct against -124.099089 Ha after
+upgrading to 0.1.26, error -49.086 Ha, no warning, `max |h2 - h2_true| = 1.089`.
+
+The fix is a warning rather than a different guess, because the two files are
+byte-identical in the header and neither ordering can be recognised from the
+numbers: the reader now says what it assumed and how to override it.
+
+### Fixed
+
+- **FCIDUMP files from <= 0.1.25**: `read_fcidump`/`read_fcidump_text` warn when
+  `notation="auto"` picks `"chemist"` from the PySCF header fingerprint, naming
+  `notation="physicist"` as the override. Forcing it reproduces the written
+  values exactly (measured error `0.0` Ha on the water file above). A file that
+  carries `NOTATION=` never warns, and files written by 0.1.26 or later are
+  unaffected.
+- **`bond_dim` validation**: 0.1.26 refused values below 1 but still truncated a
+  fractional float (`3.7` became `3`) and accepted `True` as `1`. Both are
+  refused with a message that names the value; integral floats, numeric strings
+  and numpy scalars still pass.
+- **`MolecularData` field order**: the five fields added in 0.1.26 were inserted
+  mid-signature, which shifted `h1_spin_orbitals`/`h2_spin_orbitals` for
+  positional callers. They follow those two now, so every field that existed in
+  0.1.25 keeps its position. Keyword construction is unaffected.
+
+### Tests / CI
+
+- `tests/domain/test_v0125_fixes.py` runs in the `chemistry-platforms` job, the
+  only lane with PySCF installed. Until now the AVAS, AEGISS, SCF-flag and XYZ
+  regressions skipped in every lane.
+- `TestLegacySuperfermionFiles` pins the legacy-header warning, the override and
+  the two no-warning cases; `TestBondDimensionIsValidated` pins the fractional
+  and bool refusals.
+
 ## [0.1.26] - 2026-11-06
 
 Correctness work across circuit sampling, `sf.cat`, chemistry (FCIDUMP notation, AVAS, AEGISS,
