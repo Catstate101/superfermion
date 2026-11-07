@@ -38,6 +38,16 @@ ambiguous: no amount of symmetry inspection can tell the two apart.
    PySCF actually wrote;
 3. otherwise the FCIDUMP standard labelling, ``"physicist"``.
 
+The fingerprint is not exclusive to PySCF.  Superfermion 0.1.25 and earlier
+wrote the same ``&FCI NORB=%4d,NELEC=%2d,MS2=%d,`` header for physicist-ordered
+output, so one of those files is read as ``"chemist"`` and comes back
+transposed.  Rule 2 therefore runs with a warning naming the override: pass
+``notation="physicist"`` for a pre-0.1.26 Superfermion file.  The default writer
+annotates every file since 0.1.26, so rule 1 answers for those and no warning is
+raised; ``annotate=False`` opts out of the marker, and a chemist file written
+that way is still recognised by the fingerprint (with the same warning, since
+the text alone cannot rule out a legacy file).
+
 Exponent fields are deliberately *not* part of the fingerprint.  The obvious
 idea -- "PySCF prints ``%.16g``, so a Fortran ``E``/``D`` field means some other
 writer" -- is wrong on real files: on water/STO-3G, 128 of the 547 lines of a
@@ -105,6 +115,12 @@ def detect_fcidump_notation(text: str) -> Tuple[str, str]:
 
     ``notation`` is ``"physicist"`` or ``"chemist"``; ``reason`` is a short
     human-readable explanation of the evidence used.
+
+    ``"chemist"`` from the fingerprint means *PySCF-shaped*, not *known to be
+    PySCF*: Superfermion 0.1.25 and earlier emitted the same header for
+    physicist-ordered data.  :func:`read_fcidump_text` warns when it acts on
+    that rule alone, because a pre-0.1.26 Superfermion file needs
+    ``notation="physicist"`` to be read correctly.
     """
     match = _NOTATION_RE.search(text)
     if match is not None:
@@ -213,7 +229,21 @@ def read_fcidump_text(
             f"notation must be 'physicist', 'chemist' or 'auto', got {notation!r}"
         )
     if notation == "auto":
-        notation, _reason = detect_fcidump_notation(text)
+        notation, reason = detect_fcidump_notation(text)
+        if reason.startswith("PySCF writer fingerprint"):
+            # The header alone cannot separate a PySCF file from a Superfermion
+            # <= 0.1.25 file: both printed the same &FCI line, and the second
+            # one holds physicist-ordered data that this rule transposes.
+            warnings.warn(
+                "read as 'chemist' from PySCF's header fingerprint, which "
+                "Superfermion 0.1.25 and earlier also wrote for "
+                "physicist-ordered files.  If this file came from an older "
+                "Superfermion, pass notation='physicist'; otherwise every "
+                "two-electron integral is transposed.  Pass notation "
+                "explicitly to silence this warning.",
+                UserWarning,
+                stacklevel=2,
+            )
     else:
         marked, mark_reason = detect_fcidump_notation(text)
         if mark_reason.startswith("NOTATION") and marked != notation:
