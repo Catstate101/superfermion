@@ -316,10 +316,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,chemistry]"
+      # Qiskit Nature is the second FCIDUMP referee in
+      # tests/domain/test_fcidump_interop.py. It stays out of the published
+      # extras because the package never imports it, and it is installed on one
+      # row only so the platform matrix keeps testing the extra itself. The
+      # range covers 0.7.2 and 0.8.0, which were both measured: their
+      # ``to_file`` writes the same ``&FCI NORB=%4d,NELEC=%4d,MS2=%4d,`` header,
+      # so the detector's Qiskit fingerprint holds across the two.
+      - name: Install the Qiskit Nature referee (Linux row)
+        if: matrix.os == 'ubuntu-latest'
+        run: pip install "qiskit-nature>=0.7,<0.9"
       - name: Run the pySCF-backed chemistry tests
         run: |
           python -m pytest tests/domain/test_chemistry.py \
             tests/domain/test_chemistry_parity.py \
+            tests/domain/test_fcidump_interop.py \
             tests/domain/test_v0125_fixes.py -q --timeout=300
 
   # ── Free-threaded CPython ────────────────────────────────
