@@ -18,6 +18,19 @@ include = [
     # the release history travels with the source.
     { path = "CHANGELOG.md", format = "sdist" },
 ]
+# Maturin sweeps `python-source`, so anything a developer leaves beside the
+# package rides into the release. A local rebuild keeps `_sf_core.pyd.pre_*_bak`
+# and `_sf_core.cp313-*.pyd.stale_bak` backups here, and this tree also holds a
+# scratch accuracy log: the 0.1.28 wheel built with them present came out at
+# 50.9 MB against ~10 MB, carrying 17 stale copies of the extension module.
+# Excluded by pattern rather than by name so the next backup cannot leak either.
+exclude = [
+    { path = "superfermion/*bak", format = ["sdist", "wheel"] },
+    { path = "superfermion/_sci_accuracy_log.txt", format = ["sdist", "wheel"] },
+    # The compiled core belongs to the wheel; an sdist carrying the 9 MB Windows
+    # binary is dead weight on every other platform.
+    { path = "superfermion/*.pyd", format = "sdist" },
+]
 
 [project]
 name = "superfermion"
