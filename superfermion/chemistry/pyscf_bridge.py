@@ -385,10 +385,19 @@ class MolecularData:
     # point.  `run_pyscf` also warns when it did not; this is the queryable
     # form, so a script can branch on it instead of parsing a warning.
     converged: bool = True
-    # Notation `read_fcidump` used for the two-electron labels: "physicist"
-    # (FCIDUMP standard) or "chemist" (PySCF's writer).  None when the
-    # integrals did not come from an FCIDUMP file.
+    # Notation `read_fcidump` used for the two-electron labels: "chemist",
+    # which every writer that could be documented emits, or "physicist", the
+    # layout the format description implies.  None when the integrals did not
+    # come from an FCIDUMP file.
     fcidump_notation: Optional[str] = None
+    # Symmetry metadata carried by the same header and kept so that a
+    # read -> write round trip does not drop it: `fcidump_orbsym` is the D2h
+    # irrep of each orbital (the 0..8 labels the `ORBSYM` line lists, where 0
+    # means the symmetry is not well defined) and
+    # `fcidump_isym` the irrep of the state.  They are labels only -- the
+    # integrals do not depend on them -- but a symmetry-adapted workflow does.
+    fcidump_orbsym: Optional[Tuple[int, ...]] = None
+    fcidump_isym: int = 1
 
     @property
     def n_qubits(self) -> int:

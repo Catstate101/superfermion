@@ -9,44 +9,59 @@ without repeating the SCF.
 Notation
 --------
 This is the one thing that silently ruins an import.  ``MolecularData.h2`` is
-stored in **chemist** order, ``h2[p, q, r, s] == (pq|rs)``.  The FCIDUMP
-standard labels integrals in **physicist** order, ``<ij|kl>``, which is the
-same tensor with the middle indices swapped::
+stored in **chemist** order, ``h2[p, q, r, s] == (pq|rs)``.  The labelling that
+FCIDUMP files are actually written with is **also** chemist, although the
+original description of the format is usually read as physicist ``<ij|kl>``;
+the two are the same tensor with the middle indices swapped::
 
     (pq|rs)_chemist  ==  <pr|qs>_physicist
 
-so reading a standard file needs ``h2[p,q,r,s] = raw[p,r,s,q]`` and not the
-identity.  Getting this backwards still produces a Hermitian operator with
-plausible energies; only a comparison against an independent solver catches
-it.  Both conventions are therefore selectable.
+so reading one labelling as the other needs ``h2[p,q,r,s] = raw[p,r,s,q]`` and
+not the identity.  Getting this backwards still produces a Hermitian operator
+with plausible energies; only a comparison against an independent solver
+catches it.  Both conventions are therefore selectable.
 
-PySCF's ``tools.fcidump`` writer does **not** follow the standard: it writes
-the chemist tensor ``(ij|kl)`` under the labels ``i j k l``, which a standard
-reader interprets as ``<ij|kl> = (ik|jl)``.  Reading a PySCF-written LiH file
-with the standard labelling gives -10.543477 Ha instead of the correct
--7.880982 Ha, with no error.  Because both layouts use the same canonical
-index ordering (``i>=j``, ``k>=l``, ``ij>=kl``), the numbers themselves are
-ambiguous: no amount of symmetry inspection can tell the two apart.
+Every writer that could be checked writes chemist.  PySCF's ``tools.fcidump``
+writes the chemist tensor ``(ij|kl)`` under the labels ``i j k l``, and so does
+Qiskit Nature; NECI's manual states that "the FCIDUMP file that transfers the
+electronic integrals from Molpro or Molcas to NECI assumes the chemist's
+notation", HANDE's format notes say the Coulomb integrals are chemist's, and
+HORTON and orbkit (whose format "is adopted from Molpro") do the same.  Reading
+a PySCF-written LiH file with the physicist labelling gives -10.543477 Ha
+instead of the correct -7.880982 Ha, with no error; in the other direction a
+physicist-labelled H2/STO-3G file gives -1.967656 Ha in Qiskit Nature against
+-1.137306 Ha for the chemist one.  :func:`write_fcidump_text` therefore
+*labels* chemist by default, so its output lands in either reader untransposed;
+pass ``notation="physicist"`` for the literal standard, which is what a Molpro
+``{FCI,DUMP=}`` file is *not*.
 
 ``notation="auto"`` (the default) therefore decides from the file:
 
 1. a ``NOTATION=`` variable in the ``&FCI`` header wins -- every file written
    by :func:`write_fcidump` carries one, so round trips are exact;
-2. otherwise a file matching PySCF's writer fingerprint -- its header, which
-   ``write_head`` emits as ``' &FCI NORB=%4d,NELEC=%2d,MS2=%d,'`` with the
-   commas butted against the values -- is read as ``"chemist"``, which is what
-   PySCF actually wrote;
-3. otherwise the FCIDUMP standard labelling, ``"physicist"``.
+2. otherwise Superfermion 0.1.26-0.1.27's physicist header -- those two
+   releases put a space before the closing comma (``MS2=0 ,``) so that their
+   physicist output would stay out of PySCF's fingerprint -- is read as
+   ``"physicist"``;
+3. otherwise Qiskit Nature's ``to_file`` header or PySCF's writer fingerprint
+   (``' &FCI NORB=%4d,NELEC=%2d,MS2=%d,'``, commas butted against the values)
+   is read as ``"chemist"``, which is what those writers wrote;
+4. otherwise ``"chemist"``, the convention shared by every writer above.  A
+   file with no marker and no known fingerprint used to fall back to the
+   physicist labelling, which transposed Molpro, Molcas, Psi4, HORTON and
+   orbkit output -- none of which carry a fingerprint -- silently.
 
 The fingerprint is not exclusive to PySCF.  Superfermion 0.1.25 and earlier
-wrote the same ``&FCI NORB=%4d,NELEC=%2d,MS2=%d,`` header for physicist-ordered
-output, so one of those files is read as ``"chemist"`` and comes back
-transposed.  Rule 2 therefore runs with a warning naming the override: pass
-``notation="physicist"`` for a pre-0.1.26 Superfermion file.  The default writer
-annotates every file since 0.1.26, so rule 1 answers for those and no warning is
-raised; ``annotate=False`` opts out of the marker, and a chemist file written
-that way is still recognised by the fingerprint (with the same warning, since
-the text alone cannot rule out a legacy file).
+wrote the same ``&FCI NORB=%4d,NELEC=%2d,MS2=%d,`` header, and the same
+``ORBSYM``/``ISYM`` lines, for physicist-ordered output; measured against
+PySCF 2.14.0 the two headers are byte for byte identical, so no inspection of
+the text can separate them.  Rule 3 therefore runs with a warning naming the
+override: pass ``notation="physicist"`` for a pre-0.1.26 Superfermion file.
+The writer annotates every file, so rule 1 answers for superfermion's own
+output and no warning is raised; ``annotate=False`` opts out of the marker, and
+a chemist file written that way -- the default layout from 0.1.28 -- is still
+recognised by the fingerprint (with the same warning, since the text alone
+cannot rule out a legacy file).
 
 Exponent fields are deliberately *not* part of the fingerprint.  The obvious
 idea -- "PySCF prints ``%.16g``, so a Fortran ``E``/``D`` field means some other
@@ -72,7 +87,7 @@ from __future__ import annotations
 
 import re
 import warnings
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -90,10 +105,11 @@ __all__ = [
 
 _DEFAULT_FLOAT_FORMAT = "%22.16f"
 
-# ``NOTATION=physicist`` inside the &FCI namelist.  Extra namelist variables
-# are skipped by token-scanning readers (PySCF's included), and a file that
-# carries it is read exactly as written, so a PySCF-vs-standard guess is never
-# needed for superfermion's own output.
+# ``NOTATION=physicist`` or ``NOTATION=chemist`` inside the &FCI namelist.
+# Extra namelist variables are skipped by token-scanning readers (PySCF's and
+# Qiskit Nature's included), and a file that carries it is read exactly as
+# written, so a PySCF-vs-standard guess is never needed for superfermion's own
+# output.
 _NOTATION_RE = re.compile(r"\bNOTATION\s*=\s*[\"']?(physicist|chemist)\b", re.IGNORECASE)
 
 # PySCF's ``tools.fcidump.write_head`` emits
@@ -109,6 +125,62 @@ _NOTATION_RE = re.compile(r"\bNOTATION\s*=\s*[\"']?(physicist|chemist)\b", re.IG
 # file that happened to contain a small integral -- which is most of them.
 _PYSCF_HEADER_RE = re.compile(r"&\s*FCI\s+NORB=\s*\d+,NELEC=\s*\d+,MS2=-?\d+,")
 
+# Superfermion 0.1.26 and 0.1.27 wrote physicist output with a space before the
+# closing comma -- ``MS2=0 ,`` -- so that it would drop out of PySCF's
+# fingerprint, and chemist output with PySCF's exact bytes.  Measured from the
+# tagged sources (``header_end = "," if notation == "chemist" else " ,"``).
+# That space is the only thing separating an unannotated physicist file from
+# those two releases from every other writer, so it is matched explicitly:
+# without it those files would now fall through to the chemist default below.
+_SUPERFERMION_PHYSICIST_RE = re.compile(
+    r"&\s*FCI\s+NORB=\s*\d+,NELEC=\s*\d+,MS2=-?\d+\s+,"
+)
+
+# Qiskit Nature's ``FCIDump.to_file`` writes
+# ``f"&FCI NORB={norb:4d},NELEC={nelec:4d},MS2={ms2:4d},"`` -- measured on
+# qiskit-nature 0.7.2.  Three things separate it from PySCF's header: the line
+# starts in column 0 rather than with a space, ``NELEC`` is padded to four
+# columns rather than two, and ``MS2`` is padded rather than bare.  Every field
+# therefore keeps at least one space, which is what the ``+`` below asserts;
+# with ``*`` instead this regex also matched HORTON's unpadded
+# ``&FCI NORB=2,NELEC=2,MS2=0,`` and stole its PySCF-fingerprint warning.
+# It matters because ``to_file`` rebuilds the header from Qiskit's own
+# dataclass and so drops any ``NOTATION=`` marker, leaving a chemist file that
+# carries no marker of its own.
+_QISKIT_HEADER_RE = re.compile(
+    r"^&FCI NORB= +\d+,NELEC= +\d+,MS2= +-?\d+,\s*$", re.MULTILINE
+)
+
+# The three transpositions that generate the integral's eight-fold symmetry.
+# Equality under each of them implies equality under all eight, so these are
+# enough to decide whether a tensor can be described by the canonical quarter
+# that :func:`write_fcidump_text` writes.
+_SYMMETRY_CHECKS: Tuple[Tuple[Tuple[int, int, int, int], str], ...] = (
+    ((1, 0, 2, 3), "(pq|rs) != (qp|rs)"),
+    ((0, 1, 3, 2), "(pq|rs) != (pq|sr)"),
+    ((2, 3, 0, 1), "(pq|rs) != (rs|pq)"),
+)
+
+
+def _symmetry_violations(h2: np.ndarray) -> List[Tuple[str, float]]:
+    """Return ``(description, max deviation)`` for each broken symmetry.
+
+    Walks one leading index at a time so the comparison never materialises a
+    second full ``norb``-to-the-fourth array.
+    """
+    norb = h2.shape[0]
+    violations: List[Tuple[str, float]] = []
+    for order, message in _SYMMETRY_CHECKS:
+        image = h2.transpose(order)
+        deviation = 0.0
+        for i in range(norb):
+            block = np.abs(h2[i] - image[i])
+            if block.size:
+                deviation = max(deviation, float(block.max()))
+        if deviation > 0.0:
+            violations.append((message, deviation))
+    return violations
+
 
 def detect_fcidump_notation(text: str) -> Tuple[str, str]:
     """Return ``(notation, reason)`` for an FCIDUMP body.
@@ -116,8 +188,17 @@ def detect_fcidump_notation(text: str) -> Tuple[str, str]:
     ``notation`` is ``"physicist"`` or ``"chemist"``; ``reason`` is a short
     human-readable explanation of the evidence used.
 
-    ``"chemist"`` from the fingerprint means *PySCF-shaped*, not *known to be
-    PySCF*: Superfermion 0.1.25 and earlier emitted the same header for
+    The default for a file that carries no evidence either way is **chemist**,
+    because that is the convention of every FCIDUMP writer that could be
+    documented: NECI's manual states that "the FCIDUMP file that transfers the
+    electronic integrals from Molpro or Molcas to NECI assumes the chemist's
+    notation", HANDE's format notes say the Coulomb integrals are chemist's,
+    HORTON's manual and orbkit (whose format "is adopted from Molpro") say the
+    same, and PySCF and Qiskit Nature both write it.  Reading an unmarked file
+    as the physicist labelling transposed every one of those by default.
+
+    ``"chemist"`` from the PySCF fingerprint means *PySCF-shaped*, not *known
+    to be PySCF*: Superfermion 0.1.25 and earlier emitted the same header for
     physicist-ordered data.  :func:`read_fcidump_text` warns when it acts on
     that rule alone, because a pre-0.1.26 Superfermion file needs
     ``notation="physicist"`` to be read correctly.
@@ -125,9 +206,16 @@ def detect_fcidump_notation(text: str) -> Tuple[str, str]:
     match = _NOTATION_RE.search(text)
     if match is not None:
         return match.group(1).lower(), "NOTATION= marker in the &FCI header"
+    if _SUPERFERMION_PHYSICIST_RE.search(text):
+        return (
+            "physicist",
+            "Superfermion 0.1.26-0.1.27 physicist header (space before the comma)",
+        )
+    if _QISKIT_HEADER_RE.search(text):
+        return "chemist", "Qiskit Nature writer fingerprint"
     if _PYSCF_HEADER_RE.search(text):
         return "chemist", "PySCF writer fingerprint"
-    return "physicist", "FCIDUMP standard labelling (no writer marker)"
+    return "chemist", "FCIDUMP chemist convention (no writer marker)"
 
 
 def _parse_header(text: str) -> Dict[str, Any]:
@@ -220,8 +308,9 @@ def read_fcidump_text(
     Returns:
         ``MolecularData`` with ``h1``, ``h2`` (chemist), ``nuclear_repulsion``
         set to the FCIDUMP core energy, ``n_orbitals = NORB``,
-        ``n_electrons = NELEC`` and ``fcidump_notation`` set to the
-        convention that was used.
+        ``n_electrons = NELEC``, ``fcidump_notation`` set to the convention
+        that was used, and ``fcidump_orbsym``/``fcidump_isym`` carried over
+        from the header so a write-back does not drop them.
     """
     notation = "auto" if notation is None else str(notation).strip().lower()
     if notation not in ("auto", "physicist", "chemist"):
@@ -257,6 +346,33 @@ def read_fcidump_text(
     norb = int(header["NORB"])
     nelec = int(header["NELEC"])
     ms2 = int(header.get("MS2", header.get("MS", 0)))
+    # Carry the symmetry labels only when they line up with NORB.  A file that
+    # states the wrong count is malformed; dropping the labels there keeps the
+    # write-back working exactly as it did before they were kept at all.
+    orbsym: Optional[Tuple[int, ...]] = None
+    if "ORBSYM" in header:
+        stated = tuple(int(x) for x in header["ORBSYM"])
+        orbsym = stated if len(stated) == norb else None
+        # HANDE's format notes define ``ORBSYM(i) = S + 1`` for the irrep an
+        # orbital spans, with 0 meaning "symmetry not well defined", so 0..8 is
+        # the whole legal range; PySCF's ``to_scf`` raises outright on a
+        # negative label.  Anything outside it is a writer bug or a different
+        # convention, and is worth saying out loud -- but the labels are not
+        # remapped, because PySCF and Molpro order the D2h irreps differently
+        # (``pyscf.tools.fcidump.ORBSYM_MAP``) and guessing which one a file
+        # used is not possible from the text.
+        if orbsym is not None:
+            outside = [label for label in orbsym if not 0 <= label <= 8]
+            if outside:
+                warnings.warn(
+                    f"ORBSYM states {len(outside)} label(s) outside the 0..8 "
+                    f"range the format defines (first: {outside[0]}).  They "
+                    "are carried through verbatim, but a symmetry-adapted "
+                    "reader may reject the file.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+    isym = int(header.get("ISYM", 1))
 
     body = re.sub(r"&FCI.*?&END", "", text, flags=re.IGNORECASE | re.DOTALL)
 
@@ -296,6 +412,8 @@ def read_fcidump_text(
         n_orbitals=norb,
         n_electrons=nelec,
         fcidump_notation=notation,
+        fcidump_orbsym=orbsym,
+        fcidump_isym=isym,
     )
 
 
@@ -313,38 +431,70 @@ def write_fcidump_text(
     n_elec: Optional[int] = None,
     spin: Optional[int] = None,
     orbsym: Optional[Sequence[int]] = None,
-    isym: int = 1,
-    notation: str = "physicist",
+    isym: Optional[int] = None,
+    notation: str = "chemist",
     tol: float = 1e-12,
     float_format: str = _DEFAULT_FLOAT_FORMAT,
     annotate: bool = True,
+    validate: bool = True,
 ) -> str:
     """Serialise integrals to FCIDUMP text.
 
-    Only the canonical entries are written (``i >= j``, ``k >= l``, ``ij >= kl``
-    in *label* order), which is what PySCF and OpenFermion emit, so a reader
-    that keeps only canonical entries reconstructs the full tensor.
+    One record is written per symmetry orbit of the internal chemist tensor,
+    selected on the tensor indices (``i >= j``, ``k >= l``, pair ``kl`` no later
+    than pair ``ij``), and a reader that regenerates the eight-fold symmetry
+    family from each record reconstructs the tensor exactly.  For chemist
+    output those indices are also the labels on disk, matching the record order
+    PySCF's ``symm.pack`` walks; for physicist output the labels are
+    ``i k j l``, so the records are canonical in the tensor rather than in
+    label space.
 
     Args:
         spec: ``MolecularData`` or ``(h1, h2, ecore)``.  ``h2`` must be in
             chemist order, matching ``MolecularData.h2``.
         n_elec: Electron count; defaults to ``spec.n_electrons``.
         spin: 2S written as ``MS2``; defaults to ``spec.spin``.
-        orbsym: Orbital symmetry labels; defaults to all-ones.
-        isym: State symmetry label.
-        notation: How to label the entries on disk.  ``"physicist"`` (default,
-            the standard) writes ``<pr|qs>`` for the stored ``(pq|rs)``.
+        orbsym: Orbital symmetry labels, one D2h irrep (1..8) per orbital.
+            Defaults to the ``ORBSYM`` line the file carried when ``spec`` is
+            a :class:`MolecularData` that :func:`read_fcidump` produced, and
+            to all-ones otherwise.  The length must equal the orbital count.
+        isym: State symmetry label.  Defaults to the value read from the same
+            file, or 1.
+        notation: How to label the entries on disk.  ``"chemist"`` (the
+            default since 0.1.28) writes ``(pq|rs)`` as ``p q r s``, the
+            layout PySCF's ``tools.fcidump`` and Qiskit Nature's ``FCIDump``
+            read and write; ``"physicist"`` writes ``<pr|qs>`` under the same
+            labels, which is the FCIDUMP standard those two readers do not
+            implement.  A physicist-labelled file handed to them comes back
+            transposed and silent: on water/STO-3G that is -124.099 Ha against
+            -75.013 Ha.
         tol: Skip entries below this magnitude.
         float_format: ``printf`` format for the integral value.
         annotate: Record the convention as a ``NOTATION=`` variable in the
             ``&FCI`` header, so :func:`read_fcidump` reproduces the tensor
-            exactly instead of inferring the layout.  Token-scanning readers
-            (PySCF's included) skip unknown header variables.  With
-            ``annotate=False`` there is no marker, and a physicist-labelled
-            file then carries a header that is *not* byte-identical to
-            PySCF's (one space before the final comma), so
-            :func:`detect_fcidump_notation` still recovers the right
-            convention; chemist output keeps PySCF's exact bytes.
+            exactly instead of inferring the layout.  PySCF and Qiskit Nature
+            skip the variable and then apply their own (chemist) reading, so
+            the marker protects superfermion's round trips, not theirs.  Note
+            that both of those writers rebuild the header from scratch, so the
+            variable does not survive a file they rewrite: PySCF's replacement
+            header is caught by :func:`detect_fcidump_notation`'s fingerprint,
+            but Qiskit Nature's is not (it pads ``MS2`` where PySCF does not),
+            so a file that has been through ``FCIDump.to_file`` needs
+            ``notation="chemist"`` when it is read back here.  With
+            ``annotate=False`` there is no marker: a physicist-labelled file
+            then carries a header that is *not* byte-identical to PySCF's (one
+            space before the final comma), so :func:`detect_fcidump_notation`
+            still recovers the right convention, while chemist output keeps
+            PySCF's exact bytes and is recognised by the fingerprint -- with a
+            warning, because those bytes could also come from 0.1.25.
+        validate: Warn when ``h2`` is not invariant under the integral's
+            eight-fold symmetry.  The writer emits one record per orbit and a
+            reader fills the other seven images from it, so any part of ``h2``
+            outside the canonical quarter is dropped rather than written; the
+            warning names the deviation so an asymmetric tensor is not lost
+            silently.  A violation counts when it exceeds ``max(tol, 1e-12 *
+            max|h2|)``, which keeps the rounding in a real ``ao2mo`` tensor --
+            measured 1.7e-16 on H2/STO-3G for the pair swap -- out of it.
 
     Returns:
         The file body as a string.
@@ -353,6 +503,8 @@ def write_fcidump_text(
         h1, h2, ecore = spec.h1, spec.h2, spec.nuclear_repulsion
         n_elec = spec.n_electrons if n_elec is None else n_elec
         spin = spec.spin if spin is None else spin
+        orbsym = spec.fcidump_orbsym if orbsym is None else orbsym
+        isym = spec.fcidump_isym if isym is None else isym
     else:
         h1, h2, ecore = spec
 
@@ -365,10 +517,32 @@ def write_fcidump_text(
         raise ValueError("n_elec is required when spec carries no MolecularData")
     if spin is None:
         spin = 0
+    if isym is None:
+        isym = 1
+    # ``orbsym`` may be a numpy array, where ``orbsym or [...]`` raises on the
+    # ambiguous truth value; test for None instead.
+    labels = [1] * norb if orbsym is None else [int(x) for x in orbsym]
+    if len(labels) != norb:
+        raise ValueError(
+            f"orbsym carries {len(labels)} labels for {norb} orbitals"
+        )
+    outside = [label for label in labels if not 0 <= label <= 8]
+    if outside:
+        # 0-based irrep ids are the usual mistake here, and they write a header
+        # that reads back shifted rather than failing.  ``0`` is legal on its
+        # own -- HANDE uses it for an orbital with no well defined symmetry.
+        warnings.warn(
+            f"orbsym carries {len(outside)} label(s) outside the 0..8 range "
+            f"the format defines (first: {outside[0]}); 0-based irrep ids are "
+            "the usual cause.  The labels are written as given, so a reader "
+            "that interprets them will see different irreps.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # PySCF's writer emits ``NORB=%4d,NELEC=%2d,MS2=%d,`` and the detector keys
     # on exactly that spacing, so output a reader could mistake for PySCF's has
-    # to say chemist -- and our default is physicist.  A physicist-labelled file
+    # to say chemist -- which is the default.  A physicist-labelled file
     # therefore leaves one space before the final comma: every field stays
     # comma-separated (PySCF splits on "," and "=", so the space is inert) while
     # the header drops out of the fingerprint, and the file re-detects as the
@@ -377,7 +551,7 @@ def write_fcidump_text(
     header_end = "," if notation == "chemist" else " ,"
     lines = [
         f" &FCI NORB={norb:4d},NELEC={int(n_elec):2d},MS2={int(spin)}{header_end}",
-        "  ORBSYM=" + ",".join(str(int(x)) for x in (orbsym or [1] * norb)) + ",",
+        "  ORBSYM=" + ",".join(str(x) for x in labels) + ",",
         f"  ISYM={int(isym)},",
     ]
     if annotate:
@@ -386,22 +560,63 @@ def write_fcidump_text(
 
     if h2 is not None:
         h2 = np.asarray(h2, dtype=float)
+        if notation not in ("physicist", "chemist"):
+            raise ValueError(
+                f"notation must be 'physicist' or 'chemist', got {notation!r}"
+            )
+        if h2.shape != (norb, norb, norb, norb):
+            raise ValueError(
+                f"h2 must have shape {(norb, norb, norb, norb)} for the {norb} "
+                f"orbitals of h1, got {h2.shape}"
+            )
+        if validate:
+            # Relative as well as absolute: a real ``ao2mo.restore`` tensor is
+            # bitwise equal under (p<->q) and (r<->s) but the pair swap differs
+            # by rounding -- 1.7e-16 on H2/STO-3G, and proportionally larger on
+            # a tensor with core integrals.  A fixed 1e-12 floor would warn on
+            # such a file, so the threshold scales with the largest element.
+            scale = float(np.max(np.abs(h2))) if h2.size else 0.0
+            threshold = max(tol, 1e-12 * scale)
+            broken = [
+                (message, deviation)
+                for message, deviation in _symmetry_violations(h2)
+                if deviation > threshold
+            ]
+            if broken:
+                detail = "; ".join(
+                    f"{message} by up to {deviation:.3e}"
+                    for message, deviation in broken
+                )
+                warnings.warn(
+                    f"h2 is not symmetric under the integral's eight-fold "
+                    f"symmetry ({detail}).  One record per orbit is written "
+                    "and every other image is filled from the canonical "
+                    "member of that orbit, so the part of h2 outside the "
+                    "canonical quarter is dropped.  Pass validate=False to "
+                    "write without this check.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        # One record per symmetry orbit, selected on the *tensor* (``i >= j``,
+        # ``k >= l``, pair ``kl`` no later than ``ij``), which is the quarter
+        # PySCF's ``symm.pack`` walks and the one this reader expands back.
+        # The selection has to match the expansion: choosing the quarter in
+        # label space instead covers 50 of the 55 orbits for n = 4, because the
+        # label permutation that ``notation="physicist"`` applies does not
+        # normalise the integral's symmetry group, and the round trip then
+        # leaves 24 of the 256 array elements at zero.
         pair = [(i, j) for i in range(norb) for j in range(i + 1)]
         for a, (i, j) in enumerate(pair):
             for b in range(a + 1):
                 k, l = pair[b]
+                if notation == "physicist":
+                    # (ij|kl) == <ik|jl>, so the value goes under the labels i k j l
+                    lab = (i + 1, k + 1, j + 1, l + 1)
+                else:
+                    lab = (i + 1, j + 1, k + 1, l + 1)
                 value = h2[i, j, k, l]
                 if abs(value) <= tol:
                     continue
-                if notation == "physicist":
-                    # store (ij|kl) under the labels of <ik|jl>
-                    lab = (i + 1, k + 1, j + 1, l + 1)
-                elif notation == "chemist":
-                    lab = (i + 1, j + 1, k + 1, l + 1)
-                else:
-                    raise ValueError(
-                        f"notation must be 'physicist' or 'chemist', got {notation!r}"
-                    )
                 lines.append(float_format % value + " %4d %4d %4d %4d" % lab)
     elif notation not in ("physicist", "chemist"):
         raise ValueError(
