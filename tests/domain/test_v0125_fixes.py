@@ -183,12 +183,20 @@ class TestFcidumpNotationDetection:
             mol = read_fcidump_text(_SMALL_VALUE_TEXT)
         assert mol.h2[1, 1, 0, 0] == pytest.approx(_SMALL_VALUE)
 
-    def test_a_file_with_no_writer_evidence_defaults_to_the_standard(self):
+    def test_a_file_with_no_writer_evidence_defaults_to_chemist(self):
+        """No marker and no fingerprint: chemist, which is what writers emit.
+
+        Molpro and Molcas (per NECI's manual), HANDE, HORTON, orbkit and Psi4
+        all write the chemist tensor, and none of their headers match PySCF's
+        fingerprint, so this used to fall back to ``"physicist"`` and
+        transpose every one of them silently.  The physicist labelling is
+        still reachable by passing ``notation="physicist"``.
+        """
         plain = _PYSCF_TEXT.replace("&FCI NORB=   2,NELEC= 2,MS2=0,",
                                     "&FCI NORB=2, NELEC=2, MS2=0,")
         notation, reason = detect_fcidump_notation(plain)
-        assert notation == "physicist"
-        assert "standard" in reason
+        assert notation == "chemist"
+        assert "no writer marker" in reason
 
     def test_an_explicit_notation_beats_the_fingerprint(self):
         """A file that says what it is must be believed over a heuristic."""

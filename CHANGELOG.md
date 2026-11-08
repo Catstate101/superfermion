@@ -2,6 +2,190 @@
 
 All notable changes to the Superfermion framework.
 
+## [0.1.28] - 2026-11-08
+
+`write_fcidump` labelled physicist by default. That is how the FCIDUMP
+description reads, but neither Python reader agrees: PySCF's `tools.fcidump`
+and Qiskit Nature's `FCIDump` both parse `NOTATION=` as an unknown namelist
+key, drop it, and take the four indices as chemist `(ij|kl)` -- the layout
+their own writers emit. A default file from 0.1.27 therefore arrived
+transposed and silent: measured on the published wheel with PySCF 2.14.0,
+water/STO-3G scored -124.099090 Ha instead of -75.012647 Ha, and with Qiskit
+Nature 0.7.2, H2/STO-3G scored -1.967656 Ha instead of -1.137306 Ha. Both
+readers return a plausible number and neither warns.
+
+The writer now labels chemist by default, so one file scores the same in
+superfermion, PySCF and Qiskit Nature. Measured after the change: the H2 file
+read by Qiskit Nature gives -1.137284 Ha, delta 0.000000, and PySCF's `to_scf`
+reproduces its own FCI energy to 1e-9. Reading is untouched -- every file this
+package wrote still carries its `NOTATION=` marker and still round-trips --
+and `notation="physicist"` still writes the standard layout.
+
+A reader that followed the format description literally would want the
+physicist layout, and none was available to test, which is why the option
+remains. Every writer that could be checked emits chemist: PySCF and Qiskit
+Nature in their source, HORTON and orbkit in their manuals, and Molpro and
+Molcas through NECI's manual, which states that "the FCIDUMP file that
+transfers the electronic integrals from Molpro or Molcas to NECI assumes the
+chemist's notation". Molpro itself could not be run here.
+
+Both referees were then exercised above two orbitals, where the layout actually
+differs. PySCF 2.14.0 on a four-orbital tensor: its own writer-to-reader round
+trip is exact to 9e-16, our reader on that file agrees with PySCF's reading to
+0.0, and a default file of ours read by PySCF differs from the source by
+4e-16. Qiskit Nature 0.7.2 is now installed on the Linux row of the
+`chemistry-platforms` lane and scored in the same suite.
+
+One limitation was repaired in the reader instead of being carried forward.
+Qiskit Nature rebuilds the `&FCI` header from its own dataclass when it writes,
+so `NOTATION=` does not survive `FCIDump.to_file`, and its header pads every
+integer where PySCF pads only the first two: `&FCI NORB=   4,NELEC=   4,MS2=   0,`
+against ` &FCI NORB=   4,NELEC= 4,MS2=0,`. A file that had been through Qiskit
+returned here as an unmarked file under the physicist fallback -- integrals
+transposed, silently -- and needed `notation="chemist"` by hand. 0.1.28
+fingerprints that header instead: at column 0, one space before `ORBSYM`, all
+three integers padded to four columns. Measured on H2/STO-3G, a file written
+here, rewritten by `FCIDump.to_file`, then read back with `notation="auto"`
+records `fcidump_notation == "chemist"` and matches the source integrals to
+1e-9. Qiskit Nature 0.8.0 writes the same header as 0.7.2, so the rule holds
+across both. It cannot change a labelling either: the fingerprint selects the
+same chemist reading the unmarked fallback now selects, and a legacy
+Superfermion header opens with a space, so it never matches at column 0. Its
+only behavioural effect is to keep a Qiskit rewrite out of PySCF's fingerprint,
+and therefore out of a pre-0.1.26 warning that a Qiskit file cannot deserve.
+
+A third writer was checked from its documentation instead of an installation.
+HORTON 2.0.1 publishes its FCIDUMP output as `&FCI NORB=28,NELEC=20,MS2=0,`
+followed by `ORBSYM= 1,1,...` and `ISYM=1` -- header at column 0, unpadded
+values, no comma after `ISYM`, a space after `ORBSYM=`. That matches the
+fingerprint, and HORTON's manual states that its own indices are chemist
+`(ij|kl)`, so the chemist reading the fingerprint selects is the one its writer
+means; it also inherits the 0.1.25 warning, because the bytes cannot separate
+the two. The tests carry that header verbatim, reduced to two orbitals, and
+assert both that it is recognised and that a non-default `ORBSYM`/`ISYM` pair
+comes back out of it, so the labels are measured rather than defaulted.
+
+Two more defects in the same module were found while measuring and are fixed
+here. The header's `ORBSYM`/`ISYM` labels were parsed by the reader and then
+dropped -- `MolecularData` had no field for them and the writer defaulted to
+all-ones -- so copying a symmetry-labelled file relabelled every orbital `1`
+with no message. Both referees were measured returning the values written from
+here: PySCF 2.14.0's `tools.fcidump.read` gives `ORBSYM = [1, 2, 3, 4]` and
+`ISYM = 2`, and Qiskit Nature 0.7.2's `FCIDump.from_file` gives `orbsym =
+[1, 2, 3, 4]`, `isym = 2`. Separately, the writer emitted one record per
+symmetry orbit without checking that its input had that symmetry: only the
+canonical quarter is written and a reader fills the other seven images from it,
+so any asymmetric part of `h2` was dropped silently. `validate=True` now warns
+with the offending symmetry and its largest violation. Real integrals cannot be
+used to decide the threshold by inspection: measured here, an `ao2mo.restore`
+tensor is bitwise equal under `(p<->q)` and `(r<->s)` but the pair swap differs
+by 1.7e-16, so the threshold is `max(tol, 1e-12 * max|h2|)` and that tensor
+writes quietly, which the PySCF half of the suite asserts under
+`warnings.simplefilter("error")`.
+
+The reader's own fallback moved with it. `notation="auto"` on a file with no
+marker and no known fingerprint used to return `"physicist"`, which transposed
+Molpro, Molcas, Psi4, HORTON and orbkit output -- none of which carry a
+marker -- while reporting a successful read. It now returns `"chemist"`. A new
+rule keeps the two releases immediately before this one out of that change:
+0.1.26 and 0.1.27 wrote physicist output with a space before the closing comma
+(`MS2=0 ,`), which no other writer produces, so those files are still read as
+physicist without being told. Both directions are pinned by tests, and the
+order of the rules is pinned as well -- the Qiskit check has to precede PySCF's,
+whose looser pattern also matches a Qiskit header.
+
+`ORBSYM` labels are now checked against the 0..8 range the format defines, on
+both read and write, and a label outside it warns. `0` is legal -- HANDE uses
+it for an orbital whose symmetry is not well defined -- so the test cannot be
+"a positive integer", and 0-based irrep ids are the usual way to land outside
+the range. Labels are never remapped: Molpro numbers the D2h irreps in a
+different order from PySCF, so a file's numbering is carried through verbatim.
+
+### Changed
+
+- **`write_fcidump` / `write_fcidump_text`**: default `notation` moves from
+  `"physicist"` to `"chemist"`. Files written with the default now carry
+  `NOTATION=chemist` and PySCF's exact header bytes. Code that relied on the
+  old default and compensated downstream -- for instance transposing a written
+  file before handing it to PySCF -- must stop compensating or pass
+  `notation="physicist"`.
+- **`read_fcidump` / `read_fcidump_text`**: `notation="auto"` now falls back to
+  `"chemist"` for a file with no marker and no known fingerprint, instead of
+  `"physicist"`. The rules are, in order: a `NOTATION=` marker; Superfermion
+  0.1.26-0.1.27's physicist header, whose space before the closing comma is
+  unique to those two releases; Qiskit Nature's padded header; PySCF's header
+  fingerprint; otherwise chemist. The PySCF branch still warns, because
+  Superfermion <= 0.1.25 wrote the same bytes for physicist data.
+
+### Added
+
+- **`tests/domain/test_fcidump_interop.py`**: pins the decision in both
+  directions. Without either referee it checks the marker, the header bytes,
+  the unannotated chemist and physicist paths, the round trip, the
+  `ORBSYM`/`ISYM` round trip, and decodes the records against the rule in the
+  format description rather than against this reader. With PySCF
+  (`chemistry-platforms`) it asserts that our default file reproduces PySCF's
+  own FCI energy to 1e-9, that a physicist file is transposed there, that a file
+  PySCF wrote reads back as chemist, and that our `ORBSYM`/`ISYM` values arrive
+  in its parser. With Qiskit Nature it asserts the reference energy through
+  Jordan-Wigner and ARPACK, that a physicist file is transposed there too, that
+  the symmetry labels arrive in its parser, and that a Qiskit rewrite is
+  read back as chemist rather than defaulted.
+- **`MolecularData.fcidump_orbsym` / `fcidump_isym`**: the header's symmetry
+  labels, carried from `read_fcidump` to `write_fcidump` so a copy keeps them.
+  Appended after `fcidump_notation`, so no existing positional construction
+  changes. `None`/`1` when the integrals did not come from a file.
+- **`write_fcidump_text(validate=True)`**: warns when `h2` is not invariant
+  under the integral's eight-fold symmetry, naming each broken relation and its
+  largest deviation. Pass `validate=False` to write without the check; the
+  records emitted are the same either way.
+- **`chemistry-platforms` lane**: installs `qiskit-nature>=0.7,<0.9` on the
+  `ubuntu-latest` row and runs `tests/domain/test_fcidump_interop.py`, so the
+  Qiskit half is a CI assertion and not only a local measurement. Both ends of
+  that range were measured here -- 0.7.2 and 0.8.0 -- because they write the
+  same `&FCI` header. It is not a package dependency: nothing in
+  `superfermion` imports it.
+
+### Fixed
+
+- **`write_fcidump_text`**: `ORBSYM`/`ISYM` were dropped on a read -> write
+  round trip. The reader parsed both into a local and `MolecularData` had no
+  field for them, so a copy of a symmetry-labelled file came out all-ones.
+  `isym` also gained a `None` default that resolves to the value read from the
+  file, and to 1 for a bare `(h1, h2, ecore)` tuple as before.
+- **`write_fcidump_text`**: `orbsym` given as a numpy array raised
+  `ValueError: The truth value of an array ... is ambiguous`, because the value
+  was consumed through `orbsym or [1] * norb`. Replaced with an explicit `None`
+  test.
+- **`write_fcidump_text`**: no shape or length checks. An `h2` shaped for more
+  orbitals than `h1` was silently truncated to the `h1` window, one shaped for
+  fewer raised `IndexError` partway through building the text, and an `orbsym`
+  whose length differed from `NORB` wrote a header with the wrong number of
+  labels. All three raise `ValueError` now.
+- **`write_fcidump_text` / `read_fcidump_text`**: `ORBSYM` labels outside the
+  0..8 range the format defines were written and read back without a word.
+  Both directions now warn, naming the count and the first offender; the
+  labels themselves are still carried through unchanged. 0-based irrep ids
+  are the usual cause.
+- **`write_fcidump_text` docstring**: it said token-scanning readers such as
+  PySCF's "skip unknown header variables", which is accurate and still hid the
+  consequence -- they skip the marker and then apply their own chemist reading.
+  It now states the measured effect and names the two readers.
+- **Wheel and sdist contents**: maturin sweeps `python-source`, so a local
+  rebuild's backups beside the package (`_sf_core.pyd.pre_*_bak`,
+  `_sf_core.cp313-*.pyd.stale_bak`) and a scratch log rode into the built
+  wheel. Measured: 50.9 MB and 172 entries, 17 of them stale copies of the
+  extension module, against 3.40 MB and 154 entries once excluded.
+  `[tool.maturin] exclude` now drops `superfermion/*bak` and
+  `_sci_accuracy_log.txt` from both artifacts, and the Windows `.pyd` from the
+  sdist. The rebuilt artifacts were inspected rather than assumed: the wheel
+  carries exactly one `_sf_core.pyd`, the sdist is 0.75 MB with no `.pyd` and
+  no `.bak`, `check_wheels.py` reports the single `cp310-abi3` tag and
+  `check_sdist.py` loads all eight workspace manifests from the tarball.
+  `check_wheels.py` now also rejects any `_bak`/`.bak`/`.pyc` entry, so the
+  exclusion cannot regress unnoticed; it was run against a deliberately
+  polluted wheel and exits 1 naming the file.
+
 ## [0.1.27] - 2026-11-07
 
 Follow-up to 0.1.26, whose FCIDUMP change broke a case it could not see: 0.1.26

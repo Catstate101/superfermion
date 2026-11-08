@@ -7,6 +7,12 @@ that interpreter only -- and, before an upload, the full platform matrix must be
 present. A release that quietly ships six of seven platforms is the failure mode
 this guards against.
 
+Each wheel is also opened and scanned for files that belong to a local build
+rather than to the release. Maturin sweeps `python-source`, so a rebuild backup
+left beside the package rides along: the 0.1.28 wheel carried 17 stale copies of
+`_sf_core.pyd` and came out at 50.9 MB against 3.40 MB. That was fixed in
+`[tool.maturin] exclude`, and this is the check on the artifact itself.
+
 Usage:
     python scripts/check_wheels.py dist                      # tags only
     python scripts/check_wheels.py dist --require-platforms   # pre-publish gate
@@ -16,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import zipfile
 from pathlib import Path
 
 # Substrings that must all appear in a wheel filename for the platform to count.
@@ -30,6 +37,18 @@ REQUIRED_PLATFORMS = {
 }
 
 TAG = "cp310-abi3"
+
+# Suffixes that only ever belong to a working tree: editor and patch leftovers,
+# and the `_bak` files a local rebuild keeps (`_sf_core.pyd.pre_v0125_bak`).
+LOCAL_ONLY_SUFFIXES = ("_bak", ".bak", ".orig", ".rej", ".swp", ".pyc")
+
+
+def local_leftovers(path: Path) -> list[str]:
+    """Entries in ``path`` that a build should never have packaged."""
+    with zipfile.ZipFile(path) as wheel:
+        return [
+            name for name in wheel.namelist() if name.endswith(LOCAL_ONLY_SUFFIXES)
+        ]
 
 
 def collect(directory: Path) -> list[str]:
@@ -61,6 +80,17 @@ def main() -> int:
     if duplicates:
         raise SystemExit(f"duplicate wheels: {sorted(duplicates)}")
 
+    polluted = []
+    for name in wheels:
+        bad = local_leftovers(args.dist / name)
+        if bad:
+            polluted.append(f"  {name}: {len(bad)} file(s), e.g. {bad[:3]}")
+    if polluted:
+        raise SystemExit(
+            "wheel carries files from a local build, not from the release "
+            "(add them to [tool.maturin] exclude):\n" + "\n".join(polluted)
+        )
+
     if args.require_platforms:
         missing = [
             label
@@ -73,7 +103,7 @@ def main() -> int:
                 "there):\n  " + "\n  ".join(missing)
             )
 
-    print(f"OK    {len(wheels)} wheels, all {args.tag}")
+    print(f"OK    {len(wheels)} wheels, all {args.tag}, no local build files")
     for name in wheels:
         print(f"      {name}")
     if args.require_platforms:
