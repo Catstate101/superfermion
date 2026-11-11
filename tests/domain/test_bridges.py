@@ -7,7 +7,6 @@ import pytest
 import superfermion as sf
 from superfermion.circuit import Circuit
 
-
 pytestmark = pytest.mark.domain
 
 

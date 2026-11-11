@@ -15,13 +15,11 @@ There are no Python fallbacks. ``_sf_core`` is a required dependency.
 
 from __future__ import annotations
 
-from typing import List, Optional
-
 from superfermion.circuit import Circuit
 from superfermion.compiler.passes import (
     BasisTranslationPass,
-    UnitaryDecompositionPass,
     Pass,
+    UnitaryDecompositionPass,
 )
 from superfermion.compiler.specs import HardwareSpec
 
@@ -33,8 +31,8 @@ class PassManager:
     the temporary shim passes with their own transforms).
     """
 
-    def __init__(self, passes: Optional[List[Pass]] = None):
-        self.passes: List[Pass] = passes or []
+    def __init__(self, passes: list[Pass] | None = None):
+        self.passes: list[Pass] = passes or []
 
     _plugin_passes: dict = {}
 
@@ -88,8 +86,8 @@ def _has_gates_rust_cannot_handle(circuit: Circuit) -> bool:
 def compile(
     circuit: Circuit,
     level: int = 1,
-    target: Optional[HardwareSpec] = None,
-    twirl_seed: Optional[int] = None,
+    target: HardwareSpec | None = None,
+    twirl_seed: int | None = None,
 ) -> Circuit:
     """Compile a quantum circuit for a hardware target.
 
@@ -165,7 +163,7 @@ def compile(
     # device's width instead of the circuit's. Routing here keeps the
     # permutation known and undone, so the compiled unitary equals the input's
     # and the register keeps its size (HW-2, HW-4, HW-5).
-    layout_report: Optional[dict] = None
+    layout_report: dict | None = None
     if target is not None and getattr(target, "coupling_map", None):
         from superfermion.compiler.layout import route_with_layout
 
@@ -205,9 +203,9 @@ def compile(
 def _rust_compile(
     circuit: Circuit,
     level: int,
-    target: Optional[HardwareSpec],
+    target: HardwareSpec | None,
     skip_routing: bool = False,
-    twirl_seed: Optional[int] = None,
+    twirl_seed: int | None = None,
 ) -> Circuit:
     """Delegate to the Rust compilation pipeline."""
     from superfermion.compiler.rust_bridge import compile_rust
@@ -224,7 +222,7 @@ def apply_noise_suppression(
     circuit: Circuit,
     twirl: bool = True,
     dd_sequence: str = "XY4",
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> Circuit:
     """Apply noise suppression passes (opt-in, separate from compile).
 
@@ -248,8 +246,8 @@ def apply_noise_suppression(
         Circuit with noise suppression gates inserted.
     """
     from superfermion.compiler.advanced import (
-        PauliTwirlingPass,
         DynamicalDecouplingPass,
+        PauliTwirlingPass,
     )
 
     if twirl:

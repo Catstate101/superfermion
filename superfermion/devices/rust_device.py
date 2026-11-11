@@ -11,24 +11,23 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import numpy as np
 
-from superfermion.circuit import Circuit
-from superfermion.devices import DeviceCapabilities
-from superfermion.results import LazyDict, RunResult
 from superfermion._classical_order import apply_to_result as _apply_classical_order
 from superfermion._fixes import (
     PermutedMPSState,
     mps_routing_permutation,
-    remap_counts,
-    unpermute_statevector,
 )
 from superfermion._limits import (
     guard_state_allocation,
     limit_from_kwargs,
     validate_bond_dim,
 )
+from superfermion.circuit import Circuit
+from superfermion.devices import DeviceCapabilities
+from superfermion.results import LazyDict, RunResult
 
 # Above this qubit count the exact |c|² probability table costs more to
 # build than typical runs save by reading it — defer it until first use.
@@ -108,8 +107,8 @@ def _readout_only(noise_model: Any) -> bool:
 
 
 def _apply_readout_to_counts(
-    counts: Dict[str, int], noise_model: Any, seed: Any
-) -> Dict[str, int]:
+    counts: dict[str, int], noise_model: Any, seed: Any
+) -> dict[str, int]:
     """Apply a readout-only model to sampled counts on pure-state paths."""
     if not counts or not _readout_only(noise_model):
         return counts
@@ -129,7 +128,7 @@ def _apply_readout_to_counts(
 _DEFAULT_SEED = 42
 
 
-def _resolve_seed(kwargs: Dict[str, Any]) -> tuple:
+def _resolve_seed(kwargs: dict[str, Any]) -> tuple:
     """``(seed, drawn)`` for this run — draws from OS entropy on ``seed=None``.
 
     STAB-1: the seed defaulted to the literal 42 on *every* path, so repeated
@@ -722,7 +721,7 @@ class RustDevice:
         else:
             counts = {}
 
-        def _exact_probabilities() -> Dict[str, float]:
+        def _exact_probabilities() -> dict[str, float]:
             probs = (
                 np.abs(final_state) ** 2
                 if final_state is not None else np.asarray(state.probabilities())
@@ -733,7 +732,7 @@ class RustDevice:
                 if p > 1e-15
             }
 
-        probabilities: Dict[str, float] = (
+        probabilities: dict[str, float] = (
             _exact_probabilities()
             if return_statevector and n_qubits <= _EAGER_PROBS_MAX_QUBITS
             else LazyDict(_exact_probabilities)
@@ -831,7 +830,7 @@ class RustDevice:
             # subclass, so access semantics are unchanged.
             nq = circuit.n_qubits
 
-            def _exact_mps_probabilities() -> Dict[str, float]:
+            def _exact_mps_probabilities() -> dict[str, float]:
                 probs = np.abs(sv) ** 2
                 return {
                     format(i, f"0{nq}b"): float(p)
@@ -866,10 +865,10 @@ class RustDevice:
     def _run_density_matrix(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
         """Density matrix simulation — Rust core for both noiseless and noisy paths."""
         from superfermion.backends.density_matrix import (
-            _dm_to_probs,
-            _dm_keys,
-            _sample_dm,
             _apply_readout_noise,
+            _dm_keys,
+            _dm_to_probs,
+            _sample_dm,
         )
         noise_model = kwargs.get("noise_model", None)
         seed = kwargs.get("seed", 42)
@@ -957,7 +956,7 @@ class RustDevice:
             for i, p in enumerate(probs) if p > 1e-12
         }
 
-        counts: Dict[str, int] = {}
+        counts: dict[str, int] = {}
         if shots > 0:
             counts = _sample_dm(rho, shots, rng)
             if noise_model is not None and noise_model._readout_p > 0:
@@ -1062,7 +1061,7 @@ class RustDevice:
             )
             amplitudes = np.asarray(fallback_state.numpy(), dtype=np.complex128)
 
-            def _stab_probabilities() -> Dict[str, float]:
+            def _stab_probabilities() -> dict[str, float]:
                 probs = np.abs(amplitudes) ** 2
                 return {
                     format(i, f"0{nq}b"): float(p)
@@ -1094,16 +1093,16 @@ class RustDevice:
 
     def _prepare_dag(self, circuit: Circuit):
         """Decompose unsupported gates and build the Rust IR DAG."""
-        _RUST_DECOMP_GATES = (
+        _rust_decomp_gates = (
             "CRY", "CH", "U1", "U2", "U3",
         )
         needs_decomp = any(
-            g.name.upper() in _RUST_DECOMP_GATES
+            g.name.upper() in _rust_decomp_gates
             for g in circuit._gates
         )
 
         if needs_decomp:
-            from superfermion.backends.turbo import fuse_all_gates, decompose_for_rust
+            from superfermion.backends.turbo import decompose_for_rust, fuse_all_gates
             decomposed = Circuit(circuit.n_qubits)
             decomposed._gates = decompose_for_rust(circuit._gates)
             if getattr(circuit, "_has_large_unitary", False):

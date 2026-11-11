@@ -14,12 +14,11 @@ Usage:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
-
-
 
 _I2 = np.eye(2, dtype=np.complex128)
 _X  = np.array([[0, 1], [1, 0]], dtype=np.complex128)
@@ -27,7 +26,7 @@ _Y  = np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
 _Z  = np.array([[1, 0], [0, -1]], dtype=np.complex128)
 
 
-def kraus_depolarizing_1q(p: float) -> List[np.ndarray]:
+def kraus_depolarizing_1q(p: float) -> list[np.ndarray]:
     """Single-qubit depolarizing: rho -> (1-p)rho + (p/3)(XrhoX + YrhoY + ZrhoZ)"""
     return [
         math.sqrt(1 - p) * _I2,
@@ -37,7 +36,7 @@ def kraus_depolarizing_1q(p: float) -> List[np.ndarray]:
     ]
 
 
-def kraus_depolarizing_2q(p: float) -> List[np.ndarray]:
+def kraus_depolarizing_2q(p: float) -> list[np.ndarray]:
     """Two-qubit depolarizing channel with 15 non-identity Pauli terms."""
     paulis_1q = [_I2, _X, _Y, _Z]
     kraus = [math.sqrt(1 - p) * np.kron(_I2, _I2)]
@@ -48,7 +47,7 @@ def kraus_depolarizing_2q(p: float) -> List[np.ndarray]:
     return kraus
 
 
-def kraus_amplitude_damping(gamma: float) -> List[np.ndarray]:
+def kraus_amplitude_damping(gamma: float) -> list[np.ndarray]:
     """Amplitude damping (T1 decay): K0 = diag(1, sqrt(1-g)), K1 = [[0,sqrt(g)],[0,0]]"""
     return [
         np.array([[1, 0], [0, math.sqrt(1 - gamma)]], dtype=np.complex128),
@@ -56,7 +55,7 @@ def kraus_amplitude_damping(gamma: float) -> List[np.ndarray]:
     ]
 
 
-def kraus_phase_damping(gamma: float) -> List[np.ndarray]:
+def kraus_phase_damping(gamma: float) -> list[np.ndarray]:
     """Phase damping (T2 dephasing): K0 = diag(1, sqrt(1-g)), K1 = diag(0, sqrt(g))"""
     return [
         np.array([[1, 0], [0, math.sqrt(1 - gamma)]], dtype=np.complex128),
@@ -64,19 +63,19 @@ def kraus_phase_damping(gamma: float) -> List[np.ndarray]:
     ]
 
 
-def kraus_bit_flip(p: float) -> List[np.ndarray]:
+def kraus_bit_flip(p: float) -> list[np.ndarray]:
     return [math.sqrt(1 - p) * _I2, math.sqrt(p) * _X]
 
 
-def kraus_phase_flip(p: float) -> List[np.ndarray]:
+def kraus_phase_flip(p: float) -> list[np.ndarray]:
     return [math.sqrt(1 - p) * _I2, math.sqrt(p) * _Z]
 
 
-def kraus_bit_phase_flip(p: float) -> List[np.ndarray]:
+def kraus_bit_phase_flip(p: float) -> list[np.ndarray]:
     return [math.sqrt(1 - p) * _I2, math.sqrt(p) * _Y]
 
 
-def kraus_reset(p0: float, p1: float = 0.0) -> List[np.ndarray]:
+def kraus_reset(p0: float, p1: float = 0.0) -> list[np.ndarray]:
     """Reset channel: ``rho -> (1-p0-p1) rho + p0 |0><0| Tr(rho) + p1 |1><1| Tr(rho)``.
 
     The two reset terms are non-unital: they cannot be written as a single
@@ -109,7 +108,7 @@ def kraus_reset(p0: float, p1: float = 0.0) -> List[np.ndarray]:
     ]
 
 
-def kraus_leakage(p: float) -> List[np.ndarray]:
+def kraus_leakage(p: float) -> list[np.ndarray]:
     """Leakage channel: move population from |0> and |1> into the |2> level.
 
     ``K0 = diag(sqrt(1-p), sqrt(1-p), 1)``, ``K1 = sqrt(p) |2><0|`` and
@@ -132,7 +131,7 @@ def kraus_leakage(p: float) -> List[np.ndarray]:
     ]
 
 
-def _compose_kraus(second: List[np.ndarray], first: List[np.ndarray]) -> List[np.ndarray]:
+def _compose_kraus(second: list[np.ndarray], first: list[np.ndarray]) -> list[np.ndarray]:
     """Kraus set of ``first`` followed by ``second`` (physical application order).
 
     Same element order as the historical composition inside
@@ -145,7 +144,7 @@ def _compose_kraus(second: List[np.ndarray], first: List[np.ndarray]) -> List[np
 
 def kraus_thermal_relaxation(
     t1: float, t2: float, gate_time: float
-) -> List[np.ndarray]:
+) -> list[np.ndarray]:
     """Thermal relaxation (T1/T2) channel for a gate of duration ``gate_time``.
 
     Zero-temperature bath: populations decay as ``exp(-t/T1)`` and
@@ -170,14 +169,14 @@ def kraus_thermal_relaxation(
     return _compose_kraus(kraus_phase_damping(g_phi), kraus_amplitude_damping(g1))
 
 
-def _flat_kraus(kraus_set: List[np.ndarray], dim: int) -> List[float]:
+def _flat_kraus(kraus_set: list[np.ndarray], dim: int) -> list[float]:
     """Row-major re/im flattened Kraus set (the Rust binding's layout)."""
-    flat: List[float] = []
-    for K in kraus_set:
+    flat: list[float] = []
+    for k in kraus_set:
         for r in range(dim):
             for c in range(dim):
-                flat.append(float(K[r, c].real))
-                flat.append(float(K[r, c].imag))
+                flat.append(float(k[r, c].real))
+                flat.append(float(k[r, c].imag))
     return flat
 
 
@@ -207,7 +206,7 @@ def _qiskit_order_2q(matrix: np.ndarray) -> np.ndarray:
     return a[np.ix_(_TWO_QUBIT_SWAP, _TWO_QUBIT_SWAP)].copy()
 
 
-def _normalize_targets(qubits: Any, n_qubits: int) -> Optional[Tuple[int, ...]]:
+def _normalize_targets(qubits: Any, n_qubits: int) -> tuple[int, ...] | None:
     """Validate/normalize the ``qubits=`` target of an ``add_*`` call.
 
     ``None`` (all qubits / all pairs) passes through.  A 1-qubit channel
@@ -230,7 +229,7 @@ def _normalize_targets(qubits: Any, n_qubits: int) -> Optional[Tuple[int, ...]]:
     if n_qubits == 1:
         if not seq:
             raise ValueError("qubits must not be empty (pass None for all qubits)")
-        unique: List[int] = []
+        unique: list[int] = []
         for q in seq:
             if q not in unique:
                 unique.append(q)
@@ -247,7 +246,7 @@ def _normalize_targets(qubits: Any, n_qubits: int) -> Optional[Tuple[int, ...]]:
 #: exact strings ``OpType::name()`` returns in the Rust core; the comparison at
 #: simulation time is case-insensitive, and gates that SF lowers before
 #: execution (e.g. ``u1``/``u2``/``u3``) must be named by what actually runs.
-_INSTRUCTION_ALIASES: Dict[str, str] = {
+_INSTRUCTION_ALIASES: dict[str, str] = {
     "h": "H",
     "x": "X",
     "y": "Y",
@@ -295,12 +294,12 @@ _INSTRUCTION_ALIASES: Dict[str, str] = {
 #: canonical gate name, but not ``Measure``, ``Reset`` or ``Barrier`` -- they
 #: do not drive the transmon, and a kick after a terminal measurement would
 #: perturb the state that is returned to the caller.
-_QUTRIT_DEFAULT_INSTRUCTIONS: Tuple[str, ...] = tuple(
+_QUTRIT_DEFAULT_INSTRUCTIONS: tuple[str, ...] = tuple(
     sorted(set(_INSTRUCTION_ALIASES.values()) - {"Measure", "Reset", "Barrier"})
 )
 
 
-def _normalize_instructions(instructions: Any) -> Optional[Tuple[str, ...]]:
+def _normalize_instructions(instructions: Any) -> tuple[str, ...] | None:
     """``None`` (every instruction) or a tuple of canonical instruction names.
 
     Accepts a single name or a sequence of names, in any letter case.  Gates
@@ -312,7 +311,7 @@ def _normalize_instructions(instructions: Any) -> Optional[Tuple[str, ...]]:
         return None
     if isinstance(instructions, str):
         instructions = (instructions,)
-    names: List[str] = []
+    names: list[str] = []
     for raw in instructions:
         if not isinstance(raw, str):
             raise TypeError(
@@ -386,7 +385,7 @@ class ErrorChannel:
             )
 
     @property
-    def kraus(self) -> List[np.ndarray]:
+    def kraus(self) -> list[np.ndarray]:
         """Copies of the Kraus operators (mutating them cannot alter the error)."""
         return [k.copy() for k in self._kraus]
 
@@ -407,7 +406,7 @@ class ErrorChannel:
         return self.tp_deviation <= 1e-8
 
     @classmethod
-    def from_kraus(cls, kraus: Any, name: str = "kraus") -> "ErrorChannel":
+    def from_kraus(cls, kraus: Any, name: str = "kraus") -> ErrorChannel:
         """Error from an explicit Kraus set (1 or 2 qubits, inferred)."""
         ops = list(kraus)
         if not ops:
@@ -425,7 +424,7 @@ class ErrorChannel:
         return cls(ops, n, name=name)
 
     @classmethod
-    def from_unitary(cls, unitary: Any) -> "ErrorChannel":
+    def from_unitary(cls, unitary: Any) -> ErrorChannel:
         """Coherent (unitary) error -- a one-term Kraus set."""
         u = np.asarray(unitary, dtype=np.complex128)
         if u.shape not in ((2, 2), (4, 4)):
@@ -438,7 +437,7 @@ class ErrorChannel:
         return cls([u], 1 if u.shape == (2, 2) else 2, name="unitary", _validated=True)
 
     @classmethod
-    def from_mixed_unitary(cls, pairs: Any) -> "ErrorChannel":
+    def from_mixed_unitary(cls, pairs: Any) -> ErrorChannel:
         """Mixture of unitaries -- ``pairs`` is ``[(U, p), ...]`` with ``sum p = 1``.
 
         The Kraus set is ``sqrt(p_i) U_i``, i.e. the same channel Aer builds for
@@ -452,8 +451,8 @@ class ErrorChannel:
         if n == 0:
             raise ValueError("each unitary must be 2x2 or 4x4")
         dim = 2 ** n
-        probs: List[float] = []
-        ops: List[np.ndarray] = []
+        probs: list[float] = []
+        ops: list[np.ndarray] = []
         gram = np.eye(dim)
         for i, (u, p) in enumerate(items):
             u = np.asarray(u, dtype=np.complex128)
@@ -476,12 +475,12 @@ class ErrorChannel:
         return cls(ops, n, name="mixed_unitary", _validated=True)
 
     @classmethod
-    def from_reset(cls, p0: float, p1: float = 0.0) -> "ErrorChannel":
+    def from_reset(cls, p0: float, p1: float = 0.0) -> ErrorChannel:
         """Reset error -- see :func:`kraus_reset`."""
         return cls(kraus_reset(p0, p1), 1, name="reset", _validated=True)
 
     @classmethod
-    def from_qutrit_kraus(cls, kraus: Any, name: str = "qutrit") -> "ErrorChannel":
+    def from_qutrit_kraus(cls, kraus: Any, name: str = "qutrit") -> ErrorChannel:
         """A 3-level channel embedded on a ``(data, flag)`` qubit pair.
 
         The third level does not fit on one wire, so each 3x3 Kraus operator
@@ -521,7 +520,7 @@ class ErrorChannel:
                 "qutrit Kraus operators do not define a channel "
                 f"(sum K^dagger K != I within 1e-8, max deviation {deviation:.3e})"
             )
-        embedded: List[np.ndarray] = []
+        embedded: list[np.ndarray] = []
         for op in ops:
             emb = np.zeros((4, 4), dtype=np.complex128)
             emb[:3, :3] = op
@@ -534,7 +533,7 @@ class ErrorChannel:
         embedded.append(complement)
         return cls(embedded, 2, name=name)
 
-    def compose(self, other: "ErrorChannel") -> "ErrorChannel":
+    def compose(self, other: ErrorChannel) -> ErrorChannel:
         """``self`` applied *after* ``other`` (Qiskit ``compose`` order)."""
         other = _as_error(other)
         if other.n_qubits != self.n_qubits:
@@ -549,7 +548,7 @@ class ErrorChannel:
             _validated=True,
         )
 
-    def tensor(self, other: "ErrorChannel") -> "ErrorChannel":
+    def tensor(self, other: ErrorChannel) -> ErrorChannel:
         """Kronecker product; ``self`` is the LEFT factor, i.e. its wire is the
         higher-index one — Qiskit's ``A.tensor(B) == A (x) B``.
 
@@ -567,7 +566,7 @@ class ErrorChannel:
             _validated=True,
         )
 
-    def power(self, n: int) -> "ErrorChannel":
+    def power(self, n: int) -> ErrorChannel:
         """``self`` applied ``n`` times in a row (``n=0`` is the identity)."""
         n = int(n)
         if n < 0:
@@ -589,7 +588,7 @@ class ErrorChannel:
         )
 
 
-def _as_error(obj: Any) -> "ErrorChannel":
+def _as_error(obj: Any) -> ErrorChannel:
     if isinstance(obj, ErrorChannel):
         return obj
     raise TypeError(
@@ -603,7 +602,7 @@ class NoiseChannel:
     """A single noise channel applied after a gate."""
     name: str
     error_rate: float
-    apply: Optional[Callable] = None
+    apply: Callable | None = None
     #: Construction-time normalization of ``error_rate`` for depolarizing
     #: channels: "total" (nominal = total non-identity-Pauli probability)
     #: or "qiskit" (nominal = Qiskit lambda, rescaled when the Kraus set is
@@ -615,24 +614,24 @@ class NoiseChannel:
     #: a 2-qubit channel, matched in instruction order (Qiskit
     #: ``add_quantum_error`` parity - measured: an error on ``(0, 1)`` does
     #: not fire on ``cx(1, 0)``).
-    qubits: Optional[Tuple[int, ...]] = None
+    qubits: tuple[int, ...] | None = None
     #: Extra construction parameters a channel needs to be rebuilt but that
     #: are not recoverable from ``error_rate``.  Only thermal relaxation sets
     #: it today: ``error_rate`` carries ``gate_time`` (the quantity the
     #: backend consumes), while ``t1``/``t2`` live here so
     #: :meth:`NoiseModel.to_dict` can serialize a rebuildable channel.
-    params: Optional[Dict[str, float]] = None
+    params: dict[str, float] | None = None
     #: Instruction filter: ``None`` (default) fires after every instruction
     #: that touches the channel's qubits; a tuple of canonical gate names
     #: fires only after instructions of those types (Qiskit
     #: ``add_quantum_error(error, instructions, qubits)`` parity).  Matching
     #: happens on the simulated IR, after SF's own lowering.
-    instructions: Optional[Tuple[str, ...]] = None
+    instructions: tuple[str, ...] | None = None
     #: Explicit Kraus set for channels that are not one of the built-in
     #: families (custom Kraus / unitary / mixed unitary / reset).  ``None``
     #: for every built-in channel, whose set is rebuilt from ``name`` and
     #: ``error_rate``.
-    kraus: Optional[List[np.ndarray]] = None
+    kraus: list[np.ndarray] | None = None
     #: When the channel fires (2-qubit channels only).
     #:
     #: ``"gate"`` (default) = after a matching two-qubit gate on the target
@@ -654,8 +653,8 @@ class NoiseChannel:
 
 
 def _channel_targets(
-    channels: List[NoiseChannel], idx: int
-) -> Optional[Tuple[int, ...]]:
+    channels: list[NoiseChannel], idx: int
+) -> tuple[int, ...] | None:
     """Targets of the channel backing ``_kraus[idx]`` (None when out of range).
 
     The ``*_channels`` and ``*_kraus`` lists are appended in lockstep by
@@ -668,24 +667,24 @@ def _channel_targets(
 
 
 def _channel_instructions(
-    channels: List[NoiseChannel], idx: int
-) -> Optional[Tuple[str, ...]]:
+    channels: list[NoiseChannel], idx: int
+) -> tuple[str, ...] | None:
     """Instruction filter of the channel backing ``_kraus[idx]`` (None = any)."""
     if idx < len(channels):
         return channels[idx].instructions
     return None
 
 
-def _flat_kraus_list(kraus_set: List[np.ndarray]) -> List[List[float]]:
+def _flat_kraus_list(kraus_set: list[np.ndarray]) -> list[list[float]]:
     """Kraus set as the flat re/im float lists the Rust bridge consumes.
 
     Used by the serializer so a custom channel round-trips through
     :meth:`NoiseModel.to_dict` without rebuilding it from a formula.
     """
     dim = kraus_set[0].shape[0]
-    out: List[List[float]] = []
+    out: list[list[float]] = []
     for k in kraus_set:
-        flat: List[float] = []
+        flat: list[float] = []
         for r in range(dim):
             for c in range(dim):
                 flat.append(float(k[r, c].real))
@@ -694,7 +693,7 @@ def _flat_kraus_list(kraus_set: List[np.ndarray]) -> List[List[float]]:
     return out
 
 
-def _kraus_from_flat(flat_sets: Any) -> List[np.ndarray]:
+def _kraus_from_flat(flat_sets: Any) -> list[np.ndarray]:
     """Inverse of :func:`_flat_kraus_list` (used by ``from_dict``)."""
     sets = list(flat_sets or [])
     if not sets:
@@ -705,7 +704,7 @@ def _kraus_from_flat(flat_sets: Any) -> List[np.ndarray]:
         raise ValueError(
             f"serialized Kraus matrix has {size} floats; expected 8 (2x2) or 32 (4x4)"
         )
-    ops: List[np.ndarray] = []
+    ops: list[np.ndarray] = []
     for flat in sets:
         if len(flat) != size:
             raise ValueError("serialized Kraus matrices differ in size")
@@ -716,7 +715,7 @@ def _kraus_from_flat(flat_sets: Any) -> List[np.ndarray]:
     return ops
 
 
-def _channel_dict(ch: NoiseChannel) -> Dict[str, Any]:
+def _channel_dict(ch: NoiseChannel) -> dict[str, Any]:
     """Serialized form of one channel.
 
     ``qubits``, ``convention``, ``params``, ``instructions`` and ``mode``
@@ -725,7 +724,7 @@ def _channel_dict(ch: NoiseChannel) -> Dict[str, Any]:
     filter, a non-gate firing mode), so a default untargeted model keeps the
     historical exact dict.
     """
-    d: Dict[str, Any] = {"name": ch.name, "error_rate": ch.error_rate}
+    d: dict[str, Any] = {"name": ch.name, "error_rate": ch.error_rate}
     if ch.qubits is not None:
         d["qubits"] = list(ch.qubits)
     if ch.convention != "total":
@@ -742,7 +741,7 @@ def _channel_dict(ch: NoiseChannel) -> Dict[str, Any]:
 
 
 def _restore_mode(
-    model: "NoiseModel", serialized: Dict[str, Any], n_qubits: int
+    model: NoiseModel, serialized: dict[str, Any], n_qubits: int
 ) -> None:
     """Re-apply a channel's firing mode after :meth:`NoiseModel.from_dict`
     rebuilt it.
@@ -817,11 +816,11 @@ class NoiseModel:
                 f"gates, like Qiskit); got {placement!r}"
             )
         self.placement = placement
-        self.single_qubit_channels: List[NoiseChannel] = []
-        self.two_qubit_channels: List[NoiseChannel] = []
+        self.single_qubit_channels: list[NoiseChannel] = []
+        self.two_qubit_channels: list[NoiseChannel] = []
         self.readout_error: float = 0.0
-        self._1q_kraus: List[List[np.ndarray]] = []
-        self._2q_kraus: List[List[np.ndarray]] = []
+        self._1q_kraus: list[list[np.ndarray]] = []
+        self._2q_kraus: list[list[np.ndarray]] = []
         self._readout_p: float = 0.0
 
     @property
@@ -842,7 +841,7 @@ class NoiseModel:
         convention: str = "total",
         qubits: Any = None,
         instructions: Any = None,
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Add depolarizing noise with error probability p.
 
         Placement: the channel is applied after every gate that touches a
@@ -893,7 +892,7 @@ class NoiseModel:
 
     def add_amplitude_damping(
         self, gamma: float, qubits: Any = None, instructions: Any = None
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Add amplitude damping (T1 decay) with rate gamma.
 
         ``qubits`` binds the channel to specific wires instead of every
@@ -910,7 +909,7 @@ class NoiseModel:
 
     def add_phase_damping(
         self, gamma: float, qubits: Any = None, instructions: Any = None
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Add phase damping (T2 dephasing) with rate gamma.
 
         ``qubits`` binds the channel to specific wires instead of every
@@ -932,7 +931,7 @@ class NoiseModel:
         gate_time: float,
         qubits: Any = None,
         instructions: Any = None,
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Add an Aer-compatible T1/T2 thermal-relaxation channel.
 
         The channel is applied after each gate touching a targeted qubit
@@ -963,7 +962,7 @@ class NoiseModel:
 
     def add_bit_flip(
         self, p: float, qubits: Any = None, instructions: Any = None
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Add bit-flip noise with probability p.
 
         ``qubits`` binds the channel to specific wires instead of every
@@ -979,7 +978,7 @@ class NoiseModel:
 
     def add_phase_flip(
         self, p: float, qubits: Any = None, instructions: Any = None
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Add phase-flip noise with probability p.
 
         ``qubits`` binds the channel to specific wires instead of every
@@ -993,7 +992,7 @@ class NoiseModel:
         self._1q_kraus.append(kraus_phase_flip(p))
         return self
 
-    def add_readout_error(self, p: float) -> "NoiseModel":
+    def add_readout_error(self, p: float) -> NoiseModel:
         """Add readout bit-flip error with probability p."""
         self.readout_error = p
         self._readout_p = p
@@ -1002,7 +1001,7 @@ class NoiseModel:
     def add_two_qubit_depolarizing(
         self, p: float, convention: str = "total", qubits: Any = None,
         instructions: Any = None,
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Convenience wrapper for add_depolarizing with n_qubits=2.
 
         ``qubits`` binds the channel to exactly one ordered pair (e.g.
@@ -1017,10 +1016,10 @@ class NoiseModel:
     # ─── Custom errors (Qiskit ``QuantumError`` parity) ──────────────────
     def add_quantum_error(
         self,
-        error: "ErrorChannel",
+        error: ErrorChannel,
         instructions: Any = None,
         qubits: Any = None,
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Register a composable :class:`ErrorChannel`.
 
         This is the direct counterpart of Aer's
@@ -1068,7 +1067,7 @@ class NoiseModel:
 
     def add_kraus(
         self, kraus_ops: Any, qubits: Any = None, instructions: Any = None
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Custom Kraus channel; 1 or 2 qubits, inferred from the shape.
 
         The set must be trace preserving (``sum K^dagger K = I`` within
@@ -1083,7 +1082,7 @@ class NoiseModel:
 
     def add_unitary(
         self, unitary: Any, qubits: Any = None, instructions: Any = None
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Coherent error: one unitary, applied as a one-term Kraus set.
 
         The direct counterpart of Aer's ``coherent_unitary_error`` for 1- and
@@ -1101,7 +1100,7 @@ class NoiseModel:
         probabilities: Any,
         qubits: Any = None,
         instructions: Any = None,
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Mixture of unitaries — Aer's ``mixed_unitary_error`` parity.
 
         ``probabilities`` must sum to 1; the Kraus set is ``sqrt(p_i) U_i``.
@@ -1119,7 +1118,7 @@ class NoiseModel:
         p1: float = 0.0,
         qubits: Any = None,
         instructions: Any = ("reset",),
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """Reset error — Aer's ``reset_error`` parity.
 
         ``p0`` is the probability of ending in ``|0>`` after the reset, ``p1``
@@ -1154,7 +1153,7 @@ class NoiseModel:
         error_rate: float = 0.0,
         instructions: Any = None,
         mode: str = "static",
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """ZZ coupling on each edge, either static or cycle-aware.
 
         For every pair ``(a, b)`` the coherent error
@@ -1230,7 +1229,7 @@ class NoiseModel:
         kraus_ops: Any,
         qubits: Any,
         instructions: Any = None,
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """A 3-level (qutrit) channel on an explicit ``(data, flag)`` pair.
 
         A transmon's second excited level does not fit on one wire, so the
@@ -1284,7 +1283,7 @@ class NoiseModel:
         qubit: int,
         flag: int,
         instructions: Any = None,
-    ) -> "NoiseModel":
+    ) -> NoiseModel:
         """First-order leakage of ``qubit`` into the flagged |2> level.
 
         After every gate on ``qubit`` the channel of :func:`kraus_leakage`
@@ -1325,7 +1324,7 @@ class NoiseModel:
             rho = _apply_kraus_2q(rho, ordered, q0, q1, n)
         return rho
 
-    def apply_to_counts(self, counts: Dict[str, int], rng=None) -> Dict[str, int]:
+    def apply_to_counts(self, counts: dict[str, int], rng=None) -> dict[str, int]:
         """Apply readout error to measurement counts."""
         p = self.readout_error or self._readout_p
         if p <= 0:
@@ -1334,7 +1333,7 @@ class NoiseModel:
             rng = np.random.default_rng(42)
         elif not isinstance(rng, np.random.Generator):
             rng = np.random.default_rng(int(np.asarray(rng).flat[0]))
-        noisy: Dict[str, int] = {}
+        noisy: dict[str, int] = {}
         for bs, count in counts.items():
             for _ in range(count):
                 bits = list(bs)
@@ -1346,8 +1345,8 @@ class NoiseModel:
         return noisy
 
     def apply_to_counts_fast(
-        self, counts: Dict[str, int], rng=None
-    ) -> Dict[str, int]:
+        self, counts: dict[str, int], rng=None
+    ) -> dict[str, int]:
         """Vectorized readout-error sampling for binary count keys.
 
         Mathematically identical to :meth:`apply_to_counts` (each measured
@@ -1364,7 +1363,7 @@ class NoiseModel:
         elif not isinstance(rng, np.random.Generator):
             rng = np.random.default_rng(int(np.asarray(rng).flat[0]))
 
-        noisy: Dict[str, int] = {}
+        noisy: dict[str, int] = {}
         for bs, count in counts.items():
             count = int(count)
             n_bits = len(bs)
@@ -1447,7 +1446,7 @@ class NoiseModel:
                         f"{n_qubits} qubits"
                     )
 
-    def to_rust_kraus_ops(self, n_qubits: int) -> List[Tuple[int, List[float]]]:
+    def to_rust_kraus_ops(self, n_qubits: int) -> list[tuple[int, list[float]]]:
         """Convert the 1-qubit noise channels to the flat format expected by Rust.
 
         Returns list of (qubit, flat_kraus) tuples where flat_kraus encodes the
@@ -1469,7 +1468,7 @@ class NoiseModel:
         byte-identical to the historical format.
         """
         self._validate_targets(n_qubits)
-        ops: List[Tuple[int, List[float]]] = []
+        ops: list[tuple[int, list[float]]] = []
         if not self._1q_kraus:
             return ops
 
@@ -1479,7 +1478,7 @@ class NoiseModel:
 
     def _iter_1q_groups(
         self, n_qubits: int
-    ) -> "List[Tuple[int, Optional[Tuple[str, ...]], List[np.ndarray]]]":
+    ) -> list[tuple[int, tuple[str, ...] | None, list[np.ndarray]]]:
         """``(qubit, instruction_filter, composed_kraus)`` for every 1q group.
 
         Channels are composed per qubit in add order, but only *within* one
@@ -1488,9 +1487,9 @@ class NoiseModel:
         case) every qubit yields exactly one group, so the emitted Kraus set
         is byte-identical to the pre-filter format.
         """
-        out: List[Tuple[int, Optional[Tuple[str, ...]], List[np.ndarray]]] = []
+        out: list[tuple[int, tuple[str, ...] | None, list[np.ndarray]]] = []
         for q in range(n_qubits):
-            groups: List[List[Any]] = []  # [filter, composite] in add order
+            groups: list[list[Any]] = []  # [filter, composite] in add order
             for idx, kraus_set in enumerate(self._1q_kraus):
                 targets = _channel_targets(self.single_qubit_channels, idx)
                 if targets is not None and q not in targets:
@@ -1514,7 +1513,7 @@ class NoiseModel:
 
     def to_rust_kraus_ops_1q_instructions(
         self, n_qubits: int
-    ) -> Optional[List[Optional[Tuple[str, ...]]]]:
+    ) -> list[tuple[str, ...] | None] | None:
         """Per-entry instruction filters aligned with :meth:`to_rust_kraus_ops`.
 
         ``None`` when no 1q channel is filtered — the adapters then call the
@@ -1527,7 +1526,7 @@ class NoiseModel:
             key for _q, key, _composite in self._iter_1q_groups(n_qubits)
         ]
 
-    def to_rust_kraus_ops_2q(self) -> List[List[float]]:
+    def to_rust_kraus_ops_2q(self) -> list[list[float]]:
         """Flat Kraus sets for the 2-qubit channels (native DM path).
 
         Returns one flat list per 2q channel, in add-order.  Each 4x4 Kraus
@@ -1545,7 +1544,7 @@ class NoiseModel:
 
     def to_rust_kraus_ops_2q_targets(
         self,
-    ) -> List[Optional[Tuple[int, int]]]:
+    ) -> list[tuple[int, int] | None]:
         """Per-channel ordered pair aligned with :meth:`to_rust_kraus_ops_2q`.
 
         ``None`` = every two-qubit gate.  A channel registered for
@@ -1565,14 +1564,14 @@ class NoiseModel:
 
     def to_rust_kraus_ops_2q_instructions(
         self,
-    ) -> Optional[List[Optional[Tuple[str, ...]]]]:
+    ) -> list[tuple[str, ...] | None] | None:
         """Per-channel instruction filters aligned with
         :meth:`to_rust_kraus_ops_2q` (``None`` when nothing is filtered)."""
         if not self.has_targeted_2q_instructions:
             return None
         return [ch.instructions for ch in self.two_qubit_channels]
 
-    def to_rust_kraus_2q_modes(self) -> Optional[List[int]]:
+    def to_rust_kraus_2q_modes(self) -> list[int] | None:
         """Per-channel firing mode aligned with :meth:`to_rust_kraus_ops_2q`.
 
         ``0`` = after matching gates (historical), ``1`` = spectator: fired
@@ -1586,7 +1585,7 @@ class NoiseModel:
         ]
         return modes if any(modes) else None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize noise model to a dictionary.
 
         Includes the model-level ``placement``.  ``error_rate`` is the nominal
@@ -1610,7 +1609,7 @@ class NoiseModel:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "NoiseModel":
+    def from_dict(cls, data: dict[str, Any]) -> NoiseModel:
         """Rebuild a model from :meth:`to_dict` output.
 
         Accepts dicts written before ``convention`` and ``params`` existed:

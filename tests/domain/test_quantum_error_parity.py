@@ -240,7 +240,10 @@ class TestResetError:
             dtype=np.complex128,
         )
         assert _diff(_superop(kraus_reset(p0, p1)), expected) < 1e-12
-        assert _diff(_superop(kraus_reset(p0, p1)), SuperOp(aer_noise.reset_error(p0, p1)).data) < 1e-12
+        assert (
+            _diff(_superop(kraus_reset(p0, p1)), SuperOp(aer_noise.reset_error(p0, p1)).data)
+            < 1e-12
+        )
 
     def test_kraus_set_is_trace_preserving(self):
         assert ErrorChannel.from_reset(0.1, 0.2).is_trace_preserving
@@ -584,7 +587,10 @@ class TestCrosstalk:
         shorthand = sf.NoiseModel().add_crosstalk(
             [(0, 1)], theta, error_rate=rate, instructions=["cx"]
         )
-        assert _diff(_sf_rho(_sf_phase_probe(), shorthand, 2), _clean_rho(_sf_phase_probe(), 2)) > 1e-3
+        assert (
+            _diff(_sf_rho(_sf_phase_probe(), shorthand, 2), _clean_rho(_sf_phase_probe(), 2))
+            > 1e-3
+        )
 
     def test_empty_edge_list_is_rejected(self):
         with pytest.raises(ValueError, match="at least one"):

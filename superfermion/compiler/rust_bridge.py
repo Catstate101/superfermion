@@ -11,13 +11,11 @@ Usage:
 """
 from __future__ import annotations
 
-
-from __future__ import annotations
 import re
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from superfermion.circuit import Circuit
+    from superfermion.circuit import Circuit, GateRecord
 
 # Pre-import simplify_clifford at module level to avoid triggering
 # numpy/stabilizer imports inside benchmark measurement contexts.
@@ -44,7 +42,7 @@ _QASM_LINE_RE = re.compile(
 _NON_UNITARY_RECORDS = frozenset({"measure", "measure_all", "barrier", "reset"})
 
 
-def _fast_qasm_to_circuit(qasm: str, n_qubits: int) -> "Circuit | None":
+def _fast_qasm_to_circuit(qasm: str, n_qubits: int) -> Circuit | None:
     """Parse the compiler's predictable QASM3 output into an SF Circuit.
 
     Handles standard and parameterized gates: h, s, sdg, x, y, z, cx, cz,
@@ -109,7 +107,7 @@ def _fast_qasm_to_circuit(qasm: str, n_qubits: int) -> "Circuit | None":
 _MISSING = object()
 
 
-def _make_gate(name: str, qubits: list, params: list | None = None) -> "GateRecord":
+def _make_gate(name: str, qubits: list, params: list | None = None) -> GateRecord:
     """Create a GateRecord."""
     from superfermion.circuit import GateRecord
     return GateRecord(name=name, qubits=qubits, params=params or [])
@@ -126,13 +124,13 @@ def _eval_qasm_angle(s: str) -> float:
 
 
 def compile_rust(
-    circuit: "Circuit",
+    circuit: Circuit,
     level: int = 1,
-    target: Optional[object] = None,
+    target: object | None = None,
     pre_simplified: bool = False,
     skip_routing: bool = False,
-    twirl_seed: Optional[int] = None,
-) -> "Circuit":
+    twirl_seed: int | None = None,
+) -> Circuit:
     """Compile a circuit using the Rust-native compilation pipeline.
 
     This is the **sole** compilation path. The Rust ``sf-compiler`` crate
@@ -222,6 +220,8 @@ def compile_rust(
     # the target actually selects one of them.
     from superfermion.compiler.native_lowering import (
         finalize as _finalize,
+    )
+    from superfermion.compiler.native_lowering import (
         prepare as _prepare,
     )
 

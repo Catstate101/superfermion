@@ -33,9 +33,9 @@ on this path.
 
 import numpy as np
 import pytest
+from superfermion._sf_core import State as _RustState
 
 import superfermion as sf
-from superfermion._sf_core import State as _RustState
 from superfermion.circuit import Circuit
 from superfermion.devices.noisy_dm_state import _to_little_endian
 

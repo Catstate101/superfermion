@@ -118,7 +118,8 @@ def _state_grad_with_check(self, observable, dag, param_values):
 def _state_qfim_with_check(self, dag, param_values):
     """Quantum Fisher information matrix of this state over ``dag``'s symbols.
 
-    ``F_ij = 4 Re[ \u27e8\u2202_i\u03c8|\u2202_j\u03c8\u27e9 - \u27e8\u2202_i\u03c8|\u03c8\u27e9\u27e8\u03c8|\u2202_j\u03c8\u27e9 ]``
+    ``F_ij = 4 Re[ \u27e8\u2202_i\u03c8|\u2202_j\u03c8\u27e9
+    - \u27e8\u2202_i\u03c8|\u03c8\u27e9\u27e8\u03c8|\u2202_j\u03c8\u27e9 ]``
     -- the Bures / Fubini-Study metric, i.e. the classical Fisher information
     of the pure state itself.  It is real, symmetric and positive
     semi-definite, and it is the metric tensor that a natural-gradient step
