@@ -196,6 +196,12 @@ result.plot()                          # histogram plot (saves to file)
 
 ## Noise Models
 
+Gate noise runs on the `density_matrix` method only; the other methods warn and ignore
+the channels (readout error still applies). This is the short version — the
+**[Noise Models guide](/docs/guides/noise)** covers placement modes, instruction and
+wire filters, depolarizing conventions, custom `ErrorChannel`s, reset, leakage and
+crosstalk, each with a runnable snippet.
+
 ```python
 noise = (sf.NoiseModel()
     .add_depolarizing(0.001)           # symmetric depolarizing

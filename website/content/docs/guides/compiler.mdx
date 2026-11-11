@@ -30,6 +30,76 @@ ibm_target = HardwareSpec(
 compiled = sf.compile(qc, level=2, target=ibm_target)
 ```
 
+## Targets by name
+
+`target=` also accepts the name of a built-in preset, which is what most examples use. A
+string is resolved through the same registry as `get_spec()`, and an unknown name is an
+error rather than a silent no-op — before, every `HardwareSpec` attribute lookup on the
+string fell back and the circuit was compiled for no device at all.
+
+```python
+import superfermion as sf
+
+qc = sf.Circuit(5).h(0).cnot(0, 3).cnot(1, 4).swap(2, 3)
+compiled = sf.compile(qc, level=2, target="ibm_eagle")
+print(compiled._metadata["target"])      # ibm_eagle
+
+try:
+    sf.compile(qc, target="not_a_device")
+except ValueError as exc:
+    print(exc)
+# unknown hardware target 'not_a_device' (known targets: ['cluster', 'ibm_eagle',
+# 'ibm_heron', 'ionq_aria', 'ionq_forte', 'jax', 'linear_5', 'rigetti_ankaa'])
+```
+
+## Reproducible compilation
+
+Level 2 applies a Pauli twirl to 2-qubit gates: the gate list is randomised per call, so two
+level-2 compiles of one input can differ gate for gate while the unitary is unchanged.
+`twirl_seed=` makes the gate list reproducible.
+
+```python
+import superfermion as sf
+
+qc = sf.Circuit(3).h(0).cnot(0, 1).cnot(1, 2).rx(0.4, 2)
+
+def names(circuit):
+    return [record["name"] for record in circuit.to_gate_list()]
+
+seeded_a = names(sf.compile(qc, level=2, target="ibm_eagle", twirl_seed=7))
+seeded_b = names(sf.compile(qc, level=2, target="ibm_eagle", twirl_seed=7))
+free_a = names(sf.compile(qc, level=2, target="ibm_eagle"))
+free_b = names(sf.compile(qc, level=2, target="ibm_eagle"))
+
+print(seeded_a == seeded_b)   # True
+print(free_a == free_b)       # False
+```
+
+## Checking a compile
+
+Compilation preserves the input unitary up to a global phase, so compare with a
+phase-invariant overlap rather than a raw difference — a correct ECR decomposition can differ
+from the input by a factor of `-i` and still be exact.
+
+```python
+import numpy as np
+import superfermion as sf
+
+def u(circuit):
+    return np.asarray(circuit.to_unitary())
+
+def overlap(a, b):
+    return abs(np.trace(a.conj().T @ b)) / a.shape[0]
+
+qc = sf.Circuit(3).h(0).cz(1, 2).rz(0.3, 1).cnot(2, 0)
+for target in ("ibm_eagle", "ibm_heron", None):
+    out = sf.compile(qc, level=2, target=target, twirl_seed=1) if target else sf.compile(qc, level=1)
+    print(target, f"{overlap(u(qc), u(out)):.12f}")
+# ibm_eagle 1.000000000000
+# ibm_heron 1.000000000000
+# None 1.000000000000
+```
+
 ## Optimization Levels
 
 | Level | Passes | Description |
@@ -62,11 +132,26 @@ print(f"After cancellation: {result.gate_count} gates")  # 0
 Sequential rotations around the same axis merge: `RZ(a) RZ(b) → RZ(a+b)`.
 
 ```python
-from superfermion.compiler import apply_noise_suppression
+import superfermion as sf
 
 qc = sf.Circuit(1).rz(0.3, 0).rz(0.7, 0).rz(-0.2, 0)
 result = sf.compile(qc, level=1)
-print(f"After merging: {result.gate_count} gates")  # ~1 gate
+print(f"After merging: {result.gate_count} gates")  # 1 gate, RZ(0.8)
+```
+
+The cancellation threshold is `1e-15` — about two ulp of pi — so a genuine sub-picoradian
+phase survives the pass, while an exact cancellation still removes the pair:
+
+```python
+import numpy as np
+import superfermion as sf
+
+small = sf.compile(sf.Circuit(1).rz(7.4e-13, 0), level=1)
+angle = np.angle(np.asarray(small.to_unitary())[1, 1])
+print(small.gate_count, f"{angle:.1e}")          # 1 7.4e-13  (kept)
+
+tiny = sf.Circuit(1).rz(1e-13, 0).rz(-1e-13, 0)
+print(sf.compile(tiny, level=1).gate_count)      # 0  (exactly cancels)
 ```
 
 ### Basis Translation
@@ -80,6 +165,24 @@ from superfermion.compiler import BasisTranslationPass
 qc = sf.Circuit(1).h(0)
 result = BasisTranslationPass(["RZ", "RX"]).run(qc)
 print(f"H decomposed to: {result.gate_count} native gates")  # 3 gates
+```
+
+The ECR arm is exact. A device whose two-qubit basis is `ecr` — `ibm_heron` only emits ECR —
+produces a decomposition that overlaps the input by 1.0, so `cz` and `cx` survive the basis
+translation with no residual:
+
+```python
+import numpy as np
+import superfermion as sf
+
+def u(circuit):
+    return np.asarray(circuit.to_unitary())
+
+qc = sf.Circuit(2).cz(0, 1)
+out = sf.compile(qc, level=1, target="ibm_heron")
+print([record["name"] for record in out.to_gate_list()])
+# ['U', 'RZ', 'SX', 'RZ', 'ECR', 'X', 'RZ', 'U']
+print(f"overlap = {abs(np.trace(u(qc).conj().T @ u(out))) / 4:.12f}")   # 1.000000000000
 ```
 
 ### SWAP to CNOT Decomposition
@@ -114,7 +217,10 @@ result = dd_pass.run(qc)
 
 ## Qubit Routing
 
-SABRE routing maps logical qubits to physical hardware topology:
+SABRE routing maps logical qubits to physical hardware topology. Gates with three or more
+wire operands (`ccx`, `cswap`) have no single edge to sit on, so they are lowered to
+1- and 2-qubit gates *before* routing: the CNOTs the lowering emits are routed like any
+other CNOT, and the connectivity guard sees a legal circuit.
 
 ```python
 from superfermion.compiler.specs import HardwareSpec
@@ -158,7 +264,9 @@ print(f"custom: {custom.n_qubits} qubits, {len(custom.coupling_map)} couplings")
 
 ## Noise Model
 
-Attach a noise model to simulate realistic hardware:
+A noise model is attached at execution time, not at compile time. The full channel
+catalogue — instruction filters, wire targets, custom Kraus channels, reset errors, qutrit
+leakage and crosstalk — is documented in **[Noise Models](/docs/guides/noise)**.
 
 ```python
 import superfermion as sf
@@ -173,6 +281,9 @@ noise = sf.NoiseModel() \
 result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
 print(f"purity = {result.metadata['purity']:.4f}")
 ```
+
+Gate noise is applied by the density-matrix engine only; the pure-state methods warn and
+ignore it, so a noisy compile-and-run must use `method="density_matrix"`.
 
 ## Auto-Compilation via `sf.run()`
 
