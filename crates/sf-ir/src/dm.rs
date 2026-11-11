@@ -234,6 +234,58 @@ impl DensityMatrixState {
         crate::simd::dm_super_1q(&mut self.data, q, m);
     }
 
+    /// Reset a qubit: ρ → |0⟩⟨0|_q ⊗ Tr_q(ρ) — the exact deterministic CPTP
+    /// reset map (trace the qubit out, re-prepare |0⟩).
+    ///
+    /// In the interleaved engine buffer `data[ket | (bra << n)]` the surviving
+    /// block is `ket_q = bra_q = 0`, and each of its entries is the SUM of the
+    /// two *diagonal* q-blocks (`ρ[k0,b0] + ρ[k1,b1]`) — that sum *is* the
+    /// partial trace.  Everything with `bra_q = 1` is discarded.  No Kraus set
+    /// and no 4^n temporary.
+    ///
+    /// Index convention: qubit `q` is bit `q` of the ket index and bit `n+q`
+    /// of the flat buffer (`dm_super_1q` builds its masks as `1 << q` and
+    /// `1 << (n + q)`), i.e. LSB-first — the byte-order re-shuffle for the
+    /// public little-endian matrix happens upstream, not here.
+    pub fn apply_reset(&mut self, qubit: usize) {
+        self.assert_engine("apply_reset");
+        let n = self.n_qubits;
+        let dim = 1usize << n;
+        let bit = 1usize << qubit; // qubit q inside a ket/bra index
+        let bra_bit = bit << n; // same qubit inside the flat buffer
+        let stride = bit << 1; // period of the bit-q pattern along a row
+        let zero = Complex64::new(0.0, 0.0);
+        for bra in 0..dim {
+            let base = bra << n;
+            if bra & bit != 0 {
+                // bra_q = 1: the whole bra row is discarded
+                self.data[base..base + dim].fill(zero);
+            } else {
+                // bra_q = 0: ρ'[k, b] = ρ[k, b] + ρ[k|bit, b|bit].  The source
+                // sits in the SAME column of the bra_q = 1 row, so both the
+                // ket and bra indices pick up `bit` — folding only the ket
+                // would mix in an off-diagonal coherence (non-Hermitian ρ).
+                // The (ket_q = 1, bra_q = 0) half of this row is a coherence
+                // between a kept and a discarded index, so it is cleared too;
+                // skipping it left the boundary term that leaked into ρ[3,0].
+                let from = base + bra_bit;
+                let mut b = 0;
+                while b < dim {
+                    for k in 0..bit {
+                        let dest = base + b + k; // ket_q = 0, bra_q = 0
+                        let src = from + b + bit + k; // ket_q = 1, bra_q = 1
+                        let discarded = base + b + bit + k; // ket_q = 1, bra_q = 0
+                        let folded = self.data[dest] + self.data[src];
+                        self.data[dest] = folded;
+                        self.data[src] = zero;
+                        self.data[discarded] = zero;
+                    }
+                    b += stride;
+                }
+            }
+        }
+    }
+
     /// Pre-summed 2-qubit channel superoperator M = Σ_c K_c ⊗ K_c* on the
     /// closed (ket q0q1, bra n+q0/q1) 16-blocks (row = 4·ket + bra, ket
     /// index = 2·bit(q0) + bit(q1) — the same packing `dm_super_2q` and the

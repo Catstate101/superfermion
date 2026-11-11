@@ -9,6 +9,7 @@ Rust simulation core. Statevector, MPS, stabilizer, and density matrix
 simulation methods with native adjoint differentiation, quantum error
 correction, and multi-framework interop.
 
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/superfermion?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/superfermion)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://rust-lang.org)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)

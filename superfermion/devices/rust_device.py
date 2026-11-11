@@ -11,24 +11,23 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import numpy as np
 
-from superfermion.circuit import Circuit
-from superfermion.devices import DeviceCapabilities
-from superfermion.results import LazyDict, RunResult
 from superfermion._classical_order import apply_to_result as _apply_classical_order
 from superfermion._fixes import (
     PermutedMPSState,
     mps_routing_permutation,
-    remap_counts,
-    unpermute_statevector,
 )
 from superfermion._limits import (
     guard_state_allocation,
     limit_from_kwargs,
     validate_bond_dim,
 )
+from superfermion.circuit import Circuit
+from superfermion.devices import DeviceCapabilities
+from superfermion.results import LazyDict, RunResult
 
 # Above this qubit count the exact |c|² probability table costs more to
 # build than typical runs save by reading it — defer it until first use.
@@ -108,8 +107,8 @@ def _readout_only(noise_model: Any) -> bool:
 
 
 def _apply_readout_to_counts(
-    counts: Dict[str, int], noise_model: Any, seed: Any
-) -> Dict[str, int]:
+    counts: dict[str, int], noise_model: Any, seed: Any
+) -> dict[str, int]:
     """Apply a readout-only model to sampled counts on pure-state paths."""
     if not counts or not _readout_only(noise_model):
         return counts
@@ -129,7 +128,7 @@ def _apply_readout_to_counts(
 _DEFAULT_SEED = 42
 
 
-def _resolve_seed(kwargs: Dict[str, Any]) -> tuple:
+def _resolve_seed(kwargs: dict[str, Any]) -> tuple:
     """``(seed, drawn)`` for this run — draws from OS entropy on ``seed=None``.
 
     STAB-1: the seed defaulted to the literal 42 on *every* path, so repeated
@@ -195,19 +194,60 @@ def _dm_binding_call(
     noise_ops_2q: Any,
     placement: Any,
     noise_2q_targets: Any = None,
+    noise_1q_instrs: Any = None,
+    noise_2q_instrs: Any = None,
+    noise_2q_modes: Any = None,
 ) -> Any:
     """Call a noisy-DM binding method tolerating older call signatures.
 
-    Tries the full ``(noise_ops, noise_2q_ops, placement, noise_2q_targets)``
-    signature first (only when the model actually carries 2q targets), then
-    degrades to ``(noise_ops, noise_2q_ops, placement)``,
-    ``(noise_ops, noise_2q_ops)`` and ``(noise_ops)`` with a documented
-    RuntimeWarning instead of silently changing semantics (2q targets
-    ignored / 2q channels dropped / non-default placement ignored).
-    ``AttributeError`` (method absent on older wheels) propagates so callers
-    can fall back.
+    Tries the full signature
+    ``(noise_ops, noise_2q_ops, placement, noise_2q_targets, noise_1q_instructions,
+    noise_2q_instructions, noise_2q_modes)`` first (only when the model actually
+    carries instruction filters, 2q targets or spectator channels), then
+    degrades to ``(noise_ops, noise_2q_ops, placement, noise_2q_targets)``,
+    ``(noise_ops, noise_2q_ops, placement)``, ``(noise_ops, noise_2q_ops)`` and
+    ``(noise_ops)`` with a documented RuntimeWarning instead of silently
+    changing semantics. ``AttributeError`` (method absent on older wheels)
+    propagates so callers can fall back.
     """
     fn = getattr(dag, method_name)
+    if noise_2q_modes is not None:
+        try:
+            return fn(
+                noise_ops,
+                noise_ops_2q,
+                placement,
+                noise_2q_targets,
+                noise_1q_instrs,
+                noise_2q_instrs,
+                noise_2q_modes,
+            )
+        except TypeError:
+            warnings.warn(
+                "This superfermion build does not support cycle-aware "
+                "(spectator) crosstalk; the spectator channels are applied "
+                "after every two-qubit gate on their edge instead.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+    if noise_1q_instrs is not None or noise_2q_instrs is not None:
+        try:
+            return fn(
+                noise_ops,
+                noise_ops_2q,
+                placement,
+                noise_2q_targets,
+                noise_1q_instrs,
+                noise_2q_instrs,
+            )
+        except TypeError:
+            warnings.warn(
+                "This superfermion build does not support per-instruction "
+                "noise filters; the filtered channels are applied after every "
+                "instruction touching their qubits instead.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
     if noise_2q_targets is not None:
         try:
             return fn(noise_ops, noise_ops_2q, placement, noise_2q_targets)
@@ -252,6 +292,9 @@ def _call_dm_noisy_state(
     noise_ops_2q: Any,
     placement: Any = None,
     noise_2q_targets: Any = None,
+    noise_1q_instrs: Any = None,
+    noise_2q_instrs: Any = None,
+    noise_2q_modes: Any = None,
 ) -> Any:
     """Native noisy-DM call: ``(state_handle, flat public rho)``.
 
@@ -265,6 +308,9 @@ def _call_dm_noisy_state(
         noise_ops_2q,
         placement,
         noise_2q_targets,
+        noise_1q_instrs,
+        noise_2q_instrs,
+        noise_2q_modes,
     )
 
 
@@ -274,6 +320,9 @@ def _call_dm_noisy_state_view(
     noise_ops_2q: Any,
     placement: Any = None,
     noise_2q_targets: Any = None,
+    noise_1q_instrs: Any = None,
+    noise_2q_instrs: Any = None,
+    noise_2q_modes: Any = None,
 ) -> Any:
     """Single-buffer noisy-DM call: ``(state_handle, read-only 2-D rho view)``.
 
@@ -291,6 +340,9 @@ def _call_dm_noisy_state_view(
         noise_ops_2q,
         placement,
         noise_2q_targets,
+        noise_1q_instrs,
+        noise_2q_instrs,
+        noise_2q_modes,
     )
 
 
@@ -357,6 +409,9 @@ def _dm_noisy_state_and_rho(
     n: int,
     placement: Any = None,
     noise_2q_targets: Any = None,
+    noise_1q_instrs: Any = None,
+    noise_2q_instrs: Any = None,
+    noise_2q_modes: Any = None,
 ) -> Any:
     """``(state_handle, rho_2d)`` for the noisy DM path.
 
@@ -366,14 +421,16 @@ def _dm_noisy_state_and_rho(
     """
     try:
         state, rho_view = _call_dm_noisy_state_view(
-            dag, noise_ops, noise_ops_2q, placement, noise_2q_targets
+            dag, noise_ops, noise_ops_2q, placement, noise_2q_targets,
+            noise_1q_instrs, noise_2q_instrs, noise_2q_modes,
         )
         return state, np.asarray(rho_view, dtype=np.complex128)
     except AttributeError:
         pass
     try:
         state, rho_flat = _call_dm_noisy_state(
-            dag, noise_ops, noise_ops_2q, placement, noise_2q_targets
+            dag, noise_ops, noise_ops_2q, placement, noise_2q_targets,
+            noise_1q_instrs, noise_2q_instrs, noise_2q_modes,
         )
         return state, np.asarray(rho_flat, dtype=np.complex128).reshape(2**n, 2**n)
     except AttributeError:
@@ -401,10 +458,16 @@ def _dm_noisy_state_and_rho(
 def _is_dynamic_circuit(circuit: Circuit) -> bool:
     """True when a circuit needs mid-circuit (dynamic) semantics.
 
-    Triggers on: any ``RESET``, any classically conditioned gate
-    (``c_if``), or a ``MEASURE`` whose qubit is touched again later
-    (gate, reset, or second measurement) — i.e. a measure that is not
-    terminal. Purely terminal-measure circuits keep the fast exact path.
+    Triggers on: any classically conditioned gate (``c_if``), or a
+    ``MEASURE`` whose qubit is touched again later (gate, reset, or second
+    measurement) — i.e. a measure that is not terminal. Purely
+    terminal-measure circuits keep the fast exact path.
+
+    ``RESET`` does **not** trigger it: a reset is a deterministic CPTP map,
+    so the density-matrix engine realises it exactly (``apply_reset``).  It
+    still needs the trajectory engine on every other method, because those
+    carry a pure state that a reset would have to project — see the
+    ``_has_reset`` guard at the dispatch site.
     """
     circuit._ensure_gates()
     gates = circuit._gates
@@ -412,14 +475,18 @@ def _is_dynamic_circuit(circuit: Circuit) -> bool:
         name = g.name.upper()
         if g.condition is not None:
             return True
-        if name == "RESET":
-            return True
         if name == "MEASURE":
             q = g.qubits[0]
             for later in gates[i + 1:]:
                 if q in later.qubits:
                     return True
     return False
+
+
+def _has_reset(circuit: Circuit) -> bool:
+    """True when the circuit contains a ``RESET`` instruction."""
+    circuit._ensure_gates()
+    return any(g.name.upper() == "RESET" for g in circuit._gates)
 
 
 class RustDevice:
@@ -500,10 +567,15 @@ class RustDevice:
         # ``seed=None`` means "draw a fresh one"; omitting it keeps 42.
         seed, seed_was_drawn = _resolve_seed(kwargs)
         kwargs["seed"] = seed
-        # Mid-circuit (dynamic) circuits: measure/reset/feed-forward change
-        # the state during the circuit, so they need per-shot trajectory
-        # replay instead of a single unitary evolution + terminal sampling.
-        if _is_dynamic_circuit(circuit):
+        # Mid-circuit (dynamic) circuits: a non-terminal measurement or a
+        # feed-forward changes the state during the circuit, so they need
+        # per-shot trajectory replay instead of a single unitary evolution +
+        # terminal sampling.  A bare RESET only needs that replay on the
+        # pure-state methods: on the density-matrix path it is an exact
+        # channel, which is what lets `add_reset_error` bind to it.
+        if _is_dynamic_circuit(circuit) or (
+            self._method != "density_matrix" and _has_reset(circuit)
+        ):
             result = self._run_dynamic(circuit, shots, **kwargs)
         elif self._method == "stabilizer":
             result = self._run_stabilizer(circuit, shots, **kwargs)
@@ -649,7 +721,7 @@ class RustDevice:
         else:
             counts = {}
 
-        def _exact_probabilities() -> Dict[str, float]:
+        def _exact_probabilities() -> dict[str, float]:
             probs = (
                 np.abs(final_state) ** 2
                 if final_state is not None else np.asarray(state.probabilities())
@@ -660,7 +732,7 @@ class RustDevice:
                 if p > 1e-15
             }
 
-        probabilities: Dict[str, float] = (
+        probabilities: dict[str, float] = (
             _exact_probabilities()
             if return_statevector and n_qubits <= _EAGER_PROBS_MAX_QUBITS
             else LazyDict(_exact_probabilities)
@@ -758,7 +830,7 @@ class RustDevice:
             # subclass, so access semantics are unchanged.
             nq = circuit.n_qubits
 
-            def _exact_mps_probabilities() -> Dict[str, float]:
+            def _exact_mps_probabilities() -> dict[str, float]:
                 probs = np.abs(sv) ** 2
                 return {
                     format(i, f"0{nq}b"): float(p)
@@ -793,10 +865,10 @@ class RustDevice:
     def _run_density_matrix(self, circuit: Circuit, shots: int, **kwargs: Any) -> RunResult:
         """Density matrix simulation — Rust core for both noiseless and noisy paths."""
         from superfermion.backends.density_matrix import (
-            _dm_to_probs,
-            _dm_keys,
-            _sample_dm,
             _apply_readout_noise,
+            _dm_keys,
+            _dm_to_probs,
+            _sample_dm,
         )
         noise_model = kwargs.get("noise_model", None)
         seed = kwargs.get("seed", 42)
@@ -818,6 +890,22 @@ class RustDevice:
             noise_2q_targets = None
             if getattr(noise_model, "has_targeted_2q", False):
                 noise_2q_targets = noise_model.to_rust_kraus_ops_2q_targets()
+            # Per-instruction filters (Qiskit add_quantum_error parity) ride
+            # the same optional-argument ladder: they are only sent when a
+            # channel actually carries one, so unfiltered runs keep the
+            # historical call and its exact code path.
+            noise_1q_instrs = None
+            if getattr(noise_model, "has_targeted_1q", False):
+                noise_1q_instrs = noise_model.to_rust_kraus_ops_1q_instructions(n)
+            noise_2q_instrs = None
+            if getattr(noise_model, "has_targeted_2q_instructions", False):
+                noise_2q_instrs = noise_model.to_rust_kraus_ops_2q_instructions()
+            # Cycle-aware (spectator) crosstalk: only sent when a channel is
+            # actually spectator-placed, so ordinary models keep the
+            # historical call and skip the core's cycle bookkeeping.
+            noise_2q_modes = None
+            if hasattr(noise_model, "to_rust_kraus_2q_modes"):
+                noise_2q_modes = noise_model.to_rust_kraus_2q_modes()
             if noise_ops or noise_ops_2q:
                 # Native handle: the noisy DM data stays in Rust and is moved
                 # into the State handle (zero-copy), avoiding the numpy
@@ -836,6 +924,9 @@ class RustDevice:
                     n,
                     getattr(noise_model, "placement", "touch"),
                     noise_2q_targets,
+                    noise_1q_instrs,
+                    noise_2q_instrs,
+                    noise_2q_modes,
                 )
                 noisy_state_ready = True
             else:
@@ -865,7 +956,7 @@ class RustDevice:
             for i, p in enumerate(probs) if p > 1e-12
         }
 
-        counts: Dict[str, int] = {}
+        counts: dict[str, int] = {}
         if shots > 0:
             counts = _sample_dm(rho, shots, rng)
             if noise_model is not None and noise_model._readout_p > 0:
@@ -970,7 +1061,7 @@ class RustDevice:
             )
             amplitudes = np.asarray(fallback_state.numpy(), dtype=np.complex128)
 
-            def _stab_probabilities() -> Dict[str, float]:
+            def _stab_probabilities() -> dict[str, float]:
                 probs = np.abs(amplitudes) ** 2
                 return {
                     format(i, f"0{nq}b"): float(p)
@@ -1002,16 +1093,16 @@ class RustDevice:
 
     def _prepare_dag(self, circuit: Circuit):
         """Decompose unsupported gates and build the Rust IR DAG."""
-        _RUST_DECOMP_GATES = (
+        _rust_decomp_gates = (
             "CRY", "CH", "U1", "U2", "U3",
         )
         needs_decomp = any(
-            g.name.upper() in _RUST_DECOMP_GATES
+            g.name.upper() in _rust_decomp_gates
             for g in circuit._gates
         )
 
         if needs_decomp:
-            from superfermion.backends.turbo import fuse_all_gates, decompose_for_rust
+            from superfermion.backends.turbo import decompose_for_rust, fuse_all_gates
             decomposed = Circuit(circuit.n_qubits)
             decomposed._gates = decompose_for_rust(circuit._gates)
             if getattr(circuit, "_has_large_unitary", False):

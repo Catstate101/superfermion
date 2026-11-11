@@ -290,8 +290,25 @@ impl BasisTranslationPass {
                 if self.has("ECR") {
                     vec![(OpType::ECR, vec![qubits[0], qubits[1]])]
                 } else {
+                    // ECR(q0, q1) = Rz(pi/2)@q0, SX@q1, CX(q0 -> q1), X@q0.
+                    //
+                    // The previous arm emitted SX(q0), CX(q0, q1), X(q0),
+                    // whose product is block diagonal -- the unified
+                    // overlap with ECR was |cos(pi/4)| = 0.70710678 on every
+                    // non-ECR target, i.e. the compiled circuit implemented
+                    // an operator that was not the input (found by the random
+                    // compile sweep on rigetti_ankaa / linear_5 / line8 /
+                    // grid3x3; ibm_eagle, which has native ECR, was exact).
+                    //
+                    // The identity above reproduces the ECR matrix to
+                    // 1.1e-16 in this crate's wire convention and matches
+                    // Qiskit's ECRGate definition transpiled to
+                    // {cx, rz, sx, x} gate for gate.
                     let (q0, q1) = (qubits[0], qubits[1]);
-                    let mut v = vec![(OpType::SX, vec![q0])];
+                    let mut v = vec![
+                        (OpType::Rz(Parameter::Const(PI2)), vec![q0]),
+                        (OpType::SX, vec![q1]),
+                    ];
                     v.extend(self.cx_decomp(q0, q1));
                     v.push((OpType::X, vec![q0]));
                     v
@@ -431,6 +448,42 @@ mod tests {
 
         assert_eq!(dag.count_ops_of_type("Rzz"), 0);
         assert_eq!(dag.count_ops_of_type("CNOT"), 2);
+    }
+
+    #[test]
+    fn test_ecr_decomposition_is_ecr() {
+        // Every non-ECR basis must reproduce the ECR operator.  The arm used
+        // to return SX(q0), CX(q0, q1), X(q0), whose unified overlap with ECR
+        // is |cos(pi/4)| = 0.70710678 -- invisible to gate-set checks, fatal
+        // to the compiled unitary.
+        let mut reference = QuantumDAG::new(2, 0);
+        reference.add_op(OpType::ECR, &[0, 1]);
+        let expected = reference.to_unitary();
+
+        for pass in [cz_basis(), cx_basis()] {
+            let mut dag = QuantumDAG::new(2, 0);
+            dag.add_op(OpType::ECR, &[0, 1]);
+            pass.run(&mut dag).unwrap();
+            assert_eq!(dag.count_ops_of_type("ECR"), 0);
+
+            let got = dag.to_unitary();
+            // Align the global phase before comparing entry-wise.  The overlap
+            // is <expected|got>, so its phase *undoes* the one in ``got``.
+            let mut overlap = num_complex::Complex64::new(0.0, 0.0);
+            for i in 0..4 {
+                for j in 0..4 {
+                    overlap += expected[(i, j)] * got[(i, j)].conj();
+                }
+            }
+            let phase = overlap / overlap.norm();
+            let mut worst = 0.0_f64;
+            for i in 0..4 {
+                for j in 0..4 {
+                    worst = worst.max((expected[(i, j)] - phase * got[(i, j)]).norm());
+                }
+            }
+            assert!(worst < 1e-9, "ECR decomposition error {}", worst);
+        }
     }
 
     #[test]

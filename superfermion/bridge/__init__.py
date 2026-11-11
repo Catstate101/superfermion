@@ -297,6 +297,59 @@ def _looks_like_qasm3(text: str) -> bool:
     )
 
 
+def _split_qasm2_statements(qasm_str: str) -> list[str]:
+    """Return QASM 2 statements, however many share a physical line.
+
+    QASM 2 does not require one statement per line, and minified programs put a
+    whole circuit on one line.  Feeding such a line to the per-statement parser
+    read only its first gate and dropped the rest (or, when that gate carried an
+    angle, folded every ``q[i]`` on the line into its operand list).
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    in_string = False
+    for raw in qasm_str.split('\n'):
+        # A ``//`` comment runs to end of line, unless it sits in a string.
+        cut = raw.find('//')
+        if cut != -1 and raw[:cut].count('"') % 2 == 0:
+            raw = raw[:cut]
+        for ch in raw:
+            if ch == '"':
+                in_string = not in_string
+                buf.append(ch)
+            elif ch == '(' and not in_string:
+                depth += 1
+                buf.append(ch)
+            elif ch == ')' and not in_string:
+                depth -= 1
+                buf.append(ch)
+            elif ch == ';' and not in_string and depth <= 0:
+                buf.append(ch)
+                statement = ''.join(buf).strip()
+                if statement:
+                    statements.append(statement)
+                buf = []
+            else:
+                buf.append(ch)
+        # A statement may continue on the next line, so only flush here when the
+        # buffer already looks complete: a qubit operand ended it, or a ';' did.
+        text = ''.join(buf)
+        if not in_string and depth <= 0 and (
+            text.rstrip().endswith(';') or ']' in text
+        ):
+            if text.strip():
+                statements.append(text.strip())
+            buf = []
+        else:
+            # Keep a separator so tokens from different lines never glue.
+            buf.append(' ')
+    tail = ''.join(buf).strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
 def from_qasm(qasm_str: str) -> sf.Circuit:
     """Parse an OpenQASM 2.0/3.0 string into a Superfermion Circuit.
 
@@ -392,7 +445,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
     import re
 
     from superfermion.circuit import GateRecord as _GateRecord
-    lines = [ln.strip() for ln in qasm_str.strip().split('\n') if ln.strip()]
+    lines = _split_qasm2_statements(qasm_str)
     # Carried into fallback errors so a gate this parser cannot map still tells
     # the caller why the native parser was not used.
     _native_hint = (
@@ -408,12 +461,25 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
         'rx': 'rx', 'ry': 'ry', 'rz': 'rz',
         'u': 'u', 'u3': 'u',
         'u2': 'u',  # u2(phi, lam) == u3(pi/2, phi, lam); params prepended below
-        'p': 'p', 'u1': 'p',
+        'p': 'p', 'u1': 'p', 'r1': 'p',
         'cx': 'cx', 'cnot': 'cx',
         'cz': 'cz',
         'swap': 'swap',
         'ccx': 'ccx',
+        # Additive: the qelib1 names ``to_qasm`` now emits.  Without these the
+        # fallback rejected circuits the native parser accepts (and the export
+        # it was handed).  ``cu1(lam)`` is diag(1,1,1,e^{ilam}) == cp(lam);
+        # ``u0`` is the identity.
+        'id': 'id', 'u0': 'id',
+        'ch': 'ch', 'crx': 'crx', 'cry': 'cry', 'crz': 'crz',
+        'cu': 'cu', 'cu3': 'cu3', 'cu1': 'cp', 'cp': 'cp',
+        'cy': 'cy', 'iswap': 'iswap', 'cswap': 'cswap',
+        'rxx': 'rxx', 'ryy': 'ryy', 'rzz': 'rzz', 'ecr': 'ecr',
+        'sxdg': 'sxdg',
     }
+    # Names with no ``Circuit`` method: appended as a raw GateRecord (the IR
+    # knows them even though there is no convenience builder).
+    _raw_gate_names = frozenset({"sxdg"})
 
     n_qubits = None
     circuit = None
@@ -430,6 +496,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             if not m:
                 raise ValueError(
                     f"Could not parse QASM: malformed qubit declaration: {line!r}"
+                    f"{_native_hint}"
                 )
             n_qubits = int(m.group(1))
             circuit = sf.Circuit(n_qubits)
@@ -446,6 +513,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
         if circuit is None:
             raise ValueError(
                 f"Could not parse QASM: instruction before any qreg declaration: {line!r}"
+                f"{_native_hint}"
             )
 
         # Gate instructions
@@ -464,12 +532,21 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                 q_part, _, c_part = qubits_str.partition('->')
                 qm = re.search(r'\[(\d+)\]', q_part)
                 if not qm:
-                    raise ValueError(f"Could not parse measure target: {line!r}")
+                    # Whole-register form: `measure q -> c;` measures every
+                    # qubit into the classical bit of the same index.  QASM 2
+                    # allows it and random generators emit it.
+                    if q_part.strip() and c_part.strip():
+                        for i in range(n_qubits):
+                            circuit.measure(i, i)
+                        continue
+                    raise ValueError(
+                        f"Could not parse measure target: {line!r}{_native_hint}"
+                    )
                 q_idx = int(qm.group(1))
                 if q_idx >= n_qubits:
                     raise ValueError(
                         f"measure names qubit {q_idx} but the circuit has "
-                        f"{n_qubits} qubits"
+                        f"{n_qubits} qubits{_native_hint}"
                     )
                 cm = re.search(r'\[(\d+)\]', c_part)
                 circuit.measure(q_idx, int(cm.group(1)) if cm else q_idx)
@@ -480,7 +557,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             if any(i >= n_qubits for i in qubit_indices):
                 raise ValueError(
                     f"gate {gate_name!r} names a qubit outside the "
-                    f"{n_qubits}-qubit circuit: {line!r}"
+                    f"{n_qubits}-qubit circuit: {line!r}{_native_hint}"
                 )
 
             # Parse params
@@ -502,7 +579,21 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                         except ValueError:
                             if 'pi' in p:
                                 import math
-                                params.append(eval(p.replace('pi', str(math.pi))))
+                                # ``eval`` on the caller's text: no builtins, and
+                                # a failure now reports the parameter instead of
+                                # escaping as a bare SyntaxError (the native
+                                # parser rejects these angles and hands them
+                                # here, so this is a reachable path).
+                                try:
+                                    params.append(
+                                        eval(p.replace('pi', str(math.pi)),
+                                             {'__builtins__': {}}, {})
+                                    )
+                                except Exception as exc:
+                                    raise ValueError(
+                                        f"Could not evaluate QASM parameter {p!r} "
+                                        f"in {line!r}{_native_hint}"
+                                    ) from exc
                             else:
                                 params.append(sf.param(p))
 
@@ -520,14 +611,43 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                 # u2(phi, lam) is u3(pi/2, phi, lam).
                 import math
                 params = [math.pi / 2] + params
-            if sf_name is not None and hasattr(circuit, sf_name):
-                # Fast path: append GateRecord directly, skipping
-                # per-gate validation (qubits already verified by parser).
-                circuit._gates.append(_GateRecord(
-                    name=sf_name.upper(),
-                    qubits=mapped_indices,
-                    params=params,
-                ))
+            if gate_name == 'u0':
+                # u0(gamma) is the identity; its angle is padding and the
+                # builder takes only a qubit, so passing it raised TypeError.
+                params = []
+            if sf_name is not None and (
+                hasattr(circuit, sf_name) or sf_name in _raw_gate_names
+            ):
+                if hasattr(circuit, sf_name):
+                    # Go through the builder instead of appending a record:
+                    # several methods store a different record name than the
+                    # method (`ch`, `cry`, `cu`, `cu3` all emit CU), so a raw
+                    # record named after the method produced a circuit that
+                    # `to_unitary()` could not load ("Unknown gate: 'ch'").
+                    try:
+                        getattr(circuit, sf_name)(*params, *mapped_indices)
+                    except (TypeError, ValueError) as exc:
+                        # The builder is the authority on arity and on repeated
+                        # operands.  Re-raise with the gate and the operand list
+                        # so a malformed line reads as a QASM problem rather
+                        # than as a TypeError about argument counts.
+                        raise ValueError(
+                            f"gate {gate_name!r} cannot take qubit operands "
+                            f"{mapped_indices}: {exc}{_native_hint}"
+                        ) from exc
+                else:
+                    # No builder for this name: append the record directly
+                    # (qubits already verified by the parser above).
+                    if len(set(mapped_indices)) != len(mapped_indices):
+                        raise ValueError(
+                            f"gate {gate_name!r} names a qubit more than once: "
+                            f"{mapped_indices}{_native_hint}"
+                        )
+                    circuit._gates.append(_GateRecord(
+                        name=sf_name.upper(),
+                        qubits=mapped_indices,
+                        params=params,
+                    ))
             else:
                 # Previously this branch silently dropped the gate, so the
                 # returned circuit was missing operations with no signal.
@@ -536,10 +656,12 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
                     f"in {line!r}{_native_hint}"
                 )
         else:
-            raise ValueError(f"Could not parse QASM statement: {line!r}")
+            raise ValueError(f"Could not parse QASM statement: {line!r}{_native_hint}")
 
     if circuit is None:
-        raise ValueError("Could not parse QASM: no qubit declaration found")
+        raise ValueError(
+            f"Could not parse QASM: no qubit declaration found{_native_hint}"
+        )
 
     return circuit
 
@@ -758,6 +880,12 @@ def to_qasm(circuit: sf.Circuit) -> str:
         'CY': 'cy', 'CCX': 'ccx', 'CSWAP': 'cswap',
         'P': 'u1', 'CP': 'cu1', 'U': 'u3', 'SX': 'u3', 'RESET': 'reset',
         'ISWAP': 'iswap', 'RXX': 'rxx', 'RYY': 'ryy', 'RZZ': 'rzz',
+        # Additive coverage for the names ``sf.Circuit`` stores that qelib1
+        # already defines: ID, R1, the controlled rotations and CU.  ECR has
+        # no qelib1 name and is expanded below instead.
+        'ID': 'id', 'R1': 'u1', 'SXDG': 'sxdg',
+        'CRX': 'crx', 'CRY': 'cry', 'CRZ': 'crz', 'CH': 'ch',
+        'CU': 'cu', 'CU3': 'cu3', 'ECR': 'ecr',
     }
 
     circuit._ensure_gates()  # no-op for default Python storage
@@ -788,6 +916,20 @@ def to_qasm(circuit: sf.Circuit) -> str:
         # sequences.  Every sequence below was round-tripped through Qiskit's
         # OpenQASM 2.0 parser and compared against the gate unitary (max
         # deviation 6e-16, global phase ignored).
+        # IBM's echoed cross-resonance has no qelib1 name, so it is emitted as
+        # the exact u3/cx sequence it is (verified against Qiskit's ECRGate to
+        # 2.4e-16, global phase ignored):
+        #   U3(0,0,pi/2)(0) . U3(pi/2,-pi/2,pi/2)(1) . CX(0,1) . U3(pi,0,pi)(0)
+        if name_upper == "ECR":
+            q0, q1 = gate.qubits[0], gate.qubits[1]
+            qasm.extend([
+                f"u3(0, 0, pi/2) q[{q0}];",
+                f"u3(pi/2, -pi/2, pi/2) q[{q1}];",
+                f"cx q[{q0}], q[{q1}];",
+                f"u3(pi, 0, pi) q[{q0}];",
+            ])
+            continue
+
         if name_upper in ("RXX", "RYY", "RZZ", "ISWAP"):
             q0, q1 = gate.qubits[0], gate.qubits[1]
             if name_upper == "ISWAP":
@@ -853,6 +995,12 @@ def to_qasm(circuit: sf.Circuit) -> str:
                 params_str = f"({', '.join(map(str, gate.params))})"
         else:
             params_str = f"({', '.join(map(str, gate.params))})" if gate.params else ""
+            if name_upper in ("CU", "CU3") and len(gate.params) == 3:
+                # qelib1's ``cu``/``cu3`` take three angles; a three-angle CU
+                # record is the pre-``gamma`` convention, i.e. gamma = 0.
+                params_str = (
+                    f"({', '.join(map(str, list(gate.params) + [0.0]))})"
+                )
 
         qubits_str = ", ".join([f"q[{i}]" for i in gate.qubits])
         qasm.append(f"{qasm_name}{params_str} {qubits_str};")

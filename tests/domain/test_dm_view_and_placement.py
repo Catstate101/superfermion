@@ -1,6 +1,6 @@
 """Regression tests: single-buffer density-matrix handle view + noise placement.
 
-Two additive fixes are pinned here; every expected value is an independent
+Three additive fixes are pinned here; every expected value is an independent
 ground truth (hand-built Kraus/unitary numpy), never taken from the API
 under test.
 
@@ -22,13 +22,20 @@ Layout note: all ground-truth matrices here are built in the engine's
 little-endian basis (qubit q = bit q of the basis index); the public
 ``metadata`` rho is the bit-reversed (q0-first) permutation, converted with
 ``_to_little_endian`` (whose permutation is an involution).
+
+Fix C — reset (capability).  ``RESET`` is a deterministic CPTP map, so
+``method="density_matrix"`` now evolves it exactly instead of dispatching the
+whole circuit to the per-shot trajectory engine (which rejects the DM method).
+That is what lets a channel bound to ``"reset"`` — the default of
+``NoiseModel.add_reset_error`` — fire at all; a reset used to be a hard error
+on this path.
 """
 
 import numpy as np
 import pytest
+from superfermion._sf_core import State as _RustState
 
 import superfermion as sf
-from superfermion._sf_core import State as _RustState
 from superfermion.circuit import Circuit
 from superfermion.devices.noisy_dm_state import _to_little_endian
 
@@ -345,3 +352,184 @@ class TestNoisePlacementGroundTruth:
         rho_meta = np.asarray(res.metadata["density_matrix"])
         assert np.max(np.abs(rho_meta - public_truth)) < 1e-12
         assert abs(float(np.real(np.trace(rho_meta))) - 1.0) < 1e-12
+
+
+# --------------------------------------------------------------------------
+# Fix C — RESET as an exact CPTP map on the density-matrix path
+# --------------------------------------------------------------------------
+
+
+def _reset_le(rho, q, n):
+    """Independent ground truth: ρ → |0⟩⟨0|_q ⊗ Tr_q(ρ), LE basis.
+
+    Pure numpy: reshape to a rank-2n tensor, ``np.trace`` over the ket/bra
+    axes of qubit q (partial trace), then write the result back with that
+    qubit fixed to 0 on both sides.  No Kraus set, no engine helper.
+    """
+    tensor = rho.reshape([2] * (2 * n))
+    ket_axis = n - 1 - q  # LE: index = Σ b_q 2^q, so axis n-1 is the LSB
+    bra_axis = 2 * n - 1 - q
+    traced = np.trace(tensor, axis1=ket_axis, axis2=bra_axis)
+    out = np.zeros([2] * (2 * n), dtype=np.complex128)
+    where = [slice(None)] * (2 * n)
+    where[ket_axis] = 0
+    where[bra_axis] = 0
+    out[tuple(where)] = traced.reshape([2] * (2 * n - 2))
+    return out.reshape(2**n, 2**n)
+
+
+def _reset_dm_supported():
+    """Skip gate for extensions that predate the exact DM reset."""
+    try:
+        res = sf.run(Circuit(2).x(0).reset(0), method="density_matrix", shots=0)
+    except Exception:  # noqa: BLE001 - any failure means "not supported yet"
+        return False
+    rho = np.asarray(res.metadata["density_matrix"])
+    return abs(complex(rho[0, 0]) - 1.0) < 1e-12
+
+
+RESET_ON_DM = _reset_dm_supported()
+
+
+@pytest.mark.skipif(RESET_ON_DM is False, reason="extension predates the exact DM reset")
+class TestResetOnDensityMatrixPath:
+    """RESET on ``method="density_matrix"`` is the exact reset channel.
+
+    Expected values are an independent numpy partial trace (``_reset_le``)
+    plus two analytic anchors, so a wrong qubit, a wrong fold or a missing
+    discard half all fail.
+    """
+
+    @staticmethod
+    def _rho_le(circuit, model=None):
+        n = circuit.n_qubits
+        res = sf.run(circuit, method="density_matrix", shots=0, noise_model=model)
+        assert res.metadata["method"] == "density_matrix"
+        return _to_little_endian(np.asarray(res.metadata["density_matrix"]), n), res
+
+    def test_reset_after_x_is_the_ground_state(self):
+        rho, res = self._rho_le(Circuit(2).x(0).reset(0))
+        assert np.max(np.abs(rho - _zero_state(2))) < 1e-12
+        assert res.metadata["purity"] == pytest.approx(1.0, abs=1e-12)
+
+    def test_reset_matches_an_independent_partial_trace(self):
+        cases = [
+            (Circuit(2).h(1).cnot(1, 0), 0),
+            (Circuit(2).h(0).cnot(0, 1), 1),
+            (Circuit(2).ry(0.7, 0).rx(-0.3, 1), 1),
+            (Circuit(3).h(0).cnot(0, 1).ry(0.4, 2), 0),
+            (Circuit(3).h(2).cnot(2, 1).rz(0.2, 0), 1),
+            (Circuit(3).h(1).cnot(1, 0).cnot(0, 2), 2),
+        ]
+        for qc, q in cases:
+            n = qc.n_qubits
+            clean, _ = self._rho_le(qc)
+            truth = _reset_le(clean, q, n)
+            got, _ = self._rho_le(qc.reset(q))
+            assert np.max(np.abs(got - truth)) < 1e-12, (n, q)
+
+    def test_reset_of_an_entangled_pair_is_the_classical_mixture(self):
+        rho, res = self._rho_le(Circuit(2).h(1).cnot(1, 0).reset(0))
+        expected = np.zeros((4, 4), dtype=np.complex128)
+        expected[0, 0] = expected[2, 2] = 0.5
+        assert np.max(np.abs(rho - expected)) < 1e-12
+        assert res.metadata["purity"] == pytest.approx(0.5, abs=1e-12)
+        assert float(np.real(np.trace(rho))) == pytest.approx(1.0, abs=1e-12)
+
+    def test_reset_on_every_qubit_returns_the_ground_state(self):
+        rho, _ = self._rho_le(Circuit(3).h(0).cnot(0, 1).cnot(1, 2).reset(0).reset(1).reset(2))
+        assert np.max(np.abs(rho - _zero_state(3))) < 1e-12
+
+    def test_reset_keeps_rho_hermitian_and_trace_preserving(self):
+        qc = Circuit(3).h(0).cnot(0, 1).ry(0.9, 1).cnot(1, 2).reset(1)
+        rho, _ = self._rho_le(qc)
+        assert np.max(np.abs(rho - rho.conj().T)) < 1e-12
+        assert float(np.real(np.trace(rho))) == pytest.approx(1.0, abs=1e-12)
+        assert min(float(v) for v in np.linalg.eigvalsh(rho)) > -1e-12
+
+    def test_probabilities_follow_the_post_reset_diagonal(self):
+        rho, res = self._rho_le(Circuit(2).x(0).cnot(0, 1).reset(1))
+        for i in range(1 << 2):
+            assert res.probabilities.get(format(i, "02b"), 0.0) == pytest.approx(
+                float(np.real(rho[i, i])), abs=1e-12
+            )
+
+    def test_reset_error_binds_to_reset_and_fires(self):
+        p1 = 0.4
+        qc = Circuit(1).x(0).reset(0)
+        rho, _ = self._rho_le(qc, sf.NoiseModel().add_reset_error(0.0, p1))
+        # Reset leaves |0>; the error channel then excites it with prob p1.
+        assert float(np.real(rho[1, 1])) == pytest.approx(p1, abs=1e-12)
+        assert float(np.real(np.trace(rho))) == pytest.approx(1.0, abs=1e-12)
+
+    def test_reset_error_zero_is_the_ideal_reset(self):
+        qc = Circuit(2).h(0).cnot(0, 1).reset(0)
+        ideal, _ = self._rho_le(qc)
+        noisy, _ = self._rho_le(qc, sf.NoiseModel().add_reset_error(0.0, 0.0))
+        assert np.max(np.abs(noisy - ideal)) < 1e-12
+
+    def test_reset_error_does_not_fire_on_an_untargeted_qubit(self):
+        qc = Circuit(2).h(0).cnot(0, 1).reset(0)
+        ideal, _ = self._rho_le(qc)
+        # Channel bound to qubit 1 while only qubit 0 is reset: never fires.
+        other, _ = self._rho_le(qc, sf.NoiseModel().add_reset_error(0.3, 0.3, qubits=[1]))
+        assert np.max(np.abs(other - ideal)) < 1e-12
+        # Bound to qubit 0 it does fire, so the check above is not vacuous.
+        targeted, _ = self._rho_le(qc, sf.NoiseModel().add_reset_error(0.3, 0.3, qubits=[0]))
+        assert np.max(np.abs(targeted - ideal)) > 1e-3
+
+    def test_reset_error_is_trace_preserving_and_positive(self):
+        qc = Circuit(2).h(0).cnot(0, 1).reset(0).reset(1)
+        rho, _ = self._rho_le(qc, sf.NoiseModel().add_reset_error(0.25, 0.15))
+        assert np.max(np.abs(rho - rho.conj().T)) < 1e-12
+        assert float(np.real(np.trace(rho))) == pytest.approx(1.0, abs=1e-12)
+        assert min(float(v) for v in np.linalg.eigvalsh(rho)) > -1e-12
+
+    def test_reset_still_samples_on_the_dm_path(self):
+        qc = Circuit(2).x(0).cnot(0, 1).reset(1).measure_all()
+        res = sf.run(qc, method="density_matrix", shots=300, seed=1)
+        assert res.counts == {"01": 300}
+
+    def test_pure_state_methods_keep_their_trajectory_replay(self):
+        for method in ("statevector", "mps"):
+            res = sf.run(Circuit(2).x(0).reset(0), method=method, shots=100, seed=7)
+            assert res.counts == {"00": 100}
+
+
+class TestFlatKrausValidation:
+    """Malformed flat Kraus sets raise ValueError, never a Rust panic.
+
+    The bindings take one 2x2 matrix per 8 floats (four complex re/im
+    pairs) and one 4x4 per 32; a short final ``chunks`` slice used to
+    reach an out-of-bounds index and surface as ``PanicException`` (a
+    ``BaseException``), which bypassed ``except Exception``.
+    """
+
+    def test_short_1q_set_raises(self):
+        dag = Circuit(1).x(0).to_ir()
+        with pytest.raises(ValueError, match="positive multiple of 8"):
+            dag.simulate_dm_noisy([(0, [1.0, 0.0, 0.0, 0.0])])
+
+    def test_short_2q_set_raises(self):
+        dag = Circuit(2).cnot(0, 1).to_ir()
+        with pytest.raises(ValueError, match="positive multiple of 32"):
+            dag.simulate_dm_noisy([], [[1.0] * 16])
+
+    def test_empty_set_raises(self):
+        dag = Circuit(1).x(0).to_ir()
+        with pytest.raises(ValueError, match="positive multiple of 8"):
+            dag.simulate_dm_noisy([(0, [])])
+
+    def test_state_and_view_bindings_share_the_check(self):
+        dag = Circuit(1).x(0).to_ir()
+        with pytest.raises(ValueError, match="positive multiple of 8"):
+            dag.simulate_dm_noisy_state([(0, [1.0, 0.0, 0.0, 0.0])])
+        with pytest.raises(ValueError, match="positive multiple of 8"):
+            dag.simulate_dm_noisy_state_view([(0, [1.0, 0.0, 0.0, 0.0])])
+
+    def test_valid_identity_set_is_accepted(self):
+        dag = Circuit(1).x(0).to_ir()
+        vec = np.asarray(
+            dag.simulate_dm_noisy([(0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])])
+        ).reshape(2, 2)
+        assert np.allclose(np.diag(vec).real, [0.0, 1.0], atol=1e-12)

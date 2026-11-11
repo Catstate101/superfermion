@@ -11,13 +11,11 @@ Usage:
 """
 from __future__ import annotations
 
-
-from __future__ import annotations
 import re
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from superfermion.circuit import Circuit
+    from superfermion.circuit import Circuit, GateRecord
 
 # Pre-import simplify_clifford at module level to avoid triggering
 # numpy/stabilizer imports inside benchmark measurement contexts.
@@ -38,8 +36,13 @@ _QASM_LINE_RE = re.compile(
     r"^\s*(\w+)\s*(?:\(([^)]*)\))?\s+q\[(\d+)\](?:\s*,\s*q\[(\d+)\])?\s*;"
 )
 
+# Record names that are not unitary gates, so a 2-qubit record with one of
+# these names is not a connectivity violation (measure/reset touch one wire
+# today, but the list is checked before the arity test for safety).
+_NON_UNITARY_RECORDS = frozenset({"measure", "measure_all", "barrier", "reset"})
 
-def _fast_qasm_to_circuit(qasm: str, n_qubits: int) -> "Circuit | None":
+
+def _fast_qasm_to_circuit(qasm: str, n_qubits: int) -> Circuit | None:
     """Parse the compiler's predictable QASM3 output into an SF Circuit.
 
     Handles standard and parameterized gates: h, s, sdg, x, y, z, cx, cz,
@@ -104,7 +107,7 @@ def _fast_qasm_to_circuit(qasm: str, n_qubits: int) -> "Circuit | None":
 _MISSING = object()
 
 
-def _make_gate(name: str, qubits: list, params: list | None = None) -> "GateRecord":
+def _make_gate(name: str, qubits: list, params: list | None = None) -> GateRecord:
     """Create a GateRecord."""
     from superfermion.circuit import GateRecord
     return GateRecord(name=name, qubits=qubits, params=params or [])
@@ -121,12 +124,13 @@ def _eval_qasm_angle(s: str) -> float:
 
 
 def compile_rust(
-    circuit: "Circuit",
+    circuit: Circuit,
     level: int = 1,
-    target: Optional[object] = None,
+    target: object | None = None,
     pre_simplified: bool = False,
     skip_routing: bool = False,
-) -> "Circuit":
+    twirl_seed: int | None = None,
+) -> Circuit:
     """Compile a circuit using the Rust-native compilation pipeline.
 
     This is the **sole** compilation path. The Rust ``sf-compiler`` crate
@@ -145,6 +149,10 @@ def compile_rust(
                 connectivity. The Rust router is not run, so the wire
                 permutation it would have applied is not applied either
                 (see :mod:`superfermion.compiler.layout`).
+        twirl_seed: Seed for the level >= 2 Pauli twirl. ``None`` draws a
+                fresh thread-RNG seed, which makes the compiled gate list
+                vary between calls of the same input; the unitary does not
+                vary (measured at 1e-16).
 
     Returns:
         Compiled SF Circuit, on the same number of qubits as ``circuit``
@@ -173,6 +181,27 @@ def compile_rust(
         n_qubits = circuit.n_qubits
         name = "none"
 
+    # Wiring map for the connectivity check at the end of this function.
+    # ``route_with_layout`` relabels the circuit's wires to region-local
+    # positions and records the physical wire each position sits on in
+    # ``initial_layout``; without that report the wire labels are physical
+    # already.  Read it before any pass can replace the circuit object.
+    position_to_physical = None
+    try:
+        from superfermion.compiler.layout import get_layout as _get_layout
+
+        _layout = _get_layout(circuit)
+    except Exception:  # pragma: no cover - layout module is optional
+        _layout = None
+    if _layout and _layout.get("initial_layout"):
+        position_to_physical = {
+            int(i): int(p) for i, p in enumerate(_layout["initial_layout"])
+        }
+
+    # What the target declares, kept even when routing is suppressed here: the
+    # compiled output is validated against it below either way.
+    declared_connectivity = list(coupling_map)
+
     if skip_routing:
         coupling_map = []
 
@@ -191,6 +220,8 @@ def compile_rust(
     # the target actually selects one of them.
     from superfermion.compiler.native_lowering import (
         finalize as _finalize,
+    )
+    from superfermion.compiler.native_lowering import (
         prepare as _prepare,
     )
 
@@ -204,6 +235,7 @@ def compile_rust(
         n_qubits=n_qubits,
         connectivity=coupling_map,
         optimization_level=level,
+        twirl_seed=twirl_seed,
     )
 
     compiled_dag = compiler.compile(dag)
@@ -230,6 +262,45 @@ def compile_rust(
             f"UnitaryDecompositionPass, or sf.compile()) or widen the target "
             f"gate set."
         )
+
+    # Connectivity enforcement.  The Rust router is supposed to make every 2q
+    # gate local (and ``manager.compile`` routes through ``route_with_layout``
+    # before asking for ``skip_routing``), but nothing verified it: a gate left
+    # on a non-edge wire was returned as if the target could execute it.  A
+    # routing regression now fails here with the offending pairs instead of
+    # surfacing later as a device rejection.
+    if declared_connectivity and (position_to_physical is not None or skip_routing):
+        allowed = set()
+        for edge in declared_connectivity:
+            try:
+                a, b = int(edge[0]), int(edge[1])
+            except (TypeError, IndexError):
+                continue
+            allowed.add((a, b))
+            allowed.add((b, a))
+
+        def _physical(wire: int) -> int:
+            """Wire label -> physical qubit (identity without a layout)."""
+            if position_to_physical is None:
+                return wire
+            return position_to_physical.get(wire, wire)
+
+        off_graph = sorted({
+            (_physical(int(qubits[0])), _physical(int(qubits[1])))
+            for name, qubits, _p in records
+            if len(qubits) == 2
+            and name.strip().lower() not in _NON_UNITARY_RECORDS
+            and (_physical(int(qubits[0])), _physical(int(qubits[1]))) not in allowed
+        })
+        if off_graph:
+            raise RuntimeError(
+                f"compiled circuit violates the target's connectivity: {len(off_graph)} "
+                f"2-qubit gate(s) act on non-adjacent qubits {off_graph} "
+                f"(target {name!r}, {len(allowed) // 2} undirected edge(s)). The "
+                f"router left a gate off-graph; pass a target with a coupling map "
+                f"and routing enabled (``skip_routing=False``), or split the gate "
+                f"set so the router can decompose it."
+            )
 
     # The result is rebuilt on the *circuit's* width, not the target device's:
     # a 5-qubit circuit compiled for ``rigetti_ankaa`` used to come back as an

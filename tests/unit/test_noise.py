@@ -169,8 +169,13 @@ class TestPlacementAndConvention:
         ch = qiskit.single_qubit_channels[0]
         assert ch.error_rate == lam
         assert ch.convention == "qiskit"
+        # a non-default convention is recorded so from_dict() can rebuild the
+        # same Kraus set; the key is omitted for the default "total"
         assert qiskit.to_dict()["single_qubit_channels"] == [
-            {"name": "depolarizing", "error_rate": lam}
+            {"name": "depolarizing", "error_rate": lam, "convention": "qiskit"}
+        ]
+        assert total.to_dict()["single_qubit_channels"] == [
+            {"name": "depolarizing", "error_rate": lam * 3.0 / 4.0}
         ]
 
     def test_qiskit_convention_rescales_2q_kraus(self):
@@ -360,9 +365,21 @@ class TestThermalRelaxation:
         assert channel.name == "thermal_relaxation"
         assert channel.error_rate == 10.0  # the gate time
         assert channel.qubits is None
+        # error_rate carries the gate time, so t1/t2 must be serialized
+        # alongside it or from_dict() could not rebuild the channel
         assert model.to_dict()["single_qubit_channels"] == [
-            {"name": "thermal_relaxation", "error_rate": 10.0}
+            {
+                "name": "thermal_relaxation",
+                "error_rate": 10.0,
+                "params": {"t1": 50.0, "t2": 70.0},
+            }
         ]
+
+    def test_default_channel_dict_stays_minimal(self):
+        """The extra keys are opt-in: a default untargeted model is unchanged."""
+        assert NoiseModel().add_depolarizing(0.01).to_dict()[
+            "single_qubit_channels"
+        ] == [{"name": "depolarizing", "error_rate": 0.01}]
 
     def test_zero_gate_time_is_the_identity_channel(self):
         model = NoiseModel().add_thermal_relaxation(50.0, 70.0, 0.0)

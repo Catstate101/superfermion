@@ -10,6 +10,13 @@ use petgraph::Direction;
 use sf_ir::{OpType, QuantumDAG, WireType};
 use std::f64::consts::PI;
 
+/// A merged rotation is dropped only when the sum is arithmetic residue.
+/// This used to be 1e-12, which silently deleted genuine angles: lane A had
+/// a 7.4e-13 phase that survived as a global phase in one gate order and as
+/// a 2.6e-13 relative-phase error in the other.  1e-15 is ~2 ulp of pi, so
+/// only the residue of a true cancellation (a + (-a)) is dropped.
+const CANCEL_EPS: f64 = 1e-15;
+
 pub struct RotationMergingPass;
 
 impl RotationMergingPass {
@@ -25,7 +32,7 @@ impl RotationMergingPass {
             (OpType::Rz(p1), OpType::Rz(p2)) => {
                 if let (Some(a), Some(b)) = (p1.try_evaluate(), p2.try_evaluate()) {
                     let sum = normalize_angle(a + b);
-                    if sum.abs() < 1e-12 {
+                    if sum.abs() < CANCEL_EPS {
                         None // Cancels to identity
                     } else {
                         Some(OpType::Rz(Parameter::Const(sum)))
@@ -38,7 +45,7 @@ impl RotationMergingPass {
             (OpType::Rx(p1), OpType::Rx(p2)) => {
                 if let (Some(a), Some(b)) = (p1.try_evaluate(), p2.try_evaluate()) {
                     let sum = normalize_angle(a + b);
-                    if sum.abs() < 1e-12 {
+                    if sum.abs() < CANCEL_EPS {
                         None
                     } else {
                         Some(OpType::Rx(Parameter::Const(sum)))
@@ -50,7 +57,7 @@ impl RotationMergingPass {
             (OpType::Ry(p1), OpType::Ry(p2)) => {
                 if let (Some(a), Some(b)) = (p1.try_evaluate(), p2.try_evaluate()) {
                     let sum = normalize_angle(a + b);
-                    if sum.abs() < 1e-12 {
+                    if sum.abs() < CANCEL_EPS {
                         None
                     } else {
                         Some(OpType::Ry(Parameter::Const(sum)))
@@ -232,6 +239,27 @@ mod tests {
         pass.run(&mut dag).unwrap();
 
         assert_eq!(dag.gate_count(), 2); // Not merged
+    }
+
+    #[test]
+    fn test_small_rotation_is_not_cancelled() {
+        // Regression for lane A (0000112_qite_573780): a 7.4e-13 phase is a
+        // real rotation, not a cancellation residue.  Before the fix a
+        // two-gate product compiled with 2.6e-13 unitary error on all three
+        // targets at every level; the same phase survived in the other gate
+        // order because there it was only a global phase.
+        let mut dag = QuantumDAG::new(1, 0);
+        dag.add_op(OpType::Rz(Parameter::Const(7.4e-13)), &[0]);
+        dag.add_op(OpType::Rz(Parameter::Const(-3.7e-13)), &[0]);
+        let pass = RotationMergingPass::new();
+        pass.run(&mut dag).unwrap();
+        assert_eq!(dag.gate_count(), 1, "the 3.7e-13 residue must survive");
+        match &dag.to_instructions()[0].op_type {
+            OpType::Rz(Parameter::Const(v)) => {
+                assert!((v - 3.7e-13).abs() < 1e-15, "merged to {v:e}");
+            }
+            other => panic!("expected Rz, got {other:?}"),
+        }
     }
 
     #[test]

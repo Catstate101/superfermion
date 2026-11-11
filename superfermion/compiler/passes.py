@@ -13,7 +13,7 @@ Both should eventually migrate to Rust crates.
 
 from __future__ import annotations
 
-from typing import List, Protocol, Tuple
+from typing import Protocol
 
 from superfermion.circuit import Circuit, GateRecord
 
@@ -34,7 +34,7 @@ class BasisTranslationPass:
     _PI = 3.141592653589793
     _PI2 = 1.5707963267948966
 
-    def __init__(self, native_gates: List[str]):
+    def __init__(self, native_gates: list[str]):
         self.native_gates = {g.upper() for g in native_gates}
 
     def name(self) -> str:
@@ -127,7 +127,9 @@ class BasisTranslationPass:
             if self._has("RY"):
                 c.ry(theta, q[0])
             elif self._has("SX"):
-                c.rz(-self._PI2, q[0]).sx(q[0]).rz(theta + self._PI2, q[0]).sx(q[0]).rz(-self._PI2, q[0])
+                c.rz(-self._PI2, q[0]).sx(q[0]).rz(theta + self._PI2, q[0]).sx(q[0]).rz(
+                    -self._PI2, q[0]
+                )
             else:
                 c.rz(-self._PI2, q[0]).rx(theta, q[0]).rz(self._PI2, q[0])
         elif name == "P":
@@ -137,21 +139,32 @@ class BasisTranslationPass:
             phi = float(gate.params[1]) if len(gate.params) > 1 else 0.0
             lam = float(gate.params[2]) if len(gate.params) > 2 else 0.0
             if self._has("SX"):
-                c.rz(lam, q[0]).sx(q[0]).rz(theta + self._PI, q[0]).sx(q[0]).rz(phi + self._PI, q[0])
+                c.rz(lam, q[0]).sx(q[0]).rz(theta + self._PI, q[0]).sx(q[0]).rz(
+                    phi + self._PI, q[0]
+                )
             else:
-                c.rz(lam, q[0]).rx(self._PI2, q[0]).rz(theta, q[0]).rx(-self._PI2, q[0]).rz(phi, q[0])
+                c.rz(lam, q[0]).rx(self._PI2, q[0]).rz(theta, q[0]).rx(
+                    -self._PI2, q[0]
+                ).rz(phi, q[0])
         elif name == "SWAP":
             self._emit_cx(c, q[0], q[1])
             self._emit_cx(c, q[1], q[0])
             self._emit_cx(c, q[0], q[1])
         elif name in ("CCX", "TOFFOLI"):
             self._emit_h(c, q[2])
-            self._emit_cx(c, q[1], q[2]); c.rz(-self._PI / 4, q[2])
-            self._emit_cx(c, q[0], q[2]); c.rz(self._PI / 4, q[2])
-            self._emit_cx(c, q[1], q[2]); c.rz(-self._PI / 4, q[2])
-            self._emit_cx(c, q[0], q[2]); c.rz(self._PI / 4, q[1]); c.rz(self._PI / 4, q[2])
+            self._emit_cx(c, q[1], q[2])
+            c.rz(-self._PI / 4, q[2])
+            self._emit_cx(c, q[0], q[2])
+            c.rz(self._PI / 4, q[2])
+            self._emit_cx(c, q[1], q[2])
+            c.rz(-self._PI / 4, q[2])
+            self._emit_cx(c, q[0], q[2])
+            c.rz(self._PI / 4, q[1])
+            c.rz(self._PI / 4, q[2])
             self._emit_h(c, q[2])
-            self._emit_cx(c, q[0], q[1]); c.rz(self._PI / 4, q[0]); c.rz(-self._PI / 4, q[1])
+            self._emit_cx(c, q[0], q[1])
+            c.rz(self._PI / 4, q[0])
+            c.rz(-self._PI / 4, q[1])
             self._emit_cx(c, q[0], q[1])
         elif name == "ID":
             pass
@@ -182,11 +195,13 @@ class BasisTranslationPass:
             self._emit_cx(c, q[0], q[1])
         elif name == "RXX":
             theta = float(gate.params[0]) if gate.params else 0.0
-            self._emit_h(c, q[0]); self._emit_h(c, q[1])
+            self._emit_h(c, q[0])
+            self._emit_h(c, q[1])
             self._emit_cx(c, q[0], q[1])
             c.rz(theta, q[1])
             self._emit_cx(c, q[0], q[1])
-            self._emit_h(c, q[0]); self._emit_h(c, q[1])
+            self._emit_h(c, q[0])
+            self._emit_h(c, q[1])
         elif name == "RYY":
             theta = float(gate.params[0]) if gate.params else 0.0
             c.rx(self._PI2, q[0]).rx(self._PI2, q[1])
@@ -246,7 +261,15 @@ class UnitaryDecompositionPass:
         phase = float(np.angle(det) / 2)
         su = matrix * np.exp(-1j * phase)
 
-        beta = float(2 * np.arccos(np.clip(abs(su[0, 0]), 0, 1)))
+        # ``beta = 2*arccos(|m00|)`` is ill-conditioned as beta -> 0: one ulp
+        # of rounding in |m00| (1.1e-16) moves the angle by sqrt(2*1.1e-16) =
+        # 1.5e-8, and the spurious Ry(1.5e-8) that follows is a first-order
+        # error in the matrix.  That is exactly the 2.1e-8 that a CRZ lowering
+        # measured: the RZ factors of the cosine-sine decomposition are pure
+        # phases, but |m00| came out as 1 - 1.1e-16 and beta as 2.98e-8.
+        # atan2(|m10|, |m00|) is well-conditioned at both ends and returns
+        # exactly 0.0 when m10 is exactly 0.
+        beta = float(2 * np.arctan2(abs(su[1, 0]), abs(su[0, 0])))
         if abs(np.sin(beta / 2)) < 1e-10:
             alpha = float(2 * np.angle(su[1, 1]))
             gamma = 0.0
@@ -265,7 +288,9 @@ class UnitaryDecompositionPass:
         if abs(alpha) > self._EPS:
             circuit.rz(alpha, qubit)
 
-    def _emit_mux_ry(self, alpha: float, beta: float, ctrl: int, tgt: int, circuit: Circuit) -> None:
+    def _emit_mux_ry(
+        self, alpha: float, beta: float, ctrl: int, tgt: int, circuit: Circuit
+    ) -> None:
         """Multiplexed Ry: Ry(alpha) on tgt when ctrl=0, Ry(beta) when ctrl=1.
 
         Circuit: Ry((a+b)/2) CNOT Ry((a-b)/2) CNOT
@@ -279,7 +304,7 @@ class UnitaryDecompositionPass:
             circuit.ry(diff, tgt)
         circuit.cx(ctrl, tgt)
 
-    def _emit_demux(self, G0, G1, ctrl: int, tgt: int, circuit: Circuit) -> None:
+    def _emit_demux(self, g0, g1, ctrl: int, tgt: int, circuit: Circuit) -> None:
         """Demultiplexed gate: G0 on tgt when ctrl=0, G1 on tgt when ctrl=1.
 
         Uses the ABC decomposition (Nielsen & Chuang, Corollary 4.2) of the
@@ -295,22 +320,27 @@ class UnitaryDecompositionPass:
         """
         import numpy as np
 
-        U = G0.conj().T @ G1
-        if np.allclose(U, np.eye(2), atol=1e-8):
-            self._decompose_1q(G0, tgt, circuit)
+        u = g0.conj().T @ g1
+        # rtol must be 0: np.allclose's default rtol=1e-5 accepts a U that
+        # differs from the identity by up to 1e-5, and this branch then drops
+        # the whole relative unitary -- a silent error of that size.  Only an
+        # exactly trivial relative unitary may take the cheap path; anything
+        # else goes through the ABC decomposition, which is exact.
+        if np.allclose(u, np.eye(2), rtol=0.0, atol=1e-12):
+            self._decompose_1q(g0, tgt, circuit)
             return
 
-        phase, alpha, beta, gamma = self._zyz_params(U)
+        phase, alpha, beta, gamma = self._zyz_params(u)
 
-        A_abc = self._rz_mat(alpha) @ self._ry_mat(beta / 2)
-        B_abc = self._ry_mat(-beta / 2) @ self._rz_mat(-(alpha + gamma) / 2)
-        C_abc = self._rz_mat((gamma - alpha) / 2)
+        a_abc = self._rz_mat(alpha) @ self._ry_mat(beta / 2)
+        b_abc = self._ry_mat(-beta / 2) @ self._rz_mat(-(alpha + gamma) / 2)
+        c_abc = self._rz_mat((gamma - alpha) / 2)
 
-        self._decompose_1q(C_abc, tgt, circuit)
+        self._decompose_1q(c_abc, tgt, circuit)
         circuit.cx(ctrl, tgt)
-        self._decompose_1q(B_abc, tgt, circuit)
+        self._decompose_1q(b_abc, tgt, circuit)
         circuit.cx(ctrl, tgt)
-        self._decompose_1q(G0 @ A_abc, tgt, circuit)
+        self._decompose_1q(g0 @ a_abc, tgt, circuit)
 
         if abs(phase) > self._EPS:
             circuit.rz(phase, ctrl)
@@ -323,7 +353,6 @@ class UnitaryDecompositionPass:
         where each Demux uses 2 CNOTs and MuxRy uses 2 CNOTs.
         Total: up to 6 CNOTs (fewer when some factors are trivial).
         """
-        import numpy as np
         from scipy.linalg import cossin
 
         q0, q1 = qubits[0], qubits[1]
@@ -344,7 +373,6 @@ class UnitaryDecompositionPass:
         self._emit_demux(u1, u2, ctrl=q0, tgt=q1, circuit=circuit)
 
     def run(self, circuit: Circuit) -> Circuit:
-        import numpy as np
         new_circuit = Circuit(circuit.n_qubits, circuit.n_cbits)
         circuit._ensure_gates()
         for gate in circuit._gates:
@@ -366,7 +394,7 @@ class UnitaryDecompositionPass:
 
 class RoutingPass:
     """Inserts SWAP gates to satisfy hardware coupling map."""
-    def __init__(self, coupling_map: List[Tuple[int, int]]):
+    def __init__(self, coupling_map: list[tuple[int, int]]):
         self.coupling_map = coupling_map
     def name(self) -> str: return "RoutingPass"
     def run(self, circuit: Circuit) -> Circuit: return circuit

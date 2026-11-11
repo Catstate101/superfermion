@@ -431,6 +431,16 @@ class Circuit:
         """√X gate"""
         return self._add_gate("SX", [qubit])
 
+    def sxdg(self, qubit: int) -> Circuit:
+        """√X†: conjugate transpose of :meth:`sx` (the OpenQASM ``sxdg`` gate).
+
+        The importer already produced ``SXDG`` records from ``sxdg`` in QASM,
+        but there was no method to build one directly, so a parsed circuit
+        could not be rebuilt through the public API. Matrices, export and
+        compilation are unchanged; this only adds the missing constructor.
+        """
+        return self._add_gate("SXDG", [qubit])
+
     def id(self, qubit: int) -> Circuit:
         """Identity gate (explicit no-op)"""
         return self._add_gate("ID", [qubit])
