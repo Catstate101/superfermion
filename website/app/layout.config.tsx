@@ -16,11 +16,25 @@ export const baseOptions: BaseLayoutProps = {
     ),
   },
   links: [
-    { text: "GitHub", url: "https://github.com/Catstate101/superfermion" },
+    {
+      text: "GitHub",
+      url: "https://github.com/Catstate101/superfermion",
+      external: true,
+    },
     {
       text: "Pull requests",
       url: "https://github.com/Catstate101/superfermion/pulls",
+      external: true,
     },
-    { text: "PyPI", url: "https://pypi.org/project/superfermion" },
+    {
+      text: "PyPI",
+      url: "https://pypi.org/project/superfermion",
+      external: true,
+    },
+    {
+      text: "Paper (DOI)",
+      url: "https://doi.org/10.5281/zenodo.23574613",
+      external: true,
+    },
   ],
 };

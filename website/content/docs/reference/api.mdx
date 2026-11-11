@@ -21,6 +21,7 @@ sf.param(name)         Symbolic parameters
 sf.Hamiltonian(...)    Observable construction
 sf.PauliString(str)    Single Pauli term
 sf.NoiseModel()        Noise model for density matrix sim
+sf.ErrorChannel        Reusable error channel (Qiskit ``QuantumError`` equivalent)
 ```
 
 ---
@@ -47,7 +48,7 @@ print(qc.draw(ascii_only=True))   # force `-`, `o`, `+`
 
 | Category | Gates |
 |----------|-------|
-| 1Q Clifford | `h`, `x`, `y`, `z`, `s`, `sdg`, `t`, `tdg`, `sx`, `id` |
+| 1Q Clifford | `h`, `x`, `y`, `z`, `s`, `sdg`, `sx`, `sxdg`, `t`, `tdg`, `id` |
 | 1Q Parametric | `rx(theta, q)`, `ry(theta, q)`, `rz(theta, q)`, `p(phi, q)`, `r1(phi, q)`, `u(theta, phi, lam, q)` / `u3(...)` |
 | 2Q | `cnot(c, t)` / `cx(c, t)`, `cz`, `cy`, `swap`, `iswap`, `ecr` |
 | 2Q Parametric | `cp`, `cu(theta, phi, lam, c, t, gamma=0)` / `cu3`, `crx`, `cry`, `crz`, `rzz`, `rxx`, `ryy` |
@@ -288,6 +289,30 @@ noise = sf.NoiseModel().add_depolarizing(0.01)
 result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
 ```
 
+Gate noise is applied on this path only — `statevector`, `mps` and `stabilizer` warn and
+ignore the gate channels (readout error still applies). The model-level and per-channel
+knobs:
+
+| Call | Effect |
+|------|--------|
+| `sf.NoiseModel(placement="touch"\|"gate")` | 1-qubit channels after every touching gate (default) or only after 1-qubit gates (Qiskit/Aer) |
+| `.add_*(..., instructions=...)` | Fire only on those gate names; `None` fires on every touching instruction |
+| `.add_*(..., qubits=...)` | Bind to specific wires; a 2-qubit channel takes exactly one ordered pair |
+| `.add_depolarizing(p, convention="qiskit")` | Read `p` as Qiskit's lambda and rescale the Kraus set |
+| `.add_quantum_error(err, instructions, qubits)` | Register a reusable `sf.ErrorChannel` |
+| `.add_kraus()`, `.add_unitary()`, `.add_mixed_unitary()` | Custom Kraus, coherent, and mixed-unitary channels |
+| `.add_reset_error(p0, p1=0.0)` | Error bound to `reset` |
+| `.add_crosstalk(edges, zz_angle, mode="static"\|"spectator")` | ZZ coupling per edge |
+| `.add_qutrit_error(kraus, qubits=(data, flag))`, `.add_leakage(p, qubit, flag)` | 3-level dynamics on an embedded qutrit |
+| `.to_dict()` / `sf.NoiseModel.from_dict(d)` | Serialize and restore, placement and filters included |
+
+`sf.ErrorChannel` mirrors Qiskit's `QuantumError`: build one with `from_kraus`, `from_unitary`,
+`from_mixed_unitary`, `from_reset` or `from_qutrit_kraus`, combine with `compose`, `tensor` and
+`power`, and inspect `dim`, `kraus`, `is_trace_preserving` and `tp_deviation`. A Kraus set whose
+`sum K^dagger K` differs from the identity by more than `1e-8` raises `ValueError`.
+
+See the **[Noise Models guide](/docs/guides/noise)** for the worked examples.
+
 `counts`/`probabilities` keys follow the shared little-endian key convention (qubit `q` = bit `q` of `int(key, 2)`); `result.metadata["density_matrix"]` is big-endian (qubit 0 = most significant). See the execution guide for the full layout notes.
 
 ### Cat — compile-once handle (`sf.cat()`)
@@ -383,6 +408,19 @@ target = HardwareSpec(
 )
 compiled = sf.compile(qc, level=2, target=target)
 ```
+
+| Parameter | Meaning |
+|-----------|---------|
+| `level` | `0` (passthrough), `1` (standard), `2` (full, applies the Pauli twirl) |
+| `target` | A `HardwareSpec` or a preset name — `"ibm_eagle"`, `"ibm_heron"`, `"rigetti_ankaa"`, `"ionq_aria"`, `"ionq_forte"`, `"linear_5"`, `"cluster"`. An unknown name raises `ValueError` listing the known targets. |
+| `twirl_seed` | Seed for the level-2 Pauli twirl. Omit it and each call draws a fresh seed, so two level-2 compiles of one input can differ gate for gate while the unitary is unchanged. |
+
+```python
+compiled = sf.compile(qc, level=2, target="ibm_eagle", twirl_seed=7)
+```
+
+Compilation preserves the input unitary up to a global phase; compare with
+`abs(trace(A.conj().T @ B)) / d` rather than a raw elementwise difference.
 
 ### Optimization Levels
 
@@ -879,7 +917,8 @@ sf.simulate(circuit, ...) -> State  Shortcut for sf.run().state
 
 sf.compile(circuit, ...) -> Circuit Hardware compilation
   level=0|1|2                       Optimization aggressiveness
-  target=HardwareSpec               Target device specification
+  target=HardwareSpec|str           Target device, or a preset name
+  twirl_seed=int                     Reproducible level-2 Pauli twirl
 
 sf.State                            Rust-native quantum state
   .expectation(obs) -> float        Exact expectation value
@@ -917,6 +956,7 @@ sf.PauliString(str, coeff=1.0)      Single Pauli term
 sf.SparsePauliOp                    Sparse sum of Pauli terms
 sf.expval(statevector, observable)  Compute expectation value
 sf.NoiseModel()                     Noise model for density matrix sim
+sf.ErrorChannel                     Reusable error channel (Kraus / unitary / reset)
 sf.DeviceExecutor                   Protocol for device targets
 sf.LocalTracker                     File-based experiment tracker
 ```

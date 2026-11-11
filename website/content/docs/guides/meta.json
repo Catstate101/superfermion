@@ -5,6 +5,7 @@
     "circuits",
     "controlled-gates",
     "execution",
+    "noise",
     "measurements",
     "mid-circuit",
     "classical-shadow",

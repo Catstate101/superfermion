@@ -1,0 +1,337 @@
+---
+title: "Noise Models"
+description: "Gate-level noise on the density-matrix path: built-in channels, instruction filters, wire targets, custom Kraus channels, reset and leakage errors, and crosstalk."
+---
+
+`sf.NoiseModel` describes gate noise as Kraus channels. The channels are applied by the
+density-matrix engine, which is the only backend that carries them; the pure-state methods
+warn and ignore gate noise (readout error is still applied after sampling).
+
+```python
+import superfermion as sf
+
+qc = sf.Circuit(1).x(0)
+
+noise = (
+    sf.NoiseModel()
+    .add_depolarizing(0.01)        # symmetric depolarizing after every gate
+    .add_amplitude_damping(0.005)  # T1 relaxation
+    .add_readout_error(0.02)       # bit flip on the sampled bits
+)
+result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
+
+print(f"purity = {result.metadata['purity']:.4f}")   # purity = 0.9770
+print(result.metadata["density_matrix"].diagonal().real.round(4))  # [0.0116 0.9884]
+```
+
+Every `add_*` method mutates the model and returns `self`, so calls chain.
+
+## Built-in channels
+
+| Method | Kraus channel |
+|--------|---------------|
+| `add_depolarizing(p, n_qubits=1, convention="total")` | Depolarizing; `n_qubits=2` selects the 15-Pauli channel |
+| `add_two_qubit_depolarizing(p, convention="total")` | Shortcut for `add_depolarizing(p, n_qubits=2)` |
+| `add_amplitude_damping(gamma)` | T1 decay |
+| `add_phase_damping(gamma)` | Pure dephasing |
+| `add_thermal_relaxation(t1, t2, gate_time)` | Amplitude damping followed by pure dephasing, equal to Aer's `thermal_relaxation_error`; `t2 > 2*t1` is rejected |
+| `add_bit_flip(p)` / `add_phase_flip(p)` | Pauli channels |
+| `add_readout_error(p)` | Applied to the sampled bitstrings, on every method |
+| `add_kraus(kraus_ops)` | Explicit trace-preserving Kraus set |
+| `add_unitary(u)` / `add_mixed_unitary(unitaries, probabilities)` | Coherent error / mixture of unitaries |
+| `add_quantum_error(error, instructions=None, qubits=None)` | Any reusable `ErrorChannel` |
+| `add_reset_error(p0, p1=0.0)` | Error attached to `reset` |
+| `add_crosstalk(edges, zz_angle, error_rate=0.0, mode="static")` | ZZ coupling on each edge |
+| `add_qutrit_error(kraus_ops, qubits=(data, flag))` / `add_leakage(p, qubit, flag)` | 3-level dynamics on an embedded qutrit |
+
+## Instruction filters
+
+`instructions=` restricts a channel to specific gate types — one name or an iterable of
+names. `None`, the default, keeps the historical behaviour: the channel fires after every
+instruction that touches its qubits.
+
+```python
+qc = sf.Circuit(2).h(0).cnot(0, 1)
+
+def purity(**kwargs):
+    model = sf.NoiseModel().add_depolarizing(0.2, **kwargs)
+    run = sf.run(qc, method="density_matrix", noise_model=model, shots=0)
+    return run.metadata["purity"]
+
+print(f"{purity():.4f}")                           # 0.4001 -- every gate
+print(f"{purity(instructions='cx'):.4f}")          # 0.4669 -- only the CNOT
+print(f"{purity(instructions=('h', 'cx')):.4f}")   # 0.4001 -- both gates
+```
+
+Filters are matched on the simulated IR, after Superfermion's own lowering, so the names are
+the ones the engine sees (`"cx"`, `"ecr"`, `"rz"`, ...). They survive `to_dict()`/`from_dict()`
+and are normalized to uppercase in the serialized form (`["CNOT"]`).
+
+## Wire targets and operand order
+
+`qubits=` binds a channel to specific wires instead of every qubit: an int or an int sequence
+for a 1-qubit channel, and exactly one ordered pair for a 2-qubit channel. The pair is matched
+in instruction order, the way Qiskit's `add_quantum_error` matches:
+
+```python
+qc = sf.Circuit(2).cnot(0, 1)
+
+def purity(pair):
+    model = sf.NoiseModel().add_depolarizing(0.2, n_qubits=2, qubits=pair)
+    run = sf.run(qc, method="density_matrix", noise_model=model, shots=0)
+    return run.metadata["purity"]
+
+print(f"{purity((0, 1)):.4f}")   # 0.7141 -- matches cnot(0, 1)
+print(f"{purity((1, 0)):.4f}")   # 1.0000 -- does not fire on cnot(0, 1)
+```
+
+A 4x4 matrix you supply yourself is read in Qiskit's wire order too: the first listed qubit
+is the least significant, so `kron(A, B)` registered on `(a, b)` acts with `A` on `b` and `B`
+on `a`. The conversion to the kernel's block order happens inside `to_rust_kraus_ops_2q()`.
+
+## Channel placement
+
+`NoiseModel(placement=...)` controls when 1-qubit channels fire:
+
+| Placement | Fires |
+|-----------|-------|
+| `"touch"` (default) | after every gate that touches the qubit, so a CNOT receives two 1-qubit channels (one per operand) |
+| `"gate"` | only after 1-qubit gates — the Qiskit `NoiseModel` / Aer placement |
+
+```python
+qc = sf.Circuit(2).cnot(0, 1)
+
+for placement in ("touch", "gate"):
+    model = sf.NoiseModel(placement=placement).add_depolarizing(0.05)
+    run = sf.run(qc, method="density_matrix", noise_model=model, shots=0)
+    print(placement, f"{run.metadata['purity']:.4f}")   # touch 0.8753, gate 1.0000
+```
+
+## Depolarizing conventions
+
+`convention="total"` (the default) reads `p` as the total non-identity-Pauli probability.
+`convention="qiskit"` reads it as Qiskit's lambda and rescales the stored Kraus set
+(`3*lam/4` for one qubit, `15*lam/16` for two), so the channel matches
+`qiskit_aer.noise.depolarizing_error` at the same nominal number:
+
+```python
+qc = sf.Circuit(1).x(0)
+
+def density(**kwargs):
+    model = sf.NoiseModel().add_depolarizing(**kwargs)
+    return sf.run(qc, method="density_matrix", noise_model=model, shots=0).metadata["density_matrix"]
+
+total = density(p=0.12)                              # 12% total Pauli error
+qiskit = density(p=0.16, convention="qiskit")        # lambda = 0.16 -> same channel
+print(abs(total - qiskit).max())                     # 0.0
+```
+
+At equal nominal numbers the `"total"` channel is heavier by `4/3` (one qubit) and `16/15`
+(two qubits). `error_rate` — and `to_dict()` — keeps the value you passed, not the rescaled one.
+
+## Custom channels with `ErrorChannel`
+
+`sf.ErrorChannel` is the reusable equivalent of Qiskit's `QuantumError`: build it once, then
+register it on several models or wire sets. It is not restricted to `NoiseModel`; the
+constructors are the five `from_*` classmethods.
+
+```python
+import numpy as np
+import superfermion as sf
+
+x = np.array([[0, 1], [1, 0]], dtype=complex)
+
+kraus = sf.ErrorChannel.from_kraus([np.sqrt(0.9) * np.eye(2), np.sqrt(0.1) * x])
+print(kraus.name, kraus.dim, kraus.is_trace_preserving)   # kraus 2 True
+print(f"{kraus.tp_deviation:.1e}")                        # 1.1e-16, well inside 1e-8
+
+qc = sf.Circuit(1).x(0)
+run = sf.run(
+    qc,
+    method="density_matrix",
+    noise_model=sf.NoiseModel().add_quantum_error(kraus, instructions=["x"], qubits=[0]),
+    shots=0,
+)
+print(run.metadata["density_matrix"].diagonal().real.round(4))   # [0.1 0.9]
+```
+
+| Constructor | Builds |
+|-------------|--------|
+| `from_kraus(kraus, name="kraus")` | Explicit set, 1 or 2 qubits inferred from the shape |
+| `from_unitary(u)` | One-term Kraus set; rejects a non-unitary matrix |
+| `from_mixed_unitary([(u, p), ...])` | `sqrt(p_i) * U_i`, probabilities must sum to 1 |
+| `from_reset(p0, p1=0.0)` | Aer's `reset_error` |
+| `from_qutrit_kraus(kraus, name="qutrit")` | 3x3 operators for `add_qutrit_error` |
+
+`compose(other)`, `tensor(other)` and `power(n)` build larger channels, and every object
+exposes `dim`, `kraus`, `is_trace_preserving` and `tp_deviation`:
+
+```python
+mixed = sf.ErrorChannel.from_mixed_unitary([(np.eye(2), 0.9), (x, 0.1)])
+print(mixed.name, mixed.is_trace_preserving)   # mixed_unitary True
+
+composed = kraus.compose(mixed)
+print(composed.name)                           # mixed_unitary->kraus
+
+print(kraus.tensor(kraus).dim)                 # 4  (two qubits)
+print(mixed.power(2).n_qubits)                 # 1  (repeated on the same wire)
+```
+
+A Kraus set that is not trace preserving is rejected at construction — `sum K^dagger K = I`
+within `1e-8`:
+
+```python
+try:
+    sf.ErrorChannel.from_kraus([np.array([[1.0, 0.0], [0.0, 0.5]])])
+except ValueError as exc:
+    print(exc)   # ... max deviation 7.500e-01
+```
+
+## Reset errors
+
+`add_reset_error(p0, p1=0.0)` attaches to the `reset` instruction by default
+(`instructions=("reset",)`). `p0` is the probability of ending in `|0>` after the reset and
+`p1` the probability of ending in `|1>`; the remainder leaves the state alone.
+
+On `method="density_matrix"` a reset is evolved as an exact CPTP map, so the channel has
+something to act on:
+
+```python
+qc = sf.Circuit(1).x(0).reset(0)
+
+for p0, p1 in ((0.0, 0.0), (0.1, 0.2)):
+    model = sf.NoiseModel().add_reset_error(p0, p1)
+    run = sf.run(qc, method="density_matrix", noise_model=model, shots=0)
+    print(f"p0={p0} p1={p1}", run.metadata["density_matrix"].diagonal().real.round(4))
+# p0=0.0 p1=0.0 [1. 0.]
+# p0=0.1 p1=0.2 [0.8 0.2]
+```
+
+## Qutrit and leakage channels
+
+A transmon's second excited level does not fit on one wire, so the qutrit is simulated on
+two physical qubits: `data` carries the computational subspace and `flag` records the leaked
+level.
+
+| State | Wires |
+|-------|-------|
+| `|0>` | `data=0, flag=0` |
+| `|1>` | `data=1, flag=0` |
+| `|2>` | `data=0, flag=1` |
+
+`add_leakage(p, qubit, flag)` moves population out of the computational subspace with
+probability `p`; `|2>` is absorbing. `add_qutrit_error(kraus_ops, qubits=(data, flag))` takes
+an arbitrary 3-level set. The pair is required — the embedding needs a wire for the leaked
+amplitude — and the flag wire is read-only: do not put gates on it.
+
+```python
+qc = sf.Circuit(2).x(0)        # qubit 0 = data, qubit 1 = flag
+
+run = sf.run(
+    qc,
+    method="density_matrix",
+    noise_model=sf.NoiseModel().add_leakage(0.2, qubit=0, flag=1),
+    shots=0,
+)
+print(run.metadata["density_matrix"].diagonal().real.round(4))   # [0.  0.2 0.8 0. ]
+```
+
+Read in the density-matrix layout (qubit 0 = most significant), index 2 is `data=1, flag=0`
+and index 1 is `data=0, flag=1`: 80% of the excited state stayed and 20% leaked. The cost is
+one extra qubit per leaky transmon, so this circuit runs on two wires rather than one.
+
+## Crosstalk
+
+`add_crosstalk(edges, zz_angle, error_rate=0.0, mode=...)` registers
+`exp(-i * zz_angle/2 * Z_a Z_b)` on every `(a, b)` edge, plus an optional two-qubit
+depolarizing channel of strength `error_rate`.
+
+`mode="static"` is the measured residual coupling folded onto the edge: the kick fires after
+every matching gate on the pair, and its strength does not depend on what else runs.
+`mode="spectator"` is cycle-aware — a cycle is one parallel step, and the edge accumulates one
+unit of coupling per *driven endpoint*, so a gate on a neighbour of an idle partner still
+kicks the edge.
+
+```python
+import numpy as np
+import superfermion as sf
+
+def coherence(circuit, mode):
+    model = sf.NoiseModel().add_crosstalk([(0, 1)], zz_angle=0.3, mode=mode)
+    run = sf.run(circuit, method="density_matrix", noise_model=model, shots=0)
+    return np.asarray(run.metadata["density_matrix"])[0, 2]
+
+one_sided = sf.Circuit(2).h(0)            # only endpoint 0 is driven
+print(coherence(one_sided, "static"))     # (0.5+0j)      -- no gate on the edge
+print(coherence(one_sided, "spectator"))  # (0.4777-0.1478j) -- one kick, angle -0.3
+
+both = sf.Circuit(2).h(0).h(1)            # both endpoints driven
+print(coherence(both, "static"))          # (0.25+0j)
+print(coherence(both, "spectator"))       # (0.2063-0.1412j) -- two kicks, angle -0.6
+```
+
+`mode` accepts `"static"` and `"spectator"` only; anything else raises `ValueError`. This is
+a first-order model, not a calibration: every driven endpoint contributes exactly one unit
+per cycle regardless of pulse shape, a gate's own error rate is not inflated, and the kicks
+land at the end of the cycle.
+
+## Serialization
+
+`to_dict()` records the model-level placement, per-channel targets, instruction filters,
+non-default conventions, and the Kraus set of custom channels. `from_dict()` restores every
+model exactly and accepts dicts written before these fields existed.
+
+```python
+model = (
+    sf.NoiseModel(placement="gate")
+    .add_depolarizing(0.01, qubits=[0], instructions="cx")
+    .add_thermal_relaxation(t1=50e3, t2=70e3, gate_time=100)
+)
+data = model.to_dict()
+print(sorted(data))                              # ['placement', 'readout_error', ...]
+print(data["placement"])                         # gate
+print(data["single_qubit_channels"][0])
+# {'name': 'depolarizing', 'error_rate': 0.01, 'qubits': [0], 'instructions': ['CNOT']}
+
+restored = sf.NoiseModel.from_dict(data)
+print(restored.placement, len(restored.single_qubit_channels))   # gate 2
+```
+
+A thermal channel without its `params` cannot be rebuilt from `error_rate` alone, so
+`from_dict()` raises `ValueError` naming the missing fields instead of inventing `t1`/`t2`.
+
+## Low-level density-matrix bindings
+
+`QuantumDAG.simulate_dm_noisy()` takes the flattened Kraus layout directly: one 2x2 matrix per
+8 floats (four complex re/im pairs) and one 4x4 per 32. A malformed set is rejected with a
+`ValueError` that names the argument, its index and the expected multiple — it never reaches
+the kernel:
+
+```python
+import superfermion as sf
+
+dag = sf.Circuit(1).x(0).to_ir()
+
+try:
+    dag.simulate_dm_noisy([(0, [1.0, 0.0, 0.0, 0.0])])     # four floats
+except ValueError as exc:
+    print(exc)
+# noise_ops[0]: a flat Kraus set must be a positive multiple of 8 floats
+# (one 2x2 matrix = 8 floats, one 4x4 = 32); got 4
+
+# the identity is 8 floats: re00, im00, re01, im01, re10, im10, re11, im11
+vec = dag.simulate_dm_noisy([(0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])])
+print(vec.reshape(2, 2).trace().real)    # 1.0
+```
+
+The same check guards `simulate_dm_noisy_state()` and `simulate_dm_noisy_state_view()`.
+
+## Reach and layout
+
+- Gate noise is applied by `method="density_matrix"` only. `statevector`, `mps` and
+  `stabilizer` emit a `RuntimeWarning` and ignore the gate channels; readout error still
+  applies.
+- Circuits with a non-terminal measurement or feed-forward go through the trajectory engine,
+  which does not apply gate noise.
+- `result.metadata["density_matrix"]` is big-endian (qubit 0 = most significant), while
+  `counts` keys keep the shared little-endian convention.
