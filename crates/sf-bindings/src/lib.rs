@@ -1599,7 +1599,7 @@ fn placement_per_touch(spec: Option<&str>) -> PyResult<bool> {
 /// positive multiple of `unit` used to reach the parser and panic on an
 /// out-of-bounds index; surface it as a Python `ValueError` instead.
 fn validate_flat_kraus_len(which: &str, idx: usize, flat: &[f64], unit: usize) -> PyResult<()> {
-    if flat.is_empty() || flat.len() % unit != 0 {
+    if flat.is_empty() || !flat.len().is_multiple_of(unit) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "{which}[{idx}]: a flat Kraus set must be a positive multiple of {unit} \
              floats (one 2x2 matrix = 8 floats, one 4x4 = 32); got {}",
