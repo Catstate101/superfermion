@@ -2,6 +2,113 @@
 
 All notable changes to the Superfermion framework.
 
+## [Unreleased]
+
+A Qiskit-parity noise layer for the density-matrix path, and the compiler
+numerics defects the parity work uncovered. The channels Aer has an equivalent
+for -- depolarizing, custom Kraus, unitary, mixed unitary, reset and crosstalk --
+are measured against it on the same circuit in
+`tests/domain/test_quantum_error_parity.py`, so the parity is an assertion and
+not only a reading of Aer's source; the qutrit and leakage channels are
+checked against an explicit 3-level model, and against Aer through a manual
+embedding, in `tests/domain/test_qutrit_leakage.py`.
+
+### Added
+
+- **Instruction filters**: every `NoiseModel.add_*` channel takes
+  `instructions=` -- one name or an iterable of names (`"cx"`, `("cx", "ecr")`)
+  -- so the channel fires only on those instructions. `None` keeps the previous
+  fire-on-everything behaviour, and the filter survives `to_dict`/`from_dict`.
+- **Ordered 2-qubit targets**: `qubits=` accepts one `(a, b)` pair or a tuple
+  of pairs, matched to the gate in instruction order, so a 2-qubit channel is
+  applied with the operand order the caller states rather than whichever order
+  the gate record carries. `_qiskit_order_2q` maps Qiskit's wire order onto
+  the SF kernel's for a directly supplied 4x4 matrix.
+- **`NoiseModel.placement`**: `"touch"` (default; an untargeted channel fires
+  on any gate that touches its qubits) or `"gate"` (fires only on a gate whose
+  operands are exactly its targets). Serialized and restored with the model.
+- **`ErrorChannel` and `add_quantum_error`**: one reusable channel object
+  (`kraus`, `n_qubits`, `name`, `error_rate`, `params`, `instructions`) that
+  several models and qubit sets can share, which is what `QuantumError` is to
+  Qiskit.
+- **`add_unitary` / `add_mixed_unitary`**: unitary and probabilistic-mixture
+  channels built from matrices, with the probability vector checked before it
+  reaches the kernel.
+- **Qutrit channels**: `add_qutrit_error(kraus_ops, qubits, ...)` for arbitrary
+  3-level Kraus operators embedded into the qubit register, and
+  `add_leakage(p, qubit, flag)` (`kraus_leakage`) for population leaving the
+  computational subspace. Both are exact 3-level dynamics on the embedded
+  model, which is not the same claim as a 3-level device.
+- **`add_reset_error`**: reset-bound error, `instructions=("reset",)` by
+  default. On `method="density_matrix"` a `reset` is now evolved as an exact
+  CPTP map (`sf-ir apply_reset`) instead of being skipped, so the channel has
+  something to fire on.
+- **`add_crosstalk`**: spectator ZZ terms on a set of edges, `mode="static"`
+  (once per gate) or `mode="cycle"`. Cycle mode counts each driven endpoint
+  once per parallel layer, so a spectator next to two gates of the same layer
+  is charged once, as the hardware does, and not twice.
+- **`convention="qiskit"`**: depolarizing `error_rate` read as Qiskit's lambda
+  and rescaled when the Kraus set is built; the default remains the nominal
+  total non-identity-Pauli probability. Channels are composed in `add` order.
+- **`Circuit.sxdg()`**: the constructor the QASM importer already needed for
+  `sxdg` records. Matrices, export and compilation are unchanged.
+- **`compile(..., twirl_seed=N)`**: the level-2 Pauli twirl draws a fresh
+  thread-RNG seed per call, so two level-2 compiles of one input differ gate
+  for gate while the unitary is unchanged (measured at 1e-16 across runs). A
+  seed makes the gate list reproducible.
+- **String targets**: `sf.compile(c, target="ibm_eagle")` is what the docs and
+  examples use, but a `str` has none of the `HardwareSpec` attributes the
+  pipeline reads, so every `getattr(target, ...)` fell back and the circuit was
+  compiled for no device at all. The alias resolves through the preset registry
+  now, and an unknown name raises `ValueError` listing the known targets.
+
+### Fixed
+
+- **Malformed flat Kraus sets**: a 2x2 set given as four floats reached the
+  `chunks(8)` reader in `_sf_core` and indexed past the end of the slice --
+  `index out of bounds`, which pyo3 surfaces as
+  `pyo3_runtime.PanicException`, a `BaseException` that `except Exception`
+  never sees. All three density-matrix bindings validate the length first and
+  raise `ValueError` naming the argument, its index and the expected multiple
+  (8 floats per 2x2, 32 per 4x4). Well-formed sets reach the kernel unchanged.
+- **ECR basis translation**: the ECR arm produced a decomposition that
+  overlapped ECR by 0.707; it is exact now, and ECR exports as an exact
+  `u3`/`cx` decomposition. The legacy qelib1 customs (`rc3x`, `rccx`, `c3x`,
+  `c3sqrtx`, `u0`) round-trip through `qasm2`.
+- **`UnitaryDecompositionPass` theta**: `2*arccos(|m00|)` is ill-conditioned as
+  theta -> 0 -- one ulp of rounding in `|m00|` moves the angle by 1.5e-8, and
+  the spurious `Ry(1.5e-8)` that follows is a first-order error in the matrix,
+  measured as the 2.1e-8 a CRZ lowering carried. `2*atan2(|m10|, |m00|)` is
+  well conditioned at both ends and returns exactly 0.0 when `m10` is 0. The
+  2-qubit demux fast path also needs `rtol=0.0, atol=1e-12` rather than
+  `np.allclose(..., atol=1e-8)`, whose default `rtol=1e-5` could drop a
+  relative unitary of that size and report nothing.
+- **`rotation_merge`**: `CANCEL_EPS` 1e-12 -> 1e-15 (about 2 ulp of pi). Lane A
+  had a genuine 7.4e-13 phase that 1e-12 deleted: it survived a round trip as
+  a global phase in one gate order and as a 2.6e-13 relative-phase error in
+  the other. Only the residue of a true cancellation is dropped now.
+- **`sabre`**: the backward pass returned its reversed gate order as the
+  routing result; the pass re-routes from that pass's layout instead.
+- **`qasm2` statement splitting**: multi-statement and comment safe, so two
+  instructions on one line no longer parse as one.
+- **`compile()` routing order**: a gate with three or more wire operands has no
+  single edge to sit on, and the lowering that removes it (CSWAP -> CX, CCX)
+  ran after routing, so the CX gates it emits were never routed and the
+  connectivity guard rejected the result (112 of 200 lane-A programs).
+  Lowering now runs before routing, and `compile_rust`'s own `prepare()` then
+  finds nothing left to rewrite, so nothing is lowered twice.
+
+### Tests
+
+- `tests/domain/test_quantum_error_parity.py` measures each channel against
+  Qiskit Aer's noise module on the same circuit, and the error channels against
+  Aer's `QuantumError` superoperators.
+- `tests/domain/test_qutrit_leakage.py` covers the qutrit and leakage channels;
+  `TestFlatKrausValidation` in `tests/domain/test_dm_view_and_placement.py`
+  pins the malformed-Kraus refusals.
+- Full suite on the rebuilt wheel: 1,734 passed, 21 skipped, 0 failed of 1,755
+  collected.
+
 ## [0.1.28] - 2026-11-08
 
 `write_fcidump` labelled physicist by default. That is how the FCIDUMP
