@@ -44,9 +44,9 @@ embedding, in `tests/domain/test_qutrit_leakage.py`.
   CPTP map (`sf-ir apply_reset`) instead of being skipped, so the channel has
   something to fire on.
 - **`add_crosstalk`**: spectator ZZ terms on a set of edges, `mode="static"`
-  (once per gate) or `mode="cycle"`. Cycle mode counts each driven endpoint
-  once per parallel layer, so a spectator next to two gates of the same layer
-  is charged once, as the hardware does, and not twice.
+  (once per gate) or `mode="spectator"`. Spectator mode counts each driven
+  endpoint once per parallel layer, so a spectator next to two gates of the
+  same layer is charged once, as the hardware does, and not twice.
 - **`convention="qiskit"`**: depolarizing `error_rate` read as Qiskit's lambda
   and rescaled when the Kraus set is built; the default remains the nominal
   total non-identity-Pauli probability. Channels are composed in `add` order.
@@ -74,7 +74,9 @@ embedding, in `tests/domain/test_qutrit_leakage.py`.
 - **ECR basis translation**: the ECR arm produced a decomposition that
   overlapped ECR by 0.707; it is exact now, and ECR exports as an exact
   `u3`/`cx` decomposition. The legacy qelib1 customs (`rc3x`, `rccx`, `c3x`,
-  `c3sqrtx`, `u0`) round-trip through `qasm2`.
+  `c3sqrtx`, `u0`) are recognised by the `qasm2` importer from built-in
+  bodies, so `include "qelib1.inc"` programs that call them parse; `u0` is
+  the identity and `sxdg` parses and exports.
 - **`UnitaryDecompositionPass` theta**: `2*arccos(|m00|)` is ill-conditioned as
   theta -> 0 -- one ulp of rounding in `|m00|` moves the angle by 1.5e-8, and
   the spurious `Ry(1.5e-8)` that follows is a first-order error in the matrix,
