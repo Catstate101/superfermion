@@ -2,7 +2,7 @@
 
 All notable changes to the Superfermion framework.
 
-## [Unreleased]
+## [0.1.29] - 2026-11-11
 
 A Qiskit-parity noise layer for the density-matrix path, and the compiler
 numerics defects the parity work uncovered. The channels Aer has an equivalent
@@ -110,6 +110,18 @@ embedding, in `tests/domain/test_qutrit_leakage.py`.
   pins the malformed-Kraus refusals.
 - Full suite on the rebuilt wheel: 1,734 passed, 21 skipped, 0 failed of 1,755
   collected.
+
+### Documentation
+
+- New **Noise Models** guide: placement modes, instruction and wire filters,
+  depolarizing conventions, `ErrorChannel`, reset, qutrit/leakage and
+  crosstalk, with every Python block executed against the installed package.
+  The compiler guide gains string targets, `twirl_seed`, a phase-invariant
+  overlap check (compiled gates match up to a global phase) and the ECR
+  exactness note; the API reference documents `sf.ErrorChannel`, `sxdg` and
+  the `compile()` parameters.
+- The website serves client-side search from a prerendered index and links
+  GitHub, PyPI and the paper DOI.
 
 ## [0.1.28] - 2026-11-08
 
