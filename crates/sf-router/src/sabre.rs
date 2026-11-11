@@ -533,24 +533,33 @@ impl<'a> SabreRouter<'a> {
 
         // Build reversed gate list for backward pass
         let rev_gates = self.reverse_gates(&gates);
-        let (bwd_dag, _bwd_mapping, bwd_swaps) = self.forward_pass(
+        let (bwd_dag, bwd_mapping, bwd_swaps) = self.forward_pass(
             &rev_gates,
             &fwd_mapping,
             dag.n_qubits,
             dag.n_cbits,
             usize::MAX,
         )?;
+        let _ = &bwd_dag;
 
-        // Pick the result with fewer SWAPs
+        // Pick the result with fewer SWAPs.  The backward pass routed
+        // `rev_gates`, so `bwd_dag` is the program executed in reverse and must
+        // never be returned: only its final layout is informative.  Re-route
+        // forward from that layout and keep the better forward result.
         if bwd_swaps < fwd_swaps {
-            // The backward pass produced a better result; re-route forward
-            // using the backward's concept (its final layout as our initial)
-            // For simplicity and correctness, just return the better of the two
-            // forward results
-            Ok((bwd_dag, _bwd_mapping))
-        } else {
-            Ok((fwd_dag, fwd_mapping))
+            if let Ok((rerouted, rerouted_mapping, rerouted_swaps)) = self.forward_pass(
+                &gates,
+                &bwd_mapping,
+                dag.n_qubits,
+                dag.n_cbits,
+                bwd_swaps.max(1),
+            ) {
+                if rerouted_swaps < fwd_swaps {
+                    return Ok((rerouted, rerouted_mapping));
+                }
+            }
         }
+        Ok((fwd_dag, fwd_mapping))
     }
 
     /// Reverse the gate list for the backward pass.
@@ -648,10 +657,36 @@ impl<'a> SabreRouter<'a> {
             );
 
             let (result_dag, result_mapping, result_swaps) = match bwd {
-                Ok((bwd_dag, bwd_mapping, bwd_swaps)) => {
+                Ok((_bwd_dag, bwd_mapping, bwd_swaps)) => {
                     spent += bwd_swaps;
                     if bwd_swaps < fwd_swaps {
-                        (bwd_dag, bwd_mapping, bwd_swaps)
+                        // The backward pass traversed `rev_gates`, so its DAG is
+                        // this circuit executed *in reverse* — returning it would
+                        // silently invert the program.  Use only its layout: the
+                        // mapping it ends on is a valid starting layout for the
+                        // forward direction.  Re-route forward from it so the
+                        // returned DAG keeps the original gate order.
+                        let limit = bwd_swaps.max(1).min(cap.saturating_sub(spent)).max(1);
+                        match self.forward_pass(
+                            &gates,
+                            &bwd_mapping,
+                            dag.n_qubits,
+                            dag.n_cbits,
+                            limit,
+                        ) {
+                            Ok((rerouted, rerouted_mapping, rerouted_swaps)) => {
+                                spent += rerouted_swaps;
+                                if rerouted_swaps < fwd_swaps {
+                                    (rerouted, rerouted_mapping, rerouted_swaps)
+                                } else {
+                                    (fwd_dag, fwd_mapping, fwd_swaps)
+                                }
+                            }
+                            Err(_) => {
+                                spent += limit;
+                                (fwd_dag, fwd_mapping, fwd_swaps)
+                            }
+                        }
                     } else {
                         (fwd_dag, fwd_mapping, fwd_swaps)
                     }
@@ -690,8 +725,25 @@ impl<'a> SabreRouter<'a> {
             fwd_swaps,
         );
         Ok(match bwd {
-            Ok((bwd_dag, bwd_mapping, bwd_swaps)) if bwd_swaps < fwd_swaps => {
-                (bwd_dag, bwd_mapping)
+            Ok((_bwd_dag, bwd_mapping, bwd_swaps)) if bwd_swaps < fwd_swaps => {
+                // Same reasoning as in `route_multi_trial`: the backward DAG is
+                // the reversed program, so only its layout is usable.  Re-route
+                // forward from that layout; fall back to the forward result if
+                // the re-route cannot beat it.
+                match self.forward_pass(
+                    &gates,
+                    &bwd_mapping,
+                    dag.n_qubits,
+                    dag.n_cbits,
+                    bwd_swaps.max(1),
+                ) {
+                    Ok((rerouted, rerouted_mapping, rerouted_swaps))
+                        if rerouted_swaps < fwd_swaps =>
+                    {
+                        (rerouted, rerouted_mapping)
+                    }
+                    _ => (fwd_dag, fwd_mapping),
+                }
             }
             _ => (fwd_dag, fwd_mapping),
         })
@@ -790,7 +842,23 @@ mod tests {
         dag.add_op(OpType::CNOT, &[1, 3]);
 
         let (routed, _) = router.route_bidirectional(&dag, &layout).unwrap();
-        assert!(routed.gate_count() > 2);
+        // Gate count is layout-dependent (a good initial layout needs no SWAPs),
+        // so assert the property that actually matters: both original gates are
+        // still present and every 2q gate is executable on the topology.
+        assert!(
+            routed.count_ops_of_type("CNOT") >= 2,
+            "both CNOTs must survive routing, got {}",
+            routed.count_ops_of_type("CNOT")
+        );
+        for (name, qubits, _) in routed.to_gate_records() {
+            if qubits.len() == 2 {
+                assert!(
+                    coupling.is_connected(qubits[0], qubits[1]),
+                    "{name} on {:?} is not on an edge of the coupling map",
+                    qubits
+                );
+            }
+        }
     }
 
     #[test]

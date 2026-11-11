@@ -1102,7 +1102,8 @@ impl PyQuantumDAG {
     /// with `noise_2q_ops`; `None` entries (or a missing/short list) fire on
     /// every 2q gate, a pair only on an instruction emitted in that exact
     /// order (Qiskit `add_quantum_error` semantics).
-    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None, noise_1q_instructions=None, noise_2q_instructions=None, noise_2q_modes=None))]
     fn simulate_dm_noisy<'py>(
         &self,
         py: Python<'py>,
@@ -1110,15 +1111,30 @@ impl PyQuantumDAG {
         noise_2q_ops: Option<Vec<Vec<f64>>>,
         placement: Option<&str>,
         noise_2q_targets: Option<Vec<Option<(usize, usize)>>>,
+        noise_1q_instructions: Option<Vec<Option<Vec<String>>>>,
+        noise_2q_instructions: Option<Vec<Option<Vec<String>>>>,
+        noise_2q_modes: Option<Vec<u8>>,
     ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
         let per_touch = placement_per_touch(placement)?;
         let noise_2q_ops = noise_2q_ops.unwrap_or_default();
         let noise_2q_targets = noise_2q_targets.unwrap_or_default();
+        let noise_1q_instructions = noise_1q_instructions.unwrap_or_default();
+        let noise_2q_instructions = noise_2q_instructions.unwrap_or_default();
+        let noise_2q_modes = noise_2q_modes.unwrap_or_default();
+        for (idx, (_q, flat)) in noise_ops.iter().enumerate() {
+            validate_flat_kraus_len("noise_ops", idx, flat, 8)?;
+        }
+        for (idx, flat) in noise_2q_ops.iter().enumerate() {
+            validate_flat_kraus_len("noise_2q_ops", idx, flat, 32)?;
+        }
         let data = dm_noisy_core(
             &self.inner,
             &noise_ops,
             &noise_2q_ops,
             &noise_2q_targets,
+            &noise_1q_instructions,
+            &noise_2q_instructions,
+            &noise_2q_modes,
             per_touch,
         );
         Ok(numpy::PyArray1::from_vec(py, data))
@@ -1137,7 +1153,8 @@ impl PyQuantumDAG {
     /// Accepts the same `noise_2q_targets` ordered-pair list as
     /// `simulate_dm_noisy`.
     #[allow(clippy::uninit_vec)]
-    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None, noise_1q_instructions=None, noise_2q_instructions=None, noise_2q_modes=None))]
     fn simulate_dm_noisy_state<'py>(
         &self,
         py: Python<'py>,
@@ -1145,17 +1162,32 @@ impl PyQuantumDAG {
         noise_2q_ops: Option<Vec<Vec<f64>>>,
         placement: Option<&str>,
         noise_2q_targets: Option<Vec<Option<(usize, usize)>>>,
+        noise_1q_instructions: Option<Vec<Option<Vec<String>>>>,
+        noise_2q_instructions: Option<Vec<Option<Vec<String>>>>,
+        noise_2q_modes: Option<Vec<u8>>,
     ) -> PyResult<(PyState, Bound<'py, numpy::PyArray1<num_complex::Complex64>>)> {
         let trace = std::env::var_os("SF_DM_TRACE").is_some();
         let per_touch = placement_per_touch(placement)?;
         let t_core = std::time::Instant::now();
         let noise_2q_ops = noise_2q_ops.unwrap_or_default();
         let noise_2q_targets = noise_2q_targets.unwrap_or_default();
+        let noise_1q_instructions = noise_1q_instructions.unwrap_or_default();
+        let noise_2q_instructions = noise_2q_instructions.unwrap_or_default();
+        let noise_2q_modes = noise_2q_modes.unwrap_or_default();
+        for (idx, (_q, flat)) in noise_ops.iter().enumerate() {
+            validate_flat_kraus_len("noise_ops", idx, flat, 8)?;
+        }
+        for (idx, flat) in noise_2q_ops.iter().enumerate() {
+            validate_flat_kraus_len("noise_2q_ops", idx, flat, 32)?;
+        }
         let data = dm_noisy_core(
             &self.inner,
             &noise_ops,
             &noise_2q_ops,
             &noise_2q_targets,
+            &noise_1q_instructions,
+            &noise_2q_instructions,
+            &noise_2q_modes,
             per_touch,
         );
         let t_core = t_core.elapsed();
@@ -1330,7 +1362,8 @@ impl PyQuantumDAG {
     /// buffer).
     /// buffer).  Accepts the same `noise_2q_targets` ordered-pair list as
     /// `simulate_dm_noisy`.
-    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (noise_ops, noise_2q_ops=None, placement=None, noise_2q_targets=None, noise_1q_instructions=None, noise_2q_instructions=None, noise_2q_modes=None))]
     fn simulate_dm_noisy_state_view<'py>(
         &self,
         py: Python<'py>,
@@ -1338,6 +1371,9 @@ impl PyQuantumDAG {
         noise_2q_ops: Option<Vec<Vec<f64>>>,
         placement: Option<&str>,
         noise_2q_targets: Option<Vec<Option<(usize, usize)>>>,
+        noise_1q_instructions: Option<Vec<Option<Vec<String>>>>,
+        noise_2q_instructions: Option<Vec<Option<Vec<String>>>>,
+        noise_2q_modes: Option<Vec<u8>>,
     ) -> PyResult<(
         Bound<'py, PyState>,
         Bound<'py, numpy::PyArray2<num_complex::Complex64>>,
@@ -1346,12 +1382,24 @@ impl PyQuantumDAG {
         let per_touch = placement_per_touch(placement)?;
         let noise_2q_ops = noise_2q_ops.unwrap_or_default();
         let noise_2q_targets = noise_2q_targets.unwrap_or_default();
+        let noise_1q_instructions = noise_1q_instructions.unwrap_or_default();
+        let noise_2q_instructions = noise_2q_instructions.unwrap_or_default();
+        let noise_2q_modes = noise_2q_modes.unwrap_or_default();
+        for (idx, (_q, flat)) in noise_ops.iter().enumerate() {
+            validate_flat_kraus_len("noise_ops", idx, flat, 8)?;
+        }
+        for (idx, flat) in noise_2q_ops.iter().enumerate() {
+            validate_flat_kraus_len("noise_2q_ops", idx, flat, 32)?;
+        }
         let t_core = std::time::Instant::now();
         let mut data = dm_noisy_core(
             &self.inner,
             &noise_ops,
             &noise_2q_ops,
             &noise_2q_targets,
+            &noise_1q_instructions,
+            &noise_2q_instructions,
+            &noise_2q_modes,
             per_touch,
         );
         let t_core = t_core.elapsed();
@@ -1544,11 +1592,84 @@ fn placement_per_touch(spec: Option<&str>) -> PyResult<bool> {
     }
 }
 
+/// Reject a malformed flat Kraus set before the core parser indexes it.
+///
+/// The wire format is one 2x2 matrix per 8 floats (four complex re/im
+/// pairs) and one 4x4 matrix per 32 floats.  A length that is not a
+/// positive multiple of `unit` used to reach the parser and panic on an
+/// out-of-bounds index; surface it as a Python `ValueError` instead.
+fn validate_flat_kraus_len(which: &str, idx: usize, flat: &[f64], unit: usize) -> PyResult<()> {
+    if flat.is_empty() || flat.len() % unit != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{which}[{idx}]: a flat Kraus set must be a positive multiple of {unit} \
+             floats (one 2x2 matrix = 8 floats, one 4x4 = 32); got {}",
+            flat.len()
+        )));
+    }
+    Ok(())
+}
+
+/// One parsed 2-qubit channel: ordered target pair, instruction filter,
+/// spectator flag, Kraus set.
+///
+/// ``spectator`` distinguishes the two firing rules.  ``false`` (historical):
+/// fire after a two-qubit *gate* on the target pair.  ``true`` (crosstalk):
+/// fire per cycle, once per driven endpoint of the pair — see
+/// ``flush_spectators``.
+type Channel2q = (
+    Option<(usize, usize)>,
+    Option<Vec<String>>,
+    bool,
+    Vec<nalgebra::DMatrix<num_complex::Complex64>>,
+);
+
+/// Does a channel's gate-name filter admit this instruction?
+///
+/// ``None`` = no filter (always).  Matching is case-insensitive on the
+/// instruction's canonical name, the same rule the Python
+/// ``_normalize_instructions`` applies to user input.
+fn name_matches(filter: &Option<Vec<String>>, name: Option<&str>) -> bool {
+    match filter {
+        None => true,
+        Some(names) => name
+            .map(|n| names.iter().any(|x| x.eq_ignore_ascii_case(n)))
+            .unwrap_or(false),
+    }
+}
+
+/// Kraus set of ``after . before`` (apply ``before``, then ``after``).
+///
+/// Element order matches the Python ``_compose_kraus`` (``A @ B`` for every
+/// ``B`` in ``before`` and ``A`` in ``after``), so a qubit whose firing groups
+/// had to be merged here produces the same set Python would have emitted had
+/// the channels shared one instruction filter.
+fn compose_kraus_sets(
+    before: &[nalgebra::DMatrix<num_complex::Complex64>],
+    after: &[nalgebra::DMatrix<num_complex::Complex64>],
+) -> Vec<nalgebra::DMatrix<num_complex::Complex64>> {
+    let mut out = Vec::with_capacity(before.len() * after.len());
+    for b in before {
+        for a in after {
+            out.push(a * b);
+        }
+    }
+    out
+}
+
+/// Core noisy density-matrix pass shared by every noisy-DM binding.
+///
+/// ``noise_2q_modes`` is aligned with ``noise_2q_ops``: ``0`` fires the
+/// channel after matching gates (historical), ``1`` marks a spectator
+/// channel fired once per driven endpoint per parallel cycle.
+#[allow(clippy::too_many_arguments)]
 fn dm_noisy_core(
     dag: &QuantumDAG,
     noise_ops: &[(usize, Vec<f64>)],
     noise_2q_ops: &[Vec<f64>],
     noise_2q_targets: &[Option<(usize, usize)>],
+    noise_1q_instrs: &[Option<Vec<String>>],
+    noise_2q_instrs: &[Option<Vec<String>>],
+    noise_2q_modes: &[u8],
     per_touch: bool,
 ) -> Vec<num_complex::Complex64> {
     use sf_ir::dm::DensityMatrixState;
@@ -1560,9 +1681,14 @@ fn dm_noisy_core(
     // Pre-parse each Kraus channel ONCE (it is re-applied after every
     // instruction that touches the qubit; re-parsing per instruction
     // was pure overhead on top of the DM pass itself).
-    let kraus_channels: Vec<(usize, Vec<nalgebra::DMatrix<num_complex::Complex64>>)> = noise_ops
+    let kraus_channels: Vec<(
+        usize,
+        Option<Vec<String>>,
+        Vec<nalgebra::DMatrix<num_complex::Complex64>>,
+    )> = noise_ops
         .iter()
-        .map(|(noise_qubit, kraus_flat)| {
+        .enumerate()
+        .map(|(idx, (noise_qubit, kraus_flat))| {
             let matrices = kraus_flat
                 .chunks(8)
                 .map(|flat| {
@@ -1574,7 +1700,10 @@ fn dm_noisy_core(
                     m
                 })
                 .collect();
-            (*noise_qubit, matrices)
+            // Per-instruction filter (Qiskit add_quantum_error parity):
+            // `None` fires after every instruction touching the qubit.
+            let instrs = noise_1q_instrs.get(idx).cloned().flatten();
+            (*noise_qubit, instrs, matrices)
         })
         .collect();
 
@@ -1585,14 +1714,13 @@ fn dm_noisy_core(
     // only when the instruction's qubits match it in order (Qiskit
     // `add_quantum_error` parity — an error on (0, 1) is silent on
     // `cx(1, 0)`).
-    let kraus_2q: Vec<(
-        Option<(usize, usize)>,
-        Vec<nalgebra::DMatrix<num_complex::Complex64>>,
-    )> = noise_2q_ops
+    let kraus_2q: Vec<Channel2q> = noise_2q_ops
         .iter()
         .enumerate()
         .map(|(idx, flat)| {
             let target = noise_2q_targets.get(idx).copied().flatten();
+            let instrs = noise_2q_instrs.get(idx).cloned().flatten();
+            let spectator = noise_2q_modes.get(idx).copied().unwrap_or(0) != 0;
             let matrices = flat
                 .chunks(32)
                 .map(|ch| {
@@ -1606,9 +1734,14 @@ fn dm_noisy_core(
                     m
                 })
                 .collect();
-            (target, matrices)
+            (target, instrs, spectator, matrices)
         })
         .collect();
+
+    // Spectator (crosstalk) channels fire per *cycle*, not per gate — see
+    // `flush_spectators`.  When none exists the cycle bookkeeping below is
+    // skipped entirely and the gate loop stays as it was.
+    let any_spectator = kraus_2q.iter().any(|(_, _, spectator, _)| *spectator);
 
     // A run of consecutive noisy 1-qubit gates on pairwise-distinct qubits
     // shares one sweep per pair: the two fused 4×4 channel superoperators
@@ -1635,8 +1768,104 @@ fn dm_noisy_core(
     }
     let mut pending: Vec<(usize, Sup4)> = Vec::with_capacity(2);
 
+    /// Apply the spectator channels a cycle triggered.
+    ///
+    /// A cycle is one parallel step: a maximal run of instructions with
+    /// pairwise-disjoint qubits (the standard hardware-cycle abstraction —
+    /// every qubit is touched at most once per cycle).  For an edge `(a, b)`
+    /// the cycle contributes one *unit* per driven endpoint: `+1` when an
+    /// instruction of the cycle touches `a`, `+1` when one touches `b`.
+    ///
+    /// So the edge strength depends on which gates run concurrently, which is
+    /// exactly what a static per-edge channel cannot express:
+    ///
+    /// * a neighbouring gate on `a` while `b` idles → 1 unit (spectator ZZ:
+    ///   the idle partner still accumulates the residual coupling),
+    /// * a gate on both `a` and `b` in the same cycle → 2 units,
+    /// * two disjoint neighbours, one on each endpoint → 2 units
+    ///   (simultaneous-gate inflation),
+    /// * an idle edge → 0 units.
+    ///
+    /// The channel is applied `hits` times, and repeated application composes
+    /// exactly the way the physical impairments do: the coherent part as
+    /// `θ → hits·θ` and the depolarizing part as `1-(1-p)^hits`.
+    fn flush_spectators(
+        state: &mut DensityMatrixState,
+        kraus_2q: &[Channel2q],
+        cycle: &[(Option<String>, Vec<usize>)],
+    ) -> f64 {
+        let t = std::time::Instant::now();
+        for (target, instrs, spectator, ks) in kraus_2q {
+            if !*spectator {
+                continue;
+            }
+            let (a, b) = match target {
+                Some(pair) => *pair,
+                // A spectator channel needs an edge to watch; an untargeted
+                // one has none, so it never fires (Python rejects it).
+                None => continue,
+            };
+            let mut hits = 0usize;
+            for (name, qubits) in cycle {
+                let busy_a = qubits.contains(&a);
+                let busy_b = qubits.contains(&b);
+                if !busy_a && !busy_b {
+                    continue; // nothing happened on this edge
+                }
+                if !name_matches(instrs, name.as_deref()) {
+                    continue;
+                }
+                hits += busy_a as usize + busy_b as usize;
+            }
+            for _ in 0..hits {
+                state.apply_kraus_2q(ks, a, b);
+            }
+        }
+        t.elapsed().as_secs_f64()
+    }
+
+    // Cycle bookkeeping for spectator crosstalk (empty and untouched for
+    // every model without a spectator channel).
+    let mut cycle_qubits: Vec<usize> = Vec::new();
+    let mut cycle_instrs: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+
+    // Per-instruction filters are opt-in: when no channel carries one, the
+    // gate loop below is byte-identical to the historical code — no gate-name
+    // lookup, no merge, no extra allocation.
+    let any_targeted =
+        noise_1q_instrs.iter().any(|t| t.is_some()) || noise_2q_instrs.iter().any(|t| t.is_some());
+
     for inst in &instructions {
         let u = inst.op_type.to_matrix();
+        let op_name: Option<String> = if any_targeted || any_spectator {
+            Some(inst.op_type.name())
+        } else {
+            None
+        };
+        // Close the previous cycle as soon as this instruction re-uses one of
+        // its qubits: that is the boundary of the parallel step.  Everything
+        // queued for the old cycle (the fused 1q batch, then the spectator
+        // channels) is applied first, so program order is preserved.
+        if any_spectator {
+            if inst.qubits.iter().any(|q| cycle_qubits.contains(q)) {
+                let dt = flush_pending(&mut state, &mut pending);
+                if trace {
+                    acc1 += dt;
+                }
+                let dt = flush_spectators(&mut state, &kraus_2q, &cycle_instrs);
+                if trace {
+                    acc2 += dt;
+                }
+                cycle_qubits.clear();
+                cycle_instrs.clear();
+            }
+            cycle_qubits.extend_from_slice(&inst.qubits);
+            cycle_instrs.push((op_name.clone(), inst.qubits.to_vec()));
+        }
+        // A channel with no filter fires wherever its qubits are touched; a
+        // filtered one only after an instruction of a listed gate type
+        // (Qiskit ``add_quantum_error(error, instructions, qubits)``).
+        let fires = |instrs: &Option<Vec<String>>| name_matches(instrs, op_name.as_deref());
         // Collect the Kraus channels that touch this instruction's
         // qubits — when any do, apply gate+noise in ONE fused
         // superoperator sweep (one memory pass instead of 1+N).
@@ -1646,17 +1875,85 @@ fn dm_noisy_core(
         // both qubits' 1q channels); `placement="gate"` applies them only
         // after 1q gates — a 2q gate then gets its 2q channels and nothing
         // else (Qiskit-noise-model parity).
+        // A measurement is a 1-qubit instruction but not a gate.  Under
+        // `placement="gate"` it must not fire a 1q channel: it did, so
+        // `x; measure` applied the bit-flip twice (P(1)=0.68 instead of 0.80)
+        // and a bare `measure` moved the state.  `placement="touch"` keeps its
+        // documented "after every instruction touching the qubit" meaning, so
+        // only the non-per-touch branch is narrowed here.
+        let is_reset = matches!(&inst.op_type, OpType::Reset);
+        let is_1q_gate = inst.qubits.len() == 1
+            && !inst.op_type.is_measurement()
+            && !matches!(&inst.op_type, OpType::Reset | OpType::Barrier);
+        // Placement governs the *unfiltered* default only.  An explicit
+        // `instructions=[...]` filter is the caller's statement of intent, so a
+        // filtered channel fires wherever its name matches — otherwise
+        // `instructions=["reset"]` (the default binding of `add_reset_error`)
+        // could never fire under `placement="gate"`, and neither could a
+        // channel filtered on `"measure"`.
+        let gate_placed = per_touch || is_1q_gate;
+        // Firing groups, merged per qubit.  Python emits one entry per
+        // (qubit, instruction filter) because channels with different filters
+        // cannot be pre-composed; several can therefore fire on the same gate.
+        // `merged` is only filled when a filter exists, so unfiltered runs
+        // build exactly the vector they always did.
+        let mut merged: Vec<(usize, Vec<nalgebra::DMatrix<num_complex::Complex64>>)> = Vec::new();
         let touching: Vec<(usize, &[nalgebra::DMatrix<num_complex::Complex64>])> =
-            if per_touch || inst.qubits.len() == 1 {
-                kraus_channels
-                    .iter()
-                    .filter(|(noise_qubit, _)| inst.qubits.contains(noise_qubit))
-                    .map(|(noise_qubit, kraus_matrices)| (*noise_qubit, kraus_matrices.as_slice()))
-                    .collect()
+            if gate_placed || any_targeted {
+                if !any_targeted {
+                    kraus_channels
+                        .iter()
+                        .filter(|(noise_qubit, _, _)| inst.qubits.contains(noise_qubit))
+                        .map(|(noise_qubit, _, kraus_matrices)| {
+                            (*noise_qubit, kraus_matrices.as_slice())
+                        })
+                        .collect()
+                } else {
+                    for (noise_qubit, instrs, kraus_matrices) in &kraus_channels {
+                        if !inst.qubits.contains(noise_qubit) {
+                            continue;
+                        }
+                        let wanted = match instrs {
+                            Some(_) => fires(instrs),
+                            None => gate_placed,
+                        };
+                        if !wanted {
+                            continue;
+                        }
+                        match merged.iter().position(|(q, _)| q == noise_qubit) {
+                            Some(i) => {
+                                let composed = compose_kraus_sets(&merged[i].1, kraus_matrices);
+                                merged[i].1 = composed;
+                            }
+                            None => merged.push((*noise_qubit, kraus_matrices.clone())),
+                        }
+                    }
+                    merged.iter().map(|(q, m)| (*q, m.as_slice())).collect()
+                }
             } else {
                 Vec::new()
             };
 
+        // A reset is a CPTP channel, not a unitary — `to_matrix()`'s identity
+        // fallback used to make it a silent no-op here.  Apply the projection
+        // onto |0>, then any channel that fires on the reset.  It cannot join
+        // the fused `K * U` batch below because it is not invertible.
+        if is_reset {
+            let dt = flush_pending(&mut state, &mut pending);
+            if trace {
+                acc1 += dt;
+            }
+            let t = std::time::Instant::now();
+            let q = inst.qubits[0];
+            state.apply_reset(q);
+            for (noise_qubit, mats) in &touching {
+                state.apply_kraus(mats, *noise_qubit);
+            }
+            if trace {
+                acc1 += t.elapsed().as_secs_f64();
+            }
+            continue;
+        }
         // Plain noisy 1-qubit gate → batch (a second disjoint gate joins it
         // in one sweep; a repeat/other instruction flushes first).
         if inst.qubits.len() == 1 && !touching.is_empty() && !inst.op_type.is_measurement() {
@@ -1693,11 +1990,17 @@ fn dm_noisy_core(
             let pair = (inst.qubits[0], inst.qubits[1]);
             let fired: Vec<&[nalgebra::DMatrix<num_complex::Complex64>]> = kraus_2q
                 .iter()
-                .filter(|(target, _)| match target {
-                    Some(want) => *want == pair,
-                    None => true,
+                .filter(|(target, instrs, spectator, _)| {
+                    if *spectator {
+                        return false; // fires per cycle, never on the gate itself
+                    }
+                    let pair_ok = match target {
+                        Some(want) => *want == pair,
+                        None => true,
+                    };
+                    pair_ok && fires(instrs)
                 })
-                .map(|(_, ks)| ks.as_slice())
+                .map(|(_, _, _, ks)| ks.as_slice())
                 .collect();
             if !fired.is_empty() {
                 let t = std::time::Instant::now();
@@ -1736,11 +2039,17 @@ fn dm_noisy_core(
         if !kraus_2q.is_empty() && inst.qubits.len() == 2 && !inst.op_type.is_measurement() {
             let pair = (inst.qubits[0], inst.qubits[1]);
             let t = std::time::Instant::now();
-            for (target, ks) in &kraus_2q {
+            for (target, instrs, spectator, ks) in &kraus_2q {
+                if *spectator {
+                    continue; // fires per cycle, never on the gate itself
+                }
                 if let Some(want) = target {
                     if *want != pair {
                         continue;
                     }
+                }
+                if !fires(instrs) {
+                    continue;
                 }
                 state.apply_kraus_2q(ks, inst.qubits[0], inst.qubits[1]);
             }
@@ -1752,6 +2061,14 @@ fn dm_noisy_core(
     let dt = flush_pending(&mut state, &mut pending);
     if trace {
         acc1 += dt;
+    }
+    // Last cycle of the circuit (its spectators were never followed by a
+    // conflicting instruction, so no boundary flush happened for it).
+    if any_spectator && !cycle_instrs.is_empty() {
+        let dt = flush_spectators(&mut state, &kraus_2q, &cycle_instrs);
+        if trace {
+            acc2 += dt;
+        }
     }
     if trace {
         eprintln!(
@@ -1776,13 +2093,14 @@ pub struct PyCompiler {
 #[pymethods]
 impl PyCompiler {
     #[new]
-    #[pyo3(signature = (name, native_gates, n_qubits, connectivity, optimization_level=None))]
+    #[pyo3(signature = (name, native_gates, n_qubits, connectivity, optimization_level=None, twirl_seed=None))]
     fn new(
         name: &str,
         native_gates: Vec<String>,
         n_qubits: usize,
         connectivity: Vec<(usize, usize)>,
         optimization_level: Option<u8>,
+        twirl_seed: Option<u64>,
     ) -> Self {
         PyCompiler {
             backend: sf_compiler::BackendSpec {
@@ -1791,6 +2109,7 @@ impl PyCompiler {
                 connectivity,
                 n_qubits,
                 optimization_level: optimization_level.unwrap_or(1),
+                twirl_seed,
             },
         }
     }

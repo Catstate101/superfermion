@@ -246,7 +246,15 @@ class UnitaryDecompositionPass:
         phase = float(np.angle(det) / 2)
         su = matrix * np.exp(-1j * phase)
 
-        beta = float(2 * np.arccos(np.clip(abs(su[0, 0]), 0, 1)))
+        # ``beta = 2*arccos(|m00|)`` is ill-conditioned as beta -> 0: one ulp
+        # of rounding in |m00| (1.1e-16) moves the angle by sqrt(2*1.1e-16) =
+        # 1.5e-8, and the spurious Ry(1.5e-8) that follows is a first-order
+        # error in the matrix.  That is exactly the 2.1e-8 that a CRZ lowering
+        # measured: the RZ factors of the cosine-sine decomposition are pure
+        # phases, but |m00| came out as 1 - 1.1e-16 and beta as 2.98e-8.
+        # atan2(|m10|, |m00|) is well-conditioned at both ends and returns
+        # exactly 0.0 when m10 is exactly 0.
+        beta = float(2 * np.arctan2(abs(su[1, 0]), abs(su[0, 0])))
         if abs(np.sin(beta / 2)) < 1e-10:
             alpha = float(2 * np.angle(su[1, 1]))
             gamma = 0.0
@@ -296,7 +304,12 @@ class UnitaryDecompositionPass:
         import numpy as np
 
         U = G0.conj().T @ G1
-        if np.allclose(U, np.eye(2), atol=1e-8):
+        # rtol must be 0: np.allclose's default rtol=1e-5 accepts a U that
+        # differs from the identity by up to 1e-5, and this branch then drops
+        # the whole relative unitary -- a silent error of that size.  Only an
+        # exactly trivial relative unitary may take the cheap path; anything
+        # else goes through the ABC decomposition, which is exact.
+        if np.allclose(U, np.eye(2), rtol=0.0, atol=1e-12):
             self._decompose_1q(G0, tgt, circuit)
             return
 

@@ -31,14 +31,26 @@ impl GateFusionPass {
         let u10 = u[(1, 0)];
         let u11 = u[(1, 1)];
 
-        // theta = 2 * acos(|u00|), clamped for numerical stability
-        let abs_u00 = u00.norm().min(1.0);
-        let theta = 2.0 * abs_u00.acos();
+        // theta = 2 * atan2(|u10|, |u00|).  The arccos form used here before
+        // is ill-conditioned at theta -> 0: one ulp of rounding in |u00|
+        // (1.1e-16) became an angle of 1.5e-8, and that spurious rotation is a
+        // first-order error in the fused gate.  atan2 is well-conditioned at
+        // both ends and returns exactly 0 when u10 is exactly 0.
+        let abs_u00 = u00.norm();
+        let abs_u10 = u10.norm();
+        let theta = 2.0 * abs_u10.atan2(abs_u00);
 
-        if theta < 1e-6 {
-            // Near-identity: theta~0, sin(theta/2)~0 so phi is unconstrained; fix phi = 0.
+        // The near-identity branch must not swallow a real rotation.  It used
+        // to fire at theta < 1e-6, which discarded genuine angles: lane F3 had
+        // a two-gate product with fused theta = 6.66e-8 that came back as
+        // U(0, 0, lambda), a theta/2 = 3.3e-8 error in the matrix.  1e-15 is
+        // ~2 ulp of pi, so only the residue of an exact cancellation is
+        // collapsed; a phase of 1e-13 is still a real rotation.
+        if theta < 1e-15 {
+            // sin(theta/2) is below the noise floor, so phi is unconstrained;
+            // fix phi = 0 and keep the relative phase on the diagonal.
             let lambda = u11.arg() - u00.arg();
-            if lambda.abs() < 1e-6 {
+            if lambda.abs() < 1e-15 {
                 return (0.0, 0.0, 0.0);
             }
             return (0.0, 0.0, lambda);
@@ -77,8 +89,10 @@ impl Pass for GateFusionPass {
                            fused_ops: &mut Vec<(OpType, Vec<usize>)>| {
             if let Some(mat) = accum[q].take() {
                 let (theta, phi, lambda) = Self::decompose_u3(&mat);
-                // Skip if near-identity (threshold accounts for float precision in matrix products)
-                if theta.abs() > 1e-6 || phi.abs() > 1e-6 || lambda.abs() > 1e-6 {
+                // Drop only a true identity.  The old 1e-6 threshold on the
+                // angles discarded fusions of up to 1e-6 rad (5e-7 in the
+                // matrix) -- the same defect class as decompose_u3 above.
+                if theta.abs() > 1e-15 || phi.abs() > 1e-15 || lambda.abs() > 1e-15 {
                     fused_ops.push((
                         OpType::U(
                             Parameter::Const(theta),
@@ -271,6 +285,85 @@ mod tests {
             "Identity phi+lam should be ~0, got phi={}, lam={}",
             phi,
             lam
+        );
+    }
+
+    #[test]
+    fn test_decompose_u3_pure_phase_is_exact() {
+        // Regression: a diagonal gate has |u00| = 1 up to one ulp, and
+        // ``2*acos(|u00|)`` turned that ulp into theta = 1.5e-8.  Fusion calls
+        // this on *products* of gates, so the rounding is the normal case.
+        let rz = Matrix2::new(
+            Complex64::new((0.7f64 / 2.0).cos(), -(0.7f64 / 2.0).sin()),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new((0.7f64 / 2.0).cos(), (0.7f64 / 2.0).sin()),
+        );
+        let (theta, _phi, _lam) = GateFusionPass::decompose_u3(&rz);
+        assert!(
+            theta.abs() < 1e-15,
+            "a pure phase must have theta == 0 exactly, got {theta:e}"
+        );
+    }
+
+    #[test]
+    fn test_decompose_u3_small_rotation_is_not_swallowed() {
+        // Regression for lane F3: a two-gate QASM ``u`` product had fused
+        // theta = 6.66e-8, and the near-identity branch (formerly
+        // ``theta < 1e-6``) answered U(0, 0, lambda).  The missing rotation is
+        // theta/2 = 3.3e-8 in the matrix -- exactly the measured error.
+        let theta = 6.66e-8_f64;
+        let (s, c) = ((theta / 2.0).sin(), (theta / 2.0).cos());
+        let m = Matrix2::new(
+            Complex64::new(c, 0.0),
+            Complex64::new(-s, 0.0),
+            Complex64::new(s, 0.0),
+            Complex64::new(c, 0.0),
+        );
+        let (t, phi, lam) = GateFusionPass::decompose_u3(&m);
+        assert!(
+            (t - theta).abs() < 1e-15,
+            "theta must survive the decomposition, got {t:e} vs {theta:e}"
+        );
+        let (cc, ss) = ((t / 2.0).cos(), (t / 2.0).sin());
+        let recon = Matrix2::new(
+            Complex64::from_polar(cc, 0.0),
+            Complex64::from_polar(-ss, lam),
+            Complex64::from_polar(ss, phi),
+            Complex64::from_polar(cc, phi + lam),
+        );
+        let mut err = 0.0_f64;
+        for i in 0..2 {
+            for j in 0..2 {
+                err = err.max((recon[(i, j)] - m[(i, j)]).norm());
+            }
+        }
+        assert!(
+            err < 1e-15,
+            "U(theta, phi, lambda) reconstruction error {err:e}"
+        );
+    }
+
+    #[test]
+    fn test_near_identity_threshold_keeps_small_rotations() {
+        // A fused cluster must not be dropped just because its angles are
+        // small: flush_qubit used to skip anything below 1e-6 rad.
+        let theta = 5.0e-7_f64;
+        let mut dag = QuantumDAG::new(1, 0);
+        dag.add_op(
+            OpType::U(
+                Parameter::Const(theta),
+                Parameter::Const(0.0),
+                Parameter::Const(0.0),
+            ),
+            &[0],
+        );
+        let pass = GateFusionPass::new();
+        pass.run(&mut dag).unwrap();
+        assert_eq!(
+            dag.gate_count(),
+            1,
+            "a {theta:e} rad rotation must not be fused away"
         );
     }
 

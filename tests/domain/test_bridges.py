@@ -444,12 +444,32 @@ class TestToQasmDropGuard:
     2.0 equivalent."""
 
     def test_to_qasm_raises_on_unmappable_gate(self):
+        import numpy as np
+
         bridge = pytest.importorskip("superfermion.bridge")
         c = sf.Circuit(2)
         c.h(0)
-        c.ecr(0, 1)  # ECR has no qelib1 name
+        # An arbitrary unitary has no qelib1 name and must not be dropped.
+        c.unitary(np.array([[0, 1], [1, 0]], dtype=complex), [0])
         with pytest.raises(ValueError, match="OpenQASM"):
             bridge.to_qasm(c)
+
+    def test_to_qasm_expands_ecr(self):
+        """ECR has no qelib1 name; it is exported as an exact u3/cx sequence."""
+        pytest.importorskip("qiskit")
+        bridge = pytest.importorskip("superfermion.bridge")
+        from qiskit import QuantumCircuit, qasm2
+        from qiskit.quantum_info import Operator
+
+        c = sf.Circuit(2)
+        c.ecr(0, 1)
+        qasm = bridge.to_qasm(c)
+        assert "ecr" not in qasm.lower()
+        assert "cx q[0], q[1];" in qasm
+        expected = QuantumCircuit(2)
+        expected.ecr(0, 1)
+        rebuilt = qasm2.loads(qasm)
+        assert Operator(rebuilt).equiv(Operator(expected))
 
     def test_to_qasm_still_omits_barrier(self):
         bridge = pytest.importorskip("superfermion.bridge")

@@ -416,13 +416,25 @@ fn decompose_u3(u: &Matrix2<Complex64>) -> (f64, f64, f64) {
     let u10 = u[(1, 0)];
     let u11 = u[(1, 1)];
 
-    let abs_u00 = u00.norm().min(1.0);
-    let theta = 2.0 * abs_u00.acos();
+    // theta = 2 * atan2(|u10|, |u00|).  The arccos form used here before is
+    // ill-conditioned at theta -> 0: one ulp of rounding in |u00| (1.1e-16)
+    // became an angle of 1.5e-8, which is a first-order error in the emitted
+    // U(theta, phi, lambda).  atan2 is well-conditioned at both ends and
+    // returns exactly 0 when u10 is exactly 0.
+    let abs_u00 = u00.norm();
+    let abs_u10 = u10.norm();
+    let theta = 2.0 * abs_u10.atan2(abs_u00);
 
-    if theta < TOLERANCE {
-        // Near-identity: sin(theta/2) ~ 0 so phi is unconstrained; fix phi = 0.
+    // Only collapse rotations that are genuinely at the noise floor.  This
+    // used to fire at TOLERANCE (1e-8), which silently dropped real angles:
+    // lane F3's two-gate product had theta = 6.66e-8 and came back as
+    // U(0, 0, lambda), a theta/2 = 3.3e-8 error in the matrix.  1e-15 keeps
+    // every angle that is above arithmetic residue.
+    if theta < 1e-15 {
+        // sin(theta/2) ~ 0 so phi is unconstrained; fix phi = 0 and keep the
+        // relative phase on the diagonal.
         let lambda = u11.arg() - u00.arg();
-        if lambda.abs() < TOLERANCE {
+        if lambda.abs() < 1e-15 {
             return (0.0, 0.0, 0.0);
         }
         return (0.0, 0.0, lambda);
@@ -697,6 +709,59 @@ mod tests {
         let eye = Matrix2::identity();
         let (theta, _phi, _lam) = decompose_u3(&eye);
         assert!(theta.abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_decompose_u3_pure_phase_is_exact() {
+        // Regression: a diagonal gate (Rz) has |u00| = 1 up to one ulp, and
+        // ``2*acos(|u00|)`` turned that ulp into theta = 1.5e-8 -- a
+        // first-order error in the emitted U(theta, phi, lambda).  Measured
+        // before the fix: lane F3 compiled with 4.9e-8 unitary error on all
+        // three targets (prepare and routing were exact).
+        let rz = Matrix2::new(
+            Complex64::new((0.7f64 / 2.0).cos(), -(0.7f64 / 2.0).sin()),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new((0.7f64 / 2.0).cos(), (0.7f64 / 2.0).sin()),
+        );
+        let (theta, _phi, _lam) = decompose_u3(&rz);
+        assert!(
+            theta.abs() < 1e-15,
+            "a pure phase must have theta == 0 exactly, got {theta:e}"
+        );
+    }
+
+    #[test]
+    fn test_decompose_u3_small_rotation_is_not_swallowed() {
+        // Regression for lane F3 (see fusion.rs): a genuine 6.66e-8 rotation
+        // must survive as a U(theta, phi, lambda), not collapse to a phase.
+        let theta = 6.66e-8_f64;
+        let (s, c) = ((theta / 2.0).sin(), (theta / 2.0).cos());
+        let m = Matrix2::new(
+            Complex64::new(c, 0.0),
+            Complex64::new(-s, 0.0),
+            Complex64::new(s, 0.0),
+            Complex64::new(c, 0.0),
+        );
+        let (t, phi, lam) = decompose_u3(&m);
+        assert!(
+            (t - theta).abs() < 1e-15,
+            "theta must survive the decomposition, got {t:e} vs {theta:e}"
+        );
+        let (cc, ss) = ((t / 2.0).cos(), (t / 2.0).sin());
+        let recon = Matrix2::new(
+            Complex64::from_polar(cc, 0.0),
+            Complex64::from_polar(-ss, lam),
+            Complex64::from_polar(ss, phi),
+            Complex64::from_polar(cc, phi + lam),
+        );
+        let mut err = 0.0_f64;
+        for i in 0..2 {
+            for j in 0..2 {
+                err = err.max((recon[(i, j)] - m[(i, j)]).norm());
+            }
+        }
+        assert!(err < 1e-15, "reconstruction error {err:e}");
     }
 
     #[test]

@@ -198,7 +198,7 @@ from superfermion.experiment.protocols import TrackerProtocol
 # shadow expectation values. Pure-Python/numpy; snapshots sampled from the
 # exact statevector. See superfermion.mitigation.classical_shadow.
 from superfermion.mitigation import ClassicalShadow, classical_shadow, shadow_expval
-from superfermion.noise import NoiseModel
+from superfermion.noise import ErrorChannel, NoiseModel
 from superfermion.observables.core import (
     Hamiltonian,
     PauliString,
@@ -218,7 +218,7 @@ __all__ = [
     "DeviceExecutor", "DeviceCapabilities",
     "Provider", "Job", "Algorithm", "AlgorithmResult",
     # Noise
-    "NoiseModel",
+    "NoiseModel", "ErrorChannel",
     # Experiment tracking
     "TrackerProtocol", "experiment", "LocalTracker",
     # Observables
