@@ -87,12 +87,22 @@ def maybe_clifford_dispatch(
 def simplify_clifford(circuit: Circuit) -> "Circuit | None":
     """Simplify a Clifford circuit via tableau canonical form.
 
-    Returns None when the circuit is NOT Clifford, or when no
-    simplification is available (Qiskit missing, Rust-stored gates):
-    callers must keep the original circuit in that case.
+    Returns None when the circuit is NOT Clifford, when it contains
+    measurements or resets, or when no simplification is available (Qiskit
+    missing, Rust-stored gates): callers must keep the original circuit in
+    that case.
+
+    MEASURE/RESET are refused, not ignored: the tableau is unitary-only, so
+    re-synthesising the Clifford from it drops those instructions entirely
+    (the compiled circuit lost its measurements *and* its resets, changing
+    the classical-bit mapping and the final state).
     """
     if getattr(circuit, '_use_rust', False) and getattr(circuit, '_gates_rust', None) is not None:
         return None
+
+    for gate in circuit._gates:
+        if gate.name.upper() in ("MEASURE", "RESET"):
+            return None
 
     if not is_clifford_circuit(circuit):
         return None

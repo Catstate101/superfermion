@@ -1224,7 +1224,7 @@ class TestMidCircuit:
                 if g.get("condition") == [0, 1]]
         assert len(cond) == 1 and cond[0]["name"] == "X"
         q3 = circuit.to_qasm3()
-        assert "if (c[0] == 1) x q[1];" in q3
+        assert "if (c[0] == true) x q[1];" in q3
         assert "c[0] = measure q[0];" in q3
         bound = circuit.bind({})
         assert any(g.condition == (0, 1) for g in bound._gates)
@@ -1248,15 +1248,17 @@ class TestMidCircuit:
 
     def test_c_if_validation(self):
         """c_if guards: cbit range, value 0/1, no double condition, no
-        pending condition on measure/unitary."""
+        pending condition left dangling on unitary."""
         with pytest.raises(ValueError):
             Circuit(1).measure(0, 0).c_if(5, 1)
         with pytest.raises(ValueError):
             Circuit(1).c_if(0, 2)
         with pytest.raises(ValueError):
             Circuit(1).c_if(0, 1).c_if(0, 1)
-        with pytest.raises(ValueError):
-            Circuit(1).c_if(0, 1).measure(0, 0)
+        # A pending condition now guards the measurement itself (Qiskit
+        # if_test / QASM3 guarded measure) instead of raising.
+        guarded = Circuit(1).c_if(0, 1).measure(0, 0)
+        assert guarded._gates[-1].condition == (0, 1)
         with pytest.raises(ValueError):
             Circuit(1).c_if(0, 1).unitary(np.eye(2), [0])
 

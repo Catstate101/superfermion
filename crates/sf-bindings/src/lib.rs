@@ -543,6 +543,15 @@ pub struct PyQuantumDAG {
     pub inner: QuantumDAG,
 }
 
+/// Python-visible shape of `QuantumDAG::to_gate_records_with_conditions`.
+type ConditionedGateRecord = (
+    String,
+    Vec<usize>,
+    Vec<f64>,
+    Option<(usize, u64)>,
+    Vec<usize>,
+);
+
 #[pymethods]
 impl PyQuantumDAG {
     #[new]
@@ -632,6 +641,19 @@ impl PyQuantumDAG {
     /// Qubit index is passed through directly (LSB convention).
     fn add_measure(&mut self, qubit: usize, cbit: usize) -> PyResult<()> {
         self.inner.add_measure(qubit, cbit);
+        Ok(())
+    }
+
+    /// Add a measurement guarded by classical bit `cond_cbit == cond_value`.
+    fn add_measure_cond(
+        &mut self,
+        qubit: usize,
+        cbit: usize,
+        cond_cbit: usize,
+        cond_value: u64,
+    ) -> PyResult<()> {
+        self.inner
+            .add_measure_conditioned(qubit, cbit, cond_cbit, cond_value);
         Ok(())
     }
 
@@ -927,6 +949,15 @@ impl PyQuantumDAG {
     /// Skips barrier nodes. Useful for fast DAG→Circuit conversion.
     fn to_gate_records(&self) -> Vec<(String, Vec<usize>, Vec<f64>)> {
         self.inner.to_gate_records()
+    }
+
+    /// Export gate nodes with their classical condition and bits (if any).
+    ///
+    /// Same shape as `to_gate_records`, with a trailing `(cbit, value)`
+    /// tuple for gates guarded by OpenQASM 2 `if (creg == value)` and a
+    /// classical-bit list for measurements (`measure q[1] -> c[0]`).
+    fn to_gate_records_with_conditions(&self) -> Vec<ConditionedGateRecord> {
+        self.inner.to_gate_records_with_conditions()
     }
 
     /// Apply Pauli twirling to 2Q gates and return twirled (name, qubits, params) list.

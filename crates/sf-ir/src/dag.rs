@@ -25,6 +25,16 @@ pub type QubitId = usize;
 /// Unique identifier for a classical bit.
 pub type ClassicalBitId = usize;
 
+/// `(name, qubits, params, condition, classical_bits)` export shape used by
+/// [`QuantumDAG::to_gate_records_with_conditions`].
+pub type ConditionedGateRecord = (
+    String,
+    Vec<QubitId>,
+    Vec<f64>,
+    Option<(usize, u64)>,
+    Vec<ClassicalBitId>,
+);
+
 /// A single quantum operation node in the DAG.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QuantumOp {
@@ -275,6 +285,39 @@ impl QuantumDAG {
         new_node
     }
 
+    /// Add a measurement that only executes when classical bit `cond_cbit`
+    /// equals `cond_value` (OpenQASM 3 guarded measure / Qiskit if_test).
+    pub fn add_measure_conditioned(
+        &mut self,
+        qubit: QubitId,
+        cbit: ClassicalBitId,
+        cond_cbit: ClassicalBitId,
+        cond_value: u64,
+    ) -> NodeId {
+        assert!(qubit < self.n_qubits, "Qubit {} out of range", qubit);
+        assert!(cbit < self.n_cbits, "Classical bit {} out of range", cbit);
+        assert!(
+            cond_cbit < self.n_cbits,
+            "Classical bit {} out of range",
+            cond_cbit
+        );
+        let new_node = self.add_measure(qubit, cbit);
+        // A self-condition (measure c[q] into c[q] when c[q] == 1) only reads
+        // the bit its own measure is about to overwrite; add_measure already
+        // left the dependency edge from the previous accessor, and adding a
+        // second one would be a duplicate but harmless.  Skip it to keep the
+        // graph tidy.
+        if cond_cbit != cbit {
+            if let Some(prev) = self.last_cbit_access[cond_cbit] {
+                self.graph
+                    .add_edge(prev, new_node, WireType::Classical(cond_cbit));
+            }
+            self.last_cbit_access[cond_cbit] = Some(new_node);
+        }
+        self.graph[new_node].condition = Some((cond_cbit, cond_value));
+        new_node
+    }
+
     /// Add a gate that only executes when classical bit `cbit` equals
     /// `value` (classical feed-forward, OpenQASM 3 `if (c[cbit] == value)`
     /// semantics). A classical dependency edge is drawn from the last op
@@ -363,6 +406,44 @@ impl QuantumDAG {
             }
             let (name, params) = op_type_to_name_params(&op.op_type);
             records.push((name, op.qubits.to_vec(), params));
+        }
+        records
+    }
+
+    /// Same shape as `to_gate_records`, plus the classical condition and bits.
+    ///
+    /// The fourth element is `Some((cbit, value))` for a gate guarded by
+    /// OpenQASM 2 `if (creg == value)`, `None` otherwise.  The fifth element
+    /// lists the classical bits a measurement writes to, so
+    /// `measure q[1] -> c[0]` keeps its explicit target instead of falling
+    /// back to the qubit index.  `to_gate_records` drops both fields, which
+    /// used to lose them when the Python bridge converted a natively parsed
+    /// circuit.  Explicit barriers are kept here (they are dropped only from
+    /// the engine-facing `to_gate_records`) and `CX` is renamed to `CNOT` to
+    /// match what `Circuit.cx()` records.
+    pub fn to_gate_records_with_conditions(&self) -> Vec<ConditionedGateRecord> {
+        let order = self.topological_order();
+        let mut records = Vec::with_capacity(order.len());
+        for &node_id in &order {
+            let op = &self.graph[node_id];
+            // Unlike `to_gate_records` (the engine path), the bridge keeps
+            // explicit barriers: the Python fallback and Circuit.barrier()
+            // both represent them.
+            let (name, params) = op_type_to_name_params(&op.op_type);
+            // Circuit.cx() stores "CNOT" while the QASM2 op type exports
+            // "cx"; rename here so both parsers feed identical records.
+            let name = if name.eq_ignore_ascii_case("cx") {
+                "CNOT".to_string()
+            } else {
+                name
+            };
+            records.push((
+                name,
+                op.qubits.to_vec(),
+                params,
+                op.condition,
+                op.classical_bits.to_vec(),
+            ));
         }
         records
     }
@@ -681,9 +762,26 @@ impl QuantumDAG {
                         format!("measure {};", qubits_str[0])
                     }
                 }
-                OpType::Barrier => "barrier;".to_string(),
+                OpType::Barrier => {
+                    if qubits_str.is_empty() {
+                        "barrier;".to_string()
+                    } else {
+                        format!("barrier {};", qubits_str.join(", "))
+                    }
+                }
                 OpType::Reset => format!("reset {};", qubits_str[0]),
                 _ => format!("// {:?}", op.op_type),
+            };
+
+            // Classical feed-forward must not be dropped: without the guard
+            // the exported program silently executes the op unconditionally.
+            // OpenQASM 3 compares a bit with a boolean literal.
+            let line = match op.condition {
+                Some((cbit, value)) => {
+                    let literal = if value != 0 { "true" } else { "false" };
+                    format!("if (c[{cbit}] == {literal}) {line}")
+                }
+                None => line,
             };
 
             out.push_str(&line);
@@ -4241,6 +4339,21 @@ mod tests {
         assert!(qasm.contains("qubit[2] q;"));
         assert!(qasm.contains("h q[0];"));
         assert!(qasm.contains("cx q[0], q[1];"));
+    }
+
+    #[test]
+    fn test_qasm3_export_keeps_conditions_and_barrier_operands() {
+        let mut dag = QuantumDAG::new(2, 1);
+        dag.add_op(OpType::H, &[0]);
+        dag.add_measure(0, 0);
+        dag.add_op_conditioned(OpType::X, &[1], 0, 1);
+        dag.add_measure_conditioned(1, 0, 0, 0);
+        dag.add_op(OpType::Barrier, &[0, 1]);
+
+        let qasm = dag.to_qasm3();
+        assert!(qasm.contains("if (c[0] == true) x q[1];"));
+        assert!(qasm.contains("if (c[0] == false) c[0] = measure q[1];"));
+        assert!(qasm.contains("barrier q[0], q[1];"));
     }
 
     #[test]

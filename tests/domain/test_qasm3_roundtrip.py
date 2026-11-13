@@ -106,10 +106,10 @@ u2(0.3, 0.4) q[0];
 
 
 def test_measure_and_condition_round_trip_text():
-    """Feed-forward survives: ``if (c[0] == 1) x q[1]`` comes back identical."""
+    """Feed-forward survives: ``if (c[0] == true) x q[1]`` comes back identical."""
     circuit = sf.Circuit(2, 2).h(0).measure(0, 0).c_if(0, 1).x(1)
     text = circuit.to_qasm3()
-    assert "if (c[0] == 1) x q[1];" in text
+    assert "if (c[0] == true) x q[1];" in text
 
     restored = from_qasm3(text)
     assert restored.to_qasm3().strip() == text.strip()

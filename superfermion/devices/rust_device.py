@@ -1103,7 +1103,7 @@ class RustDevice:
 
         if needs_decomp:
             from superfermion.backends.turbo import decompose_for_rust, fuse_all_gates
-            decomposed = Circuit(circuit.n_qubits)
+            decomposed = Circuit(circuit.n_qubits, n_cbits=circuit.n_cbits)
             decomposed._gates = decompose_for_rust(circuit._gates)
             if getattr(circuit, "_has_large_unitary", False):
                 decomposed._has_large_unitary = True

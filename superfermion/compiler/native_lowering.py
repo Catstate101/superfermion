@@ -68,10 +68,11 @@ determinant phase) -- exactly as the existing public unitary path does.
 Rust ``Compiler`` does *not* decompose ``CCX``: it validates the output against
 the target gate set and raises
 ``RuntimeError: Encountered unsupported gate CCX/Toffoli after decomposition``.
-A *classically conditioned* ``CSWAP`` is left exactly as it was, since the
-gate-level identities in ``BasisTranslationPass`` re-emit gates through the
-circuit builder and would therefore drop the condition; silently producing an
-uncontrolled sequence would be worse than the pass-through it replaces.
+A *classically conditioned* ``CSWAP`` is left exactly as it was.  The Rust
+``Compiler`` has no notion of classical conditions end-to-end, so lowering it
+would only move the silent guard drop one stage later; ``sf.compile()`` now
+rejects conditioned circuits up front with a clear error, and the pass-through
+keeps direct ``prepare()`` users from getting an uncontrolled sequence.
 """
 
 from __future__ import annotations

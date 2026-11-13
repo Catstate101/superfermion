@@ -17,7 +17,7 @@ import hashlib
 import json
 import struct
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 SFC_MAGIC = b"SFC\x01"
@@ -154,6 +154,10 @@ def _circuit_to_dict(circuit: Any) -> Dict[str, Any]:
                     g["params"].append({"type": "const", "value": float(p)})
         if gate.classical_bits:
             g["classical_bits"] = gate.classical_bits
+        if gate.condition is not None:
+            # Without this a guarded gate reloaded unguarded; the payload is
+            # version 1 and the key is additive, so old files still load.
+            g["condition"] = list(gate.condition)
         gates.append(g)
 
     return {
@@ -190,6 +194,9 @@ def _dict_to_circuit(data: Dict[str, Any]) -> Any:
                     "UNITARY records may store an opaque matrix"
                 )
             circuit.unitary(matrix_from_json(g["matrix"]), g["qubits"])
+            circuit._restore_gate_fields(
+                circuit._gates[-1], g.get("classical_bits"), g.get("condition")
+            )
             continue
         if str(g["name"]).upper() == "UNITARY":
             raise ValueError(
@@ -210,6 +217,9 @@ def _dict_to_circuit(data: Dict[str, Any]) -> Any:
             name=g["name"],
             qubits=g["qubits"],
             params=params if params else None,
+        )
+        circuit._restore_gate_fields(
+            circuit._gates[-1], g.get("classical_bits"), g.get("condition")
         )
 
     return circuit

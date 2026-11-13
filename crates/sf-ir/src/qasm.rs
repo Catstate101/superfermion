@@ -22,6 +22,16 @@ use std::f64::consts::PI;
 pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
     let mut dag: Option<QuantumDAG> = None;
 
+    // Register table: name -> (offset, size).  OpenQASM 2 allows several qreg
+    // declarations, and a whole register is a valid operand (`h q;`), which
+    // addresses every qubit of that register.  The DAG used to be rebuilt on
+    // every qreg line, so `qreg a[1]; qreg b[1]; x b[0];` produced a 1-qubit
+    // circuit and `cx a[0], b[0];` collided on qubit 0.
+    let mut qregs: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut cregs: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut n_qubits = 0usize;
+    let mut n_cbits = 0usize;
+
     // ── `gate` declarations ────────────────────────────────────
     // qelib1-style macros are expanded before the line loop, so a body whose
     // name has no OpType (`ch`, `cry`, `cu1`, `c3x`, ...) still imports
@@ -54,8 +64,17 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
 
         // ── qubit declaration ──────────────────────────────────
         if line.starts_with("qreg") {
-            match parse_qreg_size(line) {
-                Some(n) => dag = Some(QuantumDAG::new(n, n)),
+            if dag.is_some() {
+                return Err(format!(
+                    "line {}: qreg declaration after the first instruction: {line}",
+                    lineno + 1
+                ));
+            }
+            match parse_named_register(line) {
+                Some((name, size)) => {
+                    qregs.insert(name, (n_qubits, size));
+                    n_qubits += size;
+                }
                 None => {
                     return Err(format!(
                         "line {}: malformed qreg declaration: {line}",
@@ -68,8 +87,17 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
 
         // QASM3-style: qubit[N] name;
         if line.starts_with("qubit[") {
-            match parse_bracket_size(line, "qubit[") {
-                Some(n) => dag = Some(QuantumDAG::new(n, n)),
+            if dag.is_some() {
+                return Err(format!(
+                    "line {}: qubit declaration after the first instruction: {line}",
+                    lineno + 1
+                ));
+            }
+            match parse_sized_register(line) {
+                Some((name, size)) => {
+                    qregs.insert(name, (n_qubits, size));
+                    n_qubits += size;
+                }
                 None => {
                     return Err(format!(
                         "line {}: malformed qubit declaration: {line}",
@@ -84,6 +112,24 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
         // is created with one classical bit per qubit, so the size is unused
         // here but the line is legal QASM and must not be treated as a gate.
         if line.starts_with("creg") {
+            if dag.is_some() {
+                return Err(format!(
+                    "line {}: creg declaration after the first instruction: {line}",
+                    lineno + 1
+                ));
+            }
+            match parse_named_register(line) {
+                Some((name, size)) => {
+                    cregs.insert(name, (n_cbits, size));
+                    n_cbits += size;
+                }
+                None => {
+                    return Err(format!(
+                        "line {}: malformed creg declaration: {line}",
+                        lineno + 1
+                    ))
+                }
+            }
             continue;
         }
 
@@ -93,22 +139,32 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
             continue;
         }
 
-        let dag_ref = match dag.as_mut() {
-            Some(d) => d,
-            None => {
-                return Err(format!(
-                    "line {}: instruction before any qreg declaration: {line}",
-                    lineno + 1
-                ))
-            }
-        };
+        if n_qubits == 0 {
+            return Err(format!(
+                "line {}: instruction before any qreg declaration: {line}",
+                lineno + 1
+            ));
+        }
+        // Without an explicit creg the DAG keeps the historical one classical
+        // bit per qubit, so `measure q[i]` still targets c[i].
+        let cbit_width = if n_cbits == 0 { n_qubits } else { n_cbits };
+        let dag_ref = dag.get_or_insert_with(|| QuantumDAG::new(n_qubits, cbit_width));
         let n = dag_ref.n_qubits;
+
+        // ── classical feed-forward ─────────────────────────────
+        // `if (c == value) gate ...` guards the next instruction.  Without
+        // this the `if` head reached `split_qasm2_line_checked`, which tried
+        // to evaluate `c==1` as an angle expression and failed.
+        let (statement, condition) = match parse_if_condition(line, &cregs, lineno)? {
+            Some((cond, rest)) => (rest, Some(cond)),
+            None => (line, None),
+        };
 
         // ── gate instruction ───────────────────────────────────
         // The checked variant reports an angle expression it cannot evaluate
         // instead of folding it to 0.0 (see `eval_expr`), which used to
         // produce a silent zero rotation from a "successful" parse.
-        let (gate_name, params, qubits_str) = match split_qasm2_line_checked(line) {
+        let (gate_name, params, qubits_str) = match split_qasm2_line_checked(statement) {
             Ok(t) => t,
             Err(msg) => return Err(format!("line {}: {msg} in '{line}'", lineno + 1)),
         };
@@ -128,137 +184,103 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
 
         // Handle measure specially: "measure q[i] -> c[j]" has two bracket
         // pairs but only q[i] is a qubit. Parse only before "->".
+        // A guard is legal on a measurement in OpenQASM 2
+        // (`if(c==1) measure q[0] -> c[0];`); it selects whether the qubit
+        // is measured and the classical bit updated, exactly like QASM3's
+        // `if (c[0] == true) c[0] = measure q[0];` and Qiskit's if_test.
         if gate_name == "measure" {
-            // "measure q[i] -> c[j];" — parse q part and c part separately
             let (q_part, c_part) = if let Some(arrow) = qubits_str.find("->") {
                 (&qubits_str[..arrow], Some(&qubits_str[arrow + 2..]))
             } else {
                 (qubits_str.as_str(), None)
             };
-            if let Some(q_idx) = parse_first_bracket_index(q_part) {
-                if q_idx >= n {
-                    return Err(format!(
-                        "line {}: measure names qubit {q_idx} but the circuit has {n} qubits",
-                        lineno + 1
-                    ));
-                }
-                // SF/OpenQASM are both little-endian (q0 = LSB): labels pass
-                // through unchanged so this stays consistent with to_qasm.
-                let qubit = q_idx;
-                let cbit = c_part
-                    .and_then(parse_first_bracket_index)
-                    .filter(|&ci| ci < n)
-                    .unwrap_or(qubit);
-                dag_ref.add_measure(qubit, cbit);
-            } else if let Some(c_part) = c_part {
-                // Whole-register form: `measure q -> c;` measures every qubit
-                // into the classical bit of the same index.  QASM 2 allows it
-                // and random generators emit it as the final measurement.
-                if !q_part.trim().is_empty() && !c_part.trim().is_empty() {
-                    for i in 0..n {
-                        dag_ref.add_measure(i, i);
+            let q_ops = resolve_operands(q_part, &qregs, n, line, lineno + 1)?;
+            let c_ops = match c_part {
+                Some(rest) if !rest.trim().is_empty() => Some(resolve_operands(
+                    rest,
+                    &cregs,
+                    dag_ref.n_cbits,
+                    line,
+                    lineno + 1,
+                )?),
+                _ => None,
+            };
+            let q_indices = expand_operands(&q_ops, "measure", line, lineno + 1)?;
+            let c_indices = match &c_ops {
+                Some(ops) => Some(expand_operands(ops, "measure", line, lineno + 1)?),
+                None => None,
+            };
+            match c_indices {
+                None => {
+                    for row in &q_indices {
+                        match condition {
+                            Some((cbit, value)) => {
+                                dag_ref.add_measure_conditioned(row[0], row[0], cbit, value);
+                            }
+                            None => {
+                                dag_ref.add_measure(row[0], row[0]);
+                            }
+                        }
                     }
-                } else {
-                    return Err(format!(
-                        "line {}: malformed measure statement: {line}",
-                        lineno + 1
-                    ));
                 }
-            } else {
-                return Err(format!(
-                    "line {}: measure without a qubit operand: {line}",
-                    lineno + 1
-                ));
+                Some(c_rows) if c_rows.len() == q_indices.len() => {
+                    for (q_row, c_row) in q_indices.iter().zip(c_rows.iter()) {
+                        match condition {
+                            Some((cbit, value)) => {
+                                dag_ref.add_measure_conditioned(q_row[0], c_row[0], cbit, value);
+                            }
+                            None => {
+                                dag_ref.add_measure(q_row[0], c_row[0]);
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "line {}: measure qubit and classical operands have different sizes in '{line}'",
+                        lineno + 1
+                    ))
+                }
             }
             continue;
         }
 
         if gate_name == "reset" || gate_name == "barrier" {
-            let mut qubit_indices = Vec::new();
-            let mut search_from = 0usize;
-            while let Some(bracket_start) = qubits_str[search_from..].find('[') {
-                let abs_start = search_from + bracket_start + 1;
-                let bracket_end = match qubits_str[abs_start..].find(']') {
-                    Some(i) => abs_start + i,
-                    None => {
-                        return Err(format!(
-                            "line {}: unterminated qubit index in '{line}'",
-                            lineno + 1
-                        ))
-                    }
-                };
-                let num_str = &qubits_str[abs_start..bracket_end];
-                let idx = match num_str.parse::<usize>() {
-                    Ok(i) => i,
-                    Err(_) => {
-                        return Err(format!(
-                            "line {}: qubit index '{num_str}' is not an integer in '{line}'",
-                            lineno + 1
-                        ))
-                    }
-                };
-                if idx >= n {
+            let operands = resolve_operands(&qubits_str, &qregs, n, line, lineno + 1)?;
+            if gate_name == "barrier" {
+                if condition.is_some() {
                     return Err(format!(
-                        "line {}: qubit index {idx} out of range for {n} qubits in '{line}'",
+                        "line {}: a barrier cannot be conditioned: {line}",
                         lineno + 1
                     ));
                 }
-                // Little-endian pass-through (q[i] -> SF qubit i).
-                qubit_indices.push(idx);
-                search_from = bracket_end + 1;
-            }
-            if !qubit_indices.is_empty() {
-                dag_ref.add_op(op, &qubit_indices);
-            } else if gate_name == "reset" {
-                return Err(format!(
-                    "line {}: reset names no qubit operand in '{line}'",
-                    lineno + 1
-                ));
+                // A barrier spans every operand and has no gate semantics, so
+                // it is not broadcast; unequal register sizes are legal here.
+                let mut indices = Vec::new();
+                for operand in &operands {
+                    match operand {
+                        Operand::Index(i) => indices.push(*i),
+                        Operand::Register(offset, size) => indices.extend(*offset..*offset + *size),
+                    }
+                }
+                dag_ref.add_op(op.clone(), &indices);
+            } else {
+                for inst in expand_operands(&operands, &gate_name, line, lineno + 1)? {
+                    match condition {
+                        Some((cbit, value)) => {
+                            dag_ref.add_op_conditioned(op.clone(), &inst, cbit, value);
+                        }
+                        None => {
+                            dag_ref.add_op(op.clone(), &inst);
+                        }
+                    }
+                }
             }
             continue;
         }
 
-        // Parse qubit indices from "qreg[q]" or "name[q]" patterns
-        let mut qubit_indices = Vec::new();
-        let mut search_from = 0usize;
-        while let Some(bracket_start) = qubits_str[search_from..].find('[') {
-            let abs_start = search_from + bracket_start + 1;
-            let bracket_end = match qubits_str[abs_start..].find(']') {
-                Some(i) => abs_start + i,
-                None => {
-                    return Err(format!(
-                        "line {}: unterminated qubit index in '{line}'",
-                        lineno + 1
-                    ))
-                }
-            };
-            let num_str = &qubits_str[abs_start..bracket_end];
-            let idx = match num_str.parse::<usize>() {
-                Ok(i) => i,
-                Err(_) => {
-                    return Err(format!(
-                        "line {}: qubit index '{num_str}' is not an integer in '{line}'",
-                        lineno + 1
-                    ))
-                }
-            };
-            if idx >= n {
-                return Err(format!(
-                    "line {}: qubit index {idx} out of range for {n} qubits in '{line}'",
-                    lineno + 1
-                ));
-            }
-            // Little-endian pass-through: SF q0 = QASM q[0] = LSB.
-            qubit_indices.push(idx);
-            search_from = bracket_end + 1;
-        }
-
-        if qubit_indices.is_empty() {
-            return Err(format!(
-                "line {}: gate '{gate_name}' names no qubit operand in '{line}'",
-                lineno + 1
-            ));
-        }
+        let operands = resolve_operands(&qubits_str, &qregs, n, line, lineno + 1)?;
+        let instances = expand_operands(&operands, &gate_name, line, lineno + 1)?;
 
         // A single gate application may not name the same qubit twice: the DAG
         // would gain a self-loop and `add_op` asserts on it.  Report that as a
@@ -266,17 +288,19 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
         // surface as a PanicException.  One-line (minified) programs used to be
         // read as one giant gate whose operand list was every `q[i]` on the
         // line; re-importing such an export crashed the interpreter's caller.
-        for i in 0..qubit_indices.len() {
-            for j in (i + 1)..qubit_indices.len() {
-                if qubit_indices[i] == qubit_indices[j] {
-                    return Err(format!(
-                        "line {}: gate '{}' names qubit {} more than once in '{}' ({} operands given; one gate application must name distinct qubits)",
-                        lineno + 1,
-                        gate_name,
-                        qubit_indices[i],
-                        line,
-                        qubit_indices.len()
-                    ));
+        for inst in &instances {
+            for i in 0..inst.len() {
+                for j in (i + 1)..inst.len() {
+                    if inst[i] == inst[j] {
+                        return Err(format!(
+                            "line {}: gate '{}' names qubit {} more than once in '{}' ({} operands given; one gate application must name distinct qubits)",
+                            lineno + 1,
+                            gate_name,
+                            inst[i],
+                            line,
+                            inst.len()
+                        ));
+                    }
                 }
             }
         }
@@ -289,21 +313,154 @@ pub fn parse_qasm2(qasm_str: &str) -> Result<QuantumDAG, String> {
         // `OpType::n_qubits` is the authority, so this cannot drift from the
         // gate table.
         let expected = op.n_qubits();
-        if expected != 0 && qubit_indices.len() != expected {
+        if expected != 0 && instances[0].len() != expected {
             return Err(format!(
                 "line {}: gate '{}' takes {} qubit operand(s) but {} were given in '{}'",
                 lineno + 1,
                 gate_name,
                 expected,
-                qubit_indices.len(),
+                instances[0].len(),
                 line
             ));
         }
 
-        dag_ref.add_op(op, &qubit_indices);
+        for inst in &instances {
+            match condition {
+                Some((cbit, value)) => {
+                    dag_ref.add_op_conditioned(op.clone(), inst, cbit, value);
+                }
+                None => {
+                    dag_ref.add_op(op.clone(), inst);
+                }
+            }
+        }
     }
 
-    dag.ok_or_else(|| "Could not parse QASM: no qubit declaration found".to_string())
+    // A program may contain declarations only (`qreg q[2];` with no
+    // instructions): the DAG is created lazily at the first instruction,
+    // so materialise the empty one here instead of reporting a parse error.
+    if dag.is_none() {
+        if n_qubits == 0 {
+            return Err("Could not parse QASM: no qubit declaration found".to_string());
+        }
+        let cbit_width = if n_cbits == 0 { n_qubits } else { n_cbits };
+        dag = Some(QuantumDAG::new(n_qubits, cbit_width));
+    }
+    Ok(dag.expect("the empty DAG is materialised above"))
+}
+
+/// A parsed ``if`` guard paired with the statement it applies to.
+type GuardedStatement<'a> = Option<((usize, u64), &'a str)>;
+
+/// Parse a leading OpenQASM 2 ``if (creg == value)`` / ``if (creg[i] == value)``.
+///
+/// Returns the resolved ``(cbit, value)`` condition together with the guarded
+/// statement, or ``None`` when the line is not conditional.  The DAG stores a
+/// single classical-bit test per gate, so a multi-bit whole-register
+/// comparison (legal QASM 2) cannot be represented and is an error rather
+/// than a silent drop.
+fn parse_if_condition<'a>(
+    line: &'a str,
+    cregs: &HashMap<String, (usize, usize)>,
+    lineno: usize,
+) -> Result<GuardedStatement<'a>, String> {
+    let rest = match line.strip_prefix("if") {
+        Some(rest) => rest.trim_start(),
+        None => return Ok(None),
+    };
+    let rest = match rest.strip_prefix('(') {
+        Some(rest) => rest,
+        None => {
+            return Err(format!(
+                "line {}: malformed if statement (missing '('): {line}",
+                lineno + 1
+            ))
+        }
+    };
+    let eq = match rest.find("==") {
+        Some(pos) => pos,
+        None => {
+            return Err(format!(
+                "line {}: malformed if statement (missing '=='): {line}",
+                lineno + 1
+            ))
+        }
+    };
+    let lhs = rest[..eq].trim();
+    let after = &rest[eq + 2..];
+    let close = match after.find(')') {
+        Some(pos) => pos,
+        None => {
+            return Err(format!(
+                "line {}: malformed if statement (missing ')'): {line}",
+                lineno + 1
+            ))
+        }
+    };
+    let value: u64 = match after[..close].trim().parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(format!(
+                "line {}: if statement value is not an integer: {line}",
+                lineno + 1
+            ))
+        }
+    };
+    let statement = after[close + 1..].trim();
+    if statement.is_empty() {
+        return Err(format!(
+            "line {}: if statement guards no instruction: {line}",
+            lineno + 1
+        ));
+    }
+    let (name, index) = match lhs.find('[') {
+        Some(open) => {
+            let inner = lhs[open + 1..].trim_end_matches(']').trim();
+            let idx: usize = match inner.parse() {
+                Ok(i) => i,
+                Err(_) => {
+                    return Err(format!(
+                        "line {}: if statement index is not an integer: {line}",
+                        lineno + 1
+                    ))
+                }
+            };
+            (lhs[..open].trim(), Some(idx))
+        }
+        None => (lhs, None),
+    };
+    let (offset, size) = match cregs.get(name) {
+        Some(span) => *span,
+        None => {
+            return Err(format!(
+                "line {}: if statement names unknown classical register '{name}'",
+                lineno + 1
+            ))
+        }
+    };
+    let index = match index {
+        Some(i) if i < size => i,
+        Some(i) => {
+            return Err(format!(
+                "line {}: if statement names classical bit {i} outside register '{name}' (size {size})",
+                lineno + 1
+            ))
+        }
+        None if size == 1 => 0,
+        None => {
+            return Err(format!(
+                "line {}: if statement compares the whole {size}-bit register '{name}', but the IR stores one cbit condition per gate",
+                lineno + 1
+            ))
+        }
+    };
+    if value > 1 {
+        return Err(format!(
+            "line {}: if statement compares {name}[{index}] with {value}, but the IR stores one cbit condition (0 or 1)",
+            lineno + 1
+        ));
+    }
+    Ok(Some(((offset + index, value), statement)))
 }
 
 /// Split a QASM2 source into `(0-based line number, statement)` pairs.
@@ -378,6 +535,163 @@ fn strip_line_comment(raw: &str) -> &str {
         }
     }
     raw
+}
+
+/// One operand of a QASM 2 gate application.
+enum Operand {
+    /// A single qubit, already translated to the circuit-wide index.
+    Index(usize),
+    /// A whole register: (offset, size).
+    Register(usize, usize),
+}
+
+/// Parse the operand list of a statement (`q`, `q[0]`, `a[1], b[0]`).
+///
+/// Register names are resolved against the declaration table, so `b[0]`
+/// after `qreg a[1]; qreg b[1];` is qubit 1 and not qubit 0.
+fn resolve_operands(
+    operands: &str,
+    regs: &HashMap<String, (usize, usize)>,
+    width: usize,
+    line: &str,
+    lineno: usize,
+) -> Result<Vec<Operand>, String> {
+    let mut result = Vec::new();
+    for raw in operands.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (name, index) = match token.find('[') {
+            Some(start) => {
+                let end = match token[start..].find(']') {
+                    Some(i) => start + i,
+                    None => {
+                        return Err(format!(
+                            "line {lineno}: unterminated qubit index in '{line}'"
+                        ))
+                    }
+                };
+                let name = token[..start].trim();
+                let idx_str = token[start + 1..end].trim();
+                let idx = match idx_str.parse::<usize>() {
+                    Ok(i) => Some(i),
+                    Err(_) => {
+                        return Err(format!(
+                            "line {lineno}: qubit index '{idx_str}' is not an integer in '{line}'"
+                        ))
+                    }
+                };
+                (name, idx)
+            }
+            None => (token, None),
+        };
+        let (offset, size) = match regs.get(name) {
+            Some(span) => *span,
+            None => {
+                return Err(format!(
+                    "line {lineno}: unknown qubit register '{name}' in '{line}'"
+                ))
+            }
+        };
+        match index {
+            Some(idx) => {
+                if idx >= size {
+                    return Err(format!(
+                        "line {lineno}: qubit index {idx} out of range for register '{name}' (size {size}) in '{line}'"
+                    ));
+                }
+                let absolute = offset + idx;
+                if absolute >= width {
+                    return Err(format!(
+                        "line {lineno}: qubit index {absolute} out of range for {width} qubits in '{line}'"
+                    ));
+                }
+                result.push(Operand::Index(absolute));
+            }
+            None => result.push(Operand::Register(offset, size)),
+        }
+    }
+    if result.is_empty() {
+        return Err(format!(
+            "line {lineno}: statement names no qubit operand in '{line}'"
+        ));
+    }
+    Ok(result)
+}
+
+/// Expand whole-register operands into one index list per gate application.
+///
+/// OpenQASM 2 broadcasts a gate over a register: `h q;` is one `h` per
+/// qubit, and `cx a, b;` pairs the i-th qubit of each register.  Mixing a
+/// whole register with an indexed operand is not a valid application.
+fn expand_operands(
+    operands: &[Operand],
+    gate_name: &str,
+    line: &str,
+    lineno: usize,
+) -> Result<Vec<Vec<usize>>, String> {
+    if operands.iter().all(|op| matches!(op, Operand::Index(_))) {
+        return Ok(vec![operands
+            .iter()
+            .map(|op| match op {
+                Operand::Index(i) => *i,
+                Operand::Register(..) => unreachable!(),
+            })
+            .collect()]);
+    }
+    if operands.iter().any(|op| matches!(op, Operand::Index(_))) {
+        return Err(format!(
+            "line {lineno}: gate '{gate_name}' mixes whole-register and indexed operands in '{line}'"
+        ));
+    }
+    let sizes: Vec<usize> = operands
+        .iter()
+        .map(|op| match op {
+            Operand::Register(_, size) => *size,
+            Operand::Index(_) => unreachable!(),
+        })
+        .collect();
+    if sizes.windows(2).any(|w| w[0] != w[1]) {
+        return Err(format!(
+            "line {lineno}: gate '{gate_name}' operands have different register sizes in '{line}'"
+        ));
+    }
+    let size = sizes[0];
+    Ok((0..size)
+        .map(|k| {
+            operands
+                .iter()
+                .map(|op| match op {
+                    Operand::Register(offset, _) => offset + k,
+                    Operand::Index(i) => *i,
+                })
+                .collect()
+        })
+        .collect())
+}
+
+/// Parse `qreg name[N];` (or `creg name[N];`) into (name, size).
+fn parse_named_register(line: &str) -> Option<(String, usize)> {
+    let size = parse_qreg_size(line)?;
+    let open = line.find('[')?;
+    let name = line[..open].split_whitespace().nth(1)?.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, size))
+}
+
+/// Parse the QASM 3 spelling `qubit[N] name;` into (name, size).
+fn parse_sized_register(line: &str) -> Option<(String, usize)> {
+    let size = parse_bracket_size(line, "qubit[")?;
+    let open = line.find('[')?;
+    let close = line[open..].find(']')? + open;
+    let name = line[close + 1..].trim().trim_end_matches(';').trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), size))
 }
 
 /// Split a QASM2 gate line into (gate_name, params_vec, qubits_str).
@@ -1052,12 +1366,6 @@ fn split_call(line: &str) -> Option<(String, Vec<String>, Vec<String>)> {
 }
 
 /// Extract the first bracket-enclosed integer from a string, e.g. "q[3]" → Some(3).
-fn parse_first_bracket_index(s: &str) -> Option<usize> {
-    let start = s.find('[')? + 1;
-    let end = s[start..].find(']')?;
-    s[start..start + end].parse::<usize>().ok()
-}
-
 /// Parse qubit count from qreg declaration: `qreg q[N];` or `qreg name[N];`
 fn parse_qreg_size(line: &str) -> Option<usize> {
     parse_bracket_size(line, "qreg")
@@ -1463,5 +1771,94 @@ swap q[1], q[2];
         assert!(recs
             .iter()
             .any(|(n, q, _)| n.to_uppercase() == "SWAP" && q == &[1, 2]));
+    }
+
+    #[test]
+    fn test_multiple_qregs_keep_register_offsets() {
+        // Regression (SF-10a): each qreg declaration used to rebuild the DAG,
+        // so only the last register survived and took index 0.
+        let qasm = "OPENQASM 2.0;\nqreg a[1];\nqreg b[1];\nx b[0];\n";
+        let dag = parse_qasm2(qasm).expect("two qregs should parse");
+        assert_eq!(dag.gate_count(), 1);
+        let recs = dag.to_gate_records();
+        assert_eq!(recs[0].0.to_uppercase(), "X");
+        assert_eq!(recs[0].1, vec![1]);
+    }
+
+    #[test]
+    fn test_whole_register_operand_broadcasts() {
+        // Regression (SF-09): `h q;` used to fail arity validation instead of
+        // applying H to every qubit of the register.
+        let qasm = "OPENQASM 2.0;\nqreg q[2];\nh q;\n";
+        let dag = parse_qasm2(qasm).expect("whole-register gate should parse");
+        assert_eq!(dag.gate_count(), 2);
+        let recs = dag.to_gate_records();
+        assert_eq!(recs[0].1, vec![0]);
+        assert_eq!(recs[1].1, vec![1]);
+    }
+
+    #[test]
+    fn test_cross_register_two_qubit_gate_uses_offsets() {
+        // Regression (SF-10b): `cx a, b;` used to collide both registers on
+        // [0, 0] instead of pairing a[i] with b[i].
+        let qasm = "OPENQASM 2.0;\nqreg a[2];\nqreg b[2];\ncx a, b;\n";
+        let dag = parse_qasm2(qasm).expect("cross-register cx should parse");
+        let recs = dag.to_gate_records();
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].1, vec![0, 2]);
+        assert_eq!(recs[1].1, vec![1, 3]);
+    }
+
+    #[test]
+    fn test_measure_pairs_register_bits() {
+        let qasm = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q -> c;\n";
+        let dag = parse_qasm2(qasm).expect("whole-register measure should parse");
+        let measured: Vec<(Vec<usize>, usize)> = dag
+            .to_instructions()
+            .iter()
+            .filter(|op| matches!(op.op_type, OpType::Measure))
+            .map(|op| (op.qubits.to_vec(), op.classical_bits[0]))
+            .collect();
+        assert_eq!(measured, vec![(vec![0], 0), (vec![1], 1)]);
+    }
+
+    #[test]
+    fn test_if_condition_is_attached_to_the_next_gate() {
+        let qasm = "OPENQASM 2.0;\nqreg q[1];\ncreg c[1];\nif(c==1) x q[0];\n";
+        let dag = parse_qasm2(qasm).expect("if statement should parse");
+        let instructions = dag.to_instructions();
+        let op = instructions
+            .iter()
+            .find(|op| matches!(op.op_type, OpType::X))
+            .expect("X should be recorded");
+        assert_eq!(op.condition, Some((0, 1)));
+    }
+
+    #[test]
+    fn test_mixing_whole_register_and_indexed_operands_is_rejected() {
+        let qasm = "OPENQASM 2.0;\nqreg a[2];\nqreg b[2];\ncx a, b[0];\n";
+        let err = parse_qasm2(qasm).err().expect("mixed operands must fail");
+        assert!(err.contains("mixes whole-register"), "{err}");
+    }
+
+    #[test]
+    fn test_declaration_only_program_is_an_empty_dag() {
+        let qasm = "OPENQASM 2.0;\nqreg q[2];\n";
+        let dag = parse_qasm2(qasm).expect("declarations only should parse");
+        assert_eq!(dag.n_qubits, 2);
+        assert_eq!(dag.gate_count(), 0);
+    }
+
+    #[test]
+    fn test_conditioned_records_keep_classical_bits() {
+        let qasm = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q[1] -> c[0];\n";
+        let dag = parse_qasm2(qasm).expect("measure should parse");
+        let records = dag.to_gate_records_with_conditions();
+        let measure = records
+            .iter()
+            .find(|record| record.0.eq_ignore_ascii_case("MEASURE"))
+            .expect("measurement record");
+        assert_eq!(measure.1, vec![1]);
+        assert_eq!(measure.4, vec![0]);
     }
 }

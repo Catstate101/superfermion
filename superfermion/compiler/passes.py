@@ -218,7 +218,15 @@ class BasisTranslationPass:
             if self._is_native(gate.name.upper()):
                 new_circuit._gates.append(gate)
             else:
+                start = len(new_circuit._gates)
                 self._decompose(gate, new_circuit)
+                # A gate identity must run under the same classical guard:
+                # re-emitting only the unitary factors would silently drop
+                # the c_if condition (each rewritten gate would apply
+                # unconditionally).
+                if gate.condition is not None:
+                    for rec in new_circuit._gates[start:]:
+                        rec.condition = gate.condition
         return new_circuit
 
 class UnitaryDecompositionPass:
@@ -378,6 +386,7 @@ class UnitaryDecompositionPass:
         for gate in circuit._gates:
             if gate.name.upper() == "UNITARY" and gate.matrix is not None:
                 n_qubits = len(gate.qubits)
+                start = len(new_circuit._gates)
                 if n_qubits == 1:
                     self._decompose_1q(gate.matrix, gate.qubits[0], new_circuit)
                 elif n_qubits == 2:
@@ -387,6 +396,11 @@ class UnitaryDecompositionPass:
                         f"UnitaryDecompositionPass does not support {n_qubits}-qubit "
                         f"unitaries yet. Decompose into 1Q/2Q blocks first."
                     )
+                # A guarded UNITARY (only reachable through extend_raw, since
+                # unitary() rejects a pending c_if) must guard its factors too.
+                if gate.condition is not None:
+                    for rec in new_circuit._gates[start:]:
+                        rec.condition = gate.condition
             else:
                 new_circuit._gates.append(gate)
         return new_circuit

@@ -33,7 +33,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from superfermion.circuit import Circuit, GateRecord
-from superfermion.compiler.passes import Pass
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -373,6 +372,12 @@ class PauliTwirlingPass:
         for gate in circuit._gates:
             name = gate.name.upper()
             if name in self.gate_types and len(gate.qubits) == 2:
+                if gate.condition is not None:
+                    # The twirl inserts its Paulis unconditionally, so on a
+                    # guarded gate they would also act when the condition is
+                    # false -- a different circuit.  Pass it through instead.
+                    new_gates.append(gate)
+                    continue
                 q0, q1 = gate.qubits[0], gate.qubits[1]
 
                 # Select twirling frame

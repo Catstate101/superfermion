@@ -118,8 +118,11 @@ class TestRunResultExpectation:
     THETA = (0.3, 1.1, -0.8, 0.7, -0.4, 2.0)
 
     @pytest.fixture(scope="class")
-    def result(self):
-        return _su2_result(3, self.THETA)
+    @classmethod
+    def result(cls):
+        # pytest 10 removed instance-method class-scoped fixtures: their
+        # instance attributes are invisible to the per-test instances.
+        return _su2_result(3, cls.THETA)
 
     def test_statevector_is_little_endian(self):
         """x(0) must land at index 1, x(2) at index 4 (qubit q is bit q)."""

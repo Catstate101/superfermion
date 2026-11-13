@@ -339,9 +339,9 @@ class TestQASMEndianness:
         assert bridge._RUST_QASM_FALLBACK_REASON == "ValueError: unsupported syntax"
 
     def test_a_conversion_failure_after_a_good_parse_propagates(self, monkeypatch):
-        """The guard covers the parse only. ``to_gate_records``/``Circuit``/
-        ``extend_raw_from_records`` are Rust-backed conversion, so a failure
-        there is a defect and must not be absorbed into a Python re-parse."""
+        """The guard covers the parse only. ``to_gate_records_with_conditions``/
+        ``Circuit``/``extend_raw_from_records`` are Rust-backed conversion, so a
+        failure there is a defect and must not be absorbed into a Python re-parse."""
         bridge = pytest.importorskip("superfermion.bridge")
         sf_core = pytest.importorskip("superfermion._sf_core")
 
@@ -351,6 +351,9 @@ class TestQASMEndianness:
                 return _BadRecordsDAG()
 
             def to_gate_records(self):
+                raise RuntimeError("simulated conversion failure")
+
+            def to_gate_records_with_conditions(self):
                 raise RuntimeError("simulated conversion failure")
 
             def n_qubits(self):
@@ -471,14 +474,19 @@ class TestToQasmDropGuard:
         assert Operator(rebuilt).equiv(Operator(expected))
 
     def test_to_qasm_still_omits_barrier(self):
+        # OpenQASM 2.0 does define `barrier`; the exporter used to drop it
+        # while claiming otherwise.  It must be emitted and stay loadable.
+        pytest.importorskip("qiskit")
+        from qiskit import qasm2
         bridge = pytest.importorskip("superfermion.bridge")
         c = sf.Circuit(2)
         c.h(0)
         c.barrier()
         c.cx(0, 1)
         qasm = bridge.to_qasm(c)
-        assert "barrier" not in qasm.lower()
+        assert "barrier q[0], q[1];" in qasm.lower()
         assert "cx q[0], q[1];" in qasm
+        qasm2.loads(qasm)
 
 
 class TestRustStorageExporters:
