@@ -2,6 +2,143 @@
 
 All notable changes to the Superfermion framework.
 
+## [0.1.30] - 2026-11-12
+
+The OpenQASM importer becomes register-correct, the PennyLane and Qiskit bridges
+cover the controlled rotations they were missing, and `to_qasm3` emits programs
+a plain `qasm3.loads` accepts. Every item is locked by
+`tests/domain/test_superfermion_issues.py`, which asserts the corrected
+behaviour against Qiskit's `Operator` and `qasm3` importer as the reference.
+
+### Added
+
+- **`QuantumDAG.to_gate_records_with_conditions()`**: keeps each gate's
+  `if (creg == value)` guard and each measurement's explicit classical bit
+  when the Python bridge converts a natively parsed circuit;
+  `Circuit.extend_raw_from_records()` accepts the optional fourth
+  `(cbit, value)` and fifth `classical_bits` elements.
+
+### Fixed
+
+- **Whole-register operands** (`h q;`, `cx a, b;`, `measure q -> c;`): both
+  parsers broadcast over each qubit and pair two registers element-wise.
+  Previously `h q;` raised an arity error naming an empty operand list, and
+  `cx a, b;` collapsed to a duplicate-qubit error on `[0, 0]`.
+- **Multiple `qreg` declarations**: declarations extend one register table
+  with running offsets, so `qreg a[1]; qreg b[1]; x b[0];` is a 2-qubit
+  circuit and `cx a[0], b[0];` spans both registers instead of collapsing
+  onto qubit 0.
+- **`if (creg == value)`**: parsed natively and lowered to `Circuit.c_if`
+  (the indexed `if (c[i] == value)` form too). A multi-bit whole-register
+  comparison raises a clear error, since one `c_if` tests one bit.
+- **PennyLane `CRX` / `CRY` / `CRZ` / `ControlledPhaseShift`** convert
+  instead of raising, and a `QNode` is accepted: its tape is built before
+  conversion (previously `'QNode' object has no attribute 'operations'`).
+- **`to_qiskit`** maps `CRX`, `CRZ`, `R1` (to `p`) and `SXDG`.
+- **`to_qiskit` conditions**: a `c_if(...)` gate is exported as Qiskit's
+  `with qc.if_test((clbit, value)):` block instead of being silently
+  dropped (Qiskit removed `QuantumCircuit.c_if`).
+- **`measure q[i] -> c[j]`** keeps its explicit classical bit through the
+  native bridge; previously the target collapsed to `c[i]`, so counts and
+  `to_qiskit` reported the wrong classical bit.
+- **Declaration-only programs** (`qreg q[2];` with no instructions) parse to
+  an empty circuit again in both parsers.
+- **Native/fallback parser parity**: an explicit `barrier q;` survives the
+  native bridge, `cx` is recorded as `CNOT` like `Circuit.cx()`, and the
+  fallback lowers `u0` to `U(0, 0, 0)`; previously the same program produced
+  different gate records depending on which parser ran.
+- **Conditional `reset`** keeps its `if (...)` guard in the Python fallback
+  (the native parser already kept it), so `if(c==1) reset q[0];` no longer
+  becomes unconditional there.  Both parsers now reject a conditioned
+  `barrier`, which OpenQASM 2 does not allow.
+- **`to_qasm` (OpenQASM 2.0)** now emits `if(c==value) ...;` when the circuit
+  declares exactly one classical bit (the spelling Qiskit itself exports),
+  emits explicit `barrier` statements instead of dropping them, and still
+  raises a clear `ValueError` for a wider register (OpenQASM 2 compares the
+  whole register) and for a conditional `barrier`, which OpenQASM 2 does not
+  allow.
+- **Conditional measurement**: `c_if(cbit, value).measure(q, target)` is now
+  representable end to end. `Circuit.measure` records the guard,
+  `to_ir()` builds a conditioned Measure node
+  (`QuantumDAG::add_measure_conditioned`), both QASM 2 parsers keep
+  `if(c==1) measure q[0] -> c[0];`, `to_qasm3` writes
+  `if (c[0] == true) c[0] = measure q[0];`, and the dynamic trajectory
+  engines already skipped the measurement when the guard fails.  Qiskit's
+  `if_test` around `measure` imports too; measuring into the block's own
+  condition bit is rejected because per-instruction guards would diverge
+  from Qiskit's block semantics.
+- **`from_qiskit` `if_test` blocks** now import every instruction in the
+  body (including measurements) and an `else` branch with the inverted
+  guard; previously only a single-gate body was accepted.
+- **`from_qasm3`** parses Qiskit's exporter form — a bare `if (c[0])`,
+  braced bodies, `} else {` branches and guarded measurements.  Nested
+  `if` blocks raise, since one `c_if` cannot express a conjunction.
+- **Simulation prep / gate fusion**: a conditioned gate is now passed through
+  fusion verbatim and every decomposed sub-gate inherits the guard (a guarded
+  `cry`/`u1`... becomes guarded `RY`/`CNOT`/`P` factors).  Previously
+  `fuse_single_qubit_gates` folded a guarded `X` into an unconditional `U`,
+  so any circuit that needed decomposition before dynamic simulation
+  (Qiskit-imported `cry`/`ch`/`u1`/`u2`/`u3`) silently lost its feed-forward.
+  The intermediate circuits also keep `n_cbits`, so a classical bit index
+  beyond `n_qubits` no longer trips the IR assertion.
+- **`sf.compile()` / `sf.run(target=...)` on a dynamic circuit** now raises a
+  clear `ValueError` instead of returning a silently wrong circuit: the
+  unitary-only Rust optimizer dropped every `c_if` guard, rewrote `RESET`
+  into an X-like `U(pi, 0, -pi)`, and could drop measurements from the
+  Clifford tableau.  The guard rejects conditioned gates, `RESET` and
+  non-terminal measurements (the same criterion `run()` uses to pick the
+  dynamic path); a trailing measurement block still compiles and keeps its
+  `measure(q, cbit)` mapping.  `level=0` without a target still returns the
+  circuit unchanged, `BasisTranslationPass` carries guards onto the gates it
+  re-emits, and `simplify_clifford` now declines circuits containing
+  `MEASURE`/`RESET` rather than returning a unitary-only tableau that loses
+  them.
+- **`Circuit.to_json()` / `Circuit.from_json()` and the `.sfc` format** keep
+  `classical_bits` and `condition`: both rebuilt every record from
+  `name`/`qubits`/`params`, so `measure(1, 0)` reloaded as `measure(1, 1)` and
+  a `c_if`-guarded gate came back unguarded (`.sfc` wrote `classical_bits` but
+  never restored it).  Serialized classical/condition bits are validated
+  against `n_cbits` on load, so a corrupt payload raises a `ValueError`
+  instead of panicking inside `to_ir()`.
+- **`Circuit.to_unitary()`** now refuses a circuit containing `MEASURE`,
+  `RESET` or a `c_if`-guarded gate instead of returning the matrix of the
+  surviving gates (the Rust builder skipped measurements and resets, and
+  applied a guarded gate unconditionally).  `to_ir().to_unitary()` remains
+  the raw IR path for callers that know the circuit is unitary.
+- **`draw()`** now labels each measurement with its classical target
+  (`[MEASURE->c0]`) and every `c_if` gate with its guard (`[X if c0=1]`),
+  instead of drawing a guarded gate as if it ran unconditionally.
+  `PauliTwirlingPass` passes a conditioned 2Q gate through unchanged (its
+  twirl Paulis are unconditional and would act when the condition is false),
+  and `UnitaryDecompositionPass` puts the guard on every factor.  Zero-noise
+  folding (`mitigation._fold_circuit`) does the same on each repeated copy;
+  the unfold used to run a guarded gate unconditionally.
+- **`to_cirq` / `to_ionq` / `to_pennylane` / `to_stim` / `to_braket`** also
+  raise for `c_if` gates instead of exporting them as unconditional gates.
+- **`from_qiskit`** honors each measurement's explicit classical bit and
+  imports `if_test` blocks as `Circuit.c_if(...)`; previously
+  `qc.measure(1, 0)` silently became `measure(1, 1)` and dynamic-circuit
+  blocks were rejected without a condition-aware path.
+- **`to_qasm3`** writes `include "stdgates.inc";`, spells builtins
+  portably (`U`, `p`), declares `iswap`/`ecr`/`rxx`/`ryy`/`rzz` bodies that
+  are matrix-equivalent to Qiskit's, and inlines `SXDG` as `h; sdg; h`.
+  `from_qasm3` skips gate-definition blocks, so the round trip still works.
+- **`to_qasm3` conditions** compare against a boolean literal
+  (`if (c[0] == true)`), which Qiskit's `qasm3` importer accepts; the old
+  `== 1` spelling raised "conditions must be 'bit == const bool'".
+  `from_qasm3` accepts both `true`/`false` and the numeric spelling, and a
+  guarded `barrier` keeps its guard instead of being emitted unconditionally.
+  Guarded measurements (`if (c[0] == true) c[1] = measure q[1];`) are
+  emitted and parsed as well.
+- **Gate noise applies on the default run path**: `sf.run(circuit,
+  noise_model=...)` selects the density-matrix method when the model has
+  gate-attached terms; an explicit `method="statevector"` still warns and
+  ignores them.
+- **NumPy integer indices** (`np.int64`, `np.int32`) are accepted by gates
+  and `measure` instead of failing the `isinstance(qubit, int)` check.
+- **Import errors report the native parser's rejection first**, with the
+  Python fallback's reason in parentheses.
+
 ## [0.1.29] - 2026-11-11
 
 A Qiskit-parity noise layer for the density-matrix path, and the compiler
