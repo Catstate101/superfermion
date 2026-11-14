@@ -50,7 +50,7 @@ SF circuits carry measurement implicitly (Sampler-style semantics), but IBM's Sa
 
 ### Counts Convention (q0-last)
 
-`result.counts` follows SF's documented q0-last convention — `int(key, 2)` bit `q` holds qubit `q`, so qubit 0 is the rightmost character (`x(0)` on 2 qubits reports `'01'`) — matching the local `"cpu"` sampler. IBM's SamplerV2 returns q0-first bitstrings (position `i` holds SF qubit `i`; verified empirically, `x(0)` on `ibm_fez` returns `'10'`), so the adapter reverses every key of the measured width before building the `RunResult`. All counts consumers — `RunResult.expectation`, `parameter_shift_grad`, `readout_correction` — therefore behave identically for QPU and simulator results, and results from different providers can be compared directly.
+`result.counts` follows SF's documented q0-last convention — `int(key, 2)` bit `q` holds qubit `q`, so qubit 0 is the rightmost character (`x(0)` on 2 qubits reports `'01'`) — matching the local `"cpu"` sampler. IBM's SamplerV2 returns q0-first bitstrings (position `i` holds SF qubit `i`; verified empirically, `x(0)` on `ibm_fez` returns `'10'`), so the adapter reverses every key of the measured width before building the `RunResult`. All counts consumers — `RunResult.expectation`, `parameter_shift_grad`, `readout_correction` — therefore behave identically for QPU and simulator results, and results from different providers can be compared directly. The local `cpu` sampler is the only path that re-keys `counts` by classical bit, when every qubit is measured once into a distinct bit with `n_cbits == n_qubits` (`result.metadata["counts_keyed_by"] == "classical_bits"`); hardware adapters return provider keys unchanged and never set that field.
 
 ### Parameter-Shift Gradients on Hardware
 
