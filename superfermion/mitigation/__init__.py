@@ -11,12 +11,15 @@ from __future__ import annotations
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 import warnings
 
 import numpy as np
 
 import superfermion as sf
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only
+    from superfermion.noise import NoiseModel
 
 # SUP-22: classical-shadow estimators live in the sibling submodule; re-export
 # here so ``sf.mitigation.classical_shadow`` / ``ClassicalShadow`` work.
@@ -328,25 +331,31 @@ def _adjoint_spec(gate: Any, forward: tuple) -> tuple:
 def _emit(out: sf.Circuit, gate: Any, spec: tuple) -> None:
     """Append one copy described by ``spec`` on ``gate``'s own qubits."""
     qubits = list(gate.qubits)
+    start = len(out._gates)
     if spec[0] == "unitary":
         out.unitary(spec[1], qubits)
-        return
-    _, name, params = spec
-    method = getattr(out, name)
-    classical = tuple(getattr(gate, "classical_bits", ()) or ())
-    if name == "cu" and len(params) == 4:
-        # Circuit.cu(theta, phi, lam, control, target, gamma): the record keeps
-        # gamma last, but it is a keyword slot *after* the qubits.  Forwarding
-        # the record positionally fed gamma into the control slot and raised
-        # "qubit index must be int" on every cu/cu3 -- and on ch/cry, which
-        # lower to cu.  (MIT-D2)
-        method(params[0], params[1], params[2], *qubits, params[3])
-    elif params:
-        method(*params, *qubits)
-    elif classical:
-        method(*qubits, *classical)
     else:
-        method(*qubits)
+        _, name, params = spec
+        method = getattr(out, name)
+        classical = tuple(getattr(gate, "classical_bits", ()) or ())
+        if name == "cu" and len(params) == 4:
+            # Circuit.cu(theta, phi, lam, control, target, gamma): the record keeps
+            # gamma last, but it is a keyword slot *after* the qubits.  Forwarding
+            # the record positionally fed gamma into the control slot and raised
+            # "qubit index must be int" on every cu/cu3 -- and on ch/cry, which
+            # lower to cu.  (MIT-D2)
+            method(params[0], params[1], params[2], *qubits, params[3])
+        elif params:
+            method(*params, *qubits)
+        elif classical:
+            method(*qubits, *classical)
+        else:
+            method(*qubits)
+    # Folding repeats a gate; if it was guarded, every copy must run under the
+    # same c_if or the unfold would apply it when the condition is false.
+    if gate.condition is not None:
+        for rec in out._gates[start:]:
+            rec.condition = gate.condition
 
 
 def _fold_circuit(circuit: sf.Circuit, scale: int) -> sf.Circuit:

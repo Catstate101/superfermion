@@ -141,9 +141,13 @@ def fuse_two_qubit_gates(circuit: Circuit) -> Circuit:
     new_gates: List[GateRecord] = []
     i = 0
     while i < len(gates):
+        # Never fuse across classical conditions: the RZZ would apply
+        # unconditionally and silently drop the c_if guard.  The same
+        # applies to conditioned RZ gates in the middle.
         if (i+2 < len(gates) and gates[i].name.upper() in ("CX", "CNOT") and 
             gates[i+1].name.upper() == "RZ" and gates[i+2].name.upper() in ("CX", "CNOT") and
-            gates[i].qubits == gates[i+2].qubits and gates[i+1].qubits == [gates[i].qubits[1]]):
+            gates[i].qubits == gates[i+2].qubits and gates[i+1].qubits == [gates[i].qubits[1]] and
+            all(g.condition is None for g in (gates[i], gates[i+1], gates[i+2]))):
             c, t = gates[i].qubits
             theta = gates[i+1].params[0]
             new_gates.append(GateRecord("RZZ", [c, t], [theta]))
@@ -151,7 +155,7 @@ def fuse_two_qubit_gates(circuit: Circuit) -> Circuit:
         else:
             new_gates.append(gates[i])
             i += 1
-    res = Circuit(circuit.n_qubits)
+    res = Circuit(circuit.n_qubits, n_cbits=circuit.n_cbits)
     res._gates = new_gates
     return res
 
@@ -183,7 +187,11 @@ def fuse_single_qubit_gates(circuit: Circuit) -> Circuit:
         for q in sorted(pending.keys()): _flush_qubit(q)
     for gate in gates:
         name = gate.name.upper()
-        if name in ("BARRIER", "MEASURE", "RESET"):
+        # A conditioned gate is passed through verbatim: folding it into the
+        # pending U matrix would silently make it unconditional (dropped
+        # c_if guard).  Pending gates are flushed first so the guarded gate
+        # stays after everything that preceded it.
+        if name in ("BARRIER", "MEASURE", "RESET") or gate.condition is not None:
             _flush_all()
             new_gates.append(gate)
             continue
@@ -204,7 +212,7 @@ def fuse_single_qubit_gates(circuit: Circuit) -> Circuit:
             for q in qs: _flush_qubit(q)
             new_gates.append(gate)
     _flush_all()
-    res = Circuit(circuit.n_qubits)
+    res = Circuit(circuit.n_qubits, n_cbits=circuit.n_cbits)
     res._gates = new_gates
     return res
 
@@ -220,6 +228,10 @@ def decompose_for_rust(gates: List[GateRecord]) -> List[GateRecord]:
     for g in gates:
         name = g.name.upper()
         nq = len(g.qubits)
+        start = len(result)
+        # Emit the decomposition below, then copy the classical guard onto
+        # every produced record: each sub-gate must execute under the same
+        # c_if test, otherwise the guard would be silently dropped.
         if name in ("CP", "CR1", "CPHASE") and nq == 2:
             phi = g.params[0] if g.params else 0.0
             p_val = float(phi) if not hasattr(phi, "value") else float(phi.value)
@@ -245,11 +257,15 @@ def decompose_for_rust(gates: List[GateRecord]) -> List[GateRecord]:
             result.append(GateRecord("U", [g.qubits[0]], ps[:3]))
         else:
             result.append(g)
+        if g.condition is not None:
+            for rec in result[start:]:
+                rec.condition = g.condition
     return result
 
 def expand_3q_gates(gates: List[GateRecord]) -> List[GateRecord]:
     result: List[GateRecord] = []
     for g in gates:
+        start = len(result)
         if g.name.upper() in ("CCX", "TOFFOLI") and len(g.qubits) == 3:
             c0, c1, t = g.qubits
             result.extend([GateRecord("H", [t]), GateRecord("CX", [c1, t]), GateRecord("TDG", [t]), GateRecord("CX", [c0, t]), 
@@ -258,6 +274,9 @@ def expand_3q_gates(gates: List[GateRecord]) -> List[GateRecord]:
                            GateRecord("T", [c0]), GateRecord("TDG", [c1]), GateRecord("CX", [c0, c1])])
         else:
             result.append(g)
+        if g.condition is not None:
+            for rec in result[start:]:
+                rec.condition = g.condition
     return result
 
 # ════════════════════════════════════════════════════════════
@@ -270,7 +289,7 @@ def simulate_statevector_turbo(circuit: Circuit, seed: int = 42) -> np.ndarray:
     # only handles 1Q and 2Q gates.
     expanded = expand_3q_gates(circuit._gates)
     if expanded is not circuit._gates:
-        circuit = Circuit(circuit.n_qubits)
+        circuit = Circuit(circuit.n_qubits, n_cbits=circuit.n_cbits)
         circuit._gates = expanded
     fused = fuse_all_gates(circuit)
     n = fused.n_qubits

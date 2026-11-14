@@ -110,36 +110,110 @@ def from_qasm3(qasm_str: str, strict: bool = True) -> Any:
         method(*params, *qubits)
 
     # Second pass: parse gates
+    in_gate_def = False
+    # Qiskit's QASM3 exporter wraps guarded bodies in braces and writes a
+    # bare condition (``if (c[0]) { ... }``), unlike ``to_qasm3``'s
+    # single-line form.  The active guard is carried on a stack while the
+    # braced body is parsed; ``} else {`` flips it.  Circuit.c_if tests a
+    # single bit, so only flat (non-nested) guards are representable.
+    cond_stack: list[tuple[int, int]] = []
+
+    def _apply_guarded(statement: str, guard: tuple[int, int]) -> None:
+        statement = statement.rstrip(";").strip()
+        circuit.c_if(*guard)
+        meas = re.match(r"c\[(\d+)\]\s*=\s*measure\s+q\[(\d+)\]$", statement)
+        if meas:
+            circuit.measure(int(meas.group(2)), int(meas.group(1)))
+            return
+        try:
+            _apply_statement(statement, circuit, gate_map, _dispatch, strict)
+        finally:
+            # A condition is consumed by the next gate; if nothing was
+            # applied it must not leak onto an unrelated later gate.
+            circuit._pending_condition = None
+
     for raw in lines:
         line = raw.strip()
         if not line or line.startswith("//") or line.startswith("OPENQASM"):
+            continue
+        # Gate definitions: ``to_qasm3`` declares gates stdgates.inc lacks.
+        # Their bodies use local argument names, so skip to the closing brace;
+        # the calls themselves are dispatched by name below.
+        if in_gate_def:
+            if "}" in line:
+                in_gate_def = False
+            continue
+        if re.match(r"gate\s+\w+", line):
+            in_gate_def = "}" not in line
             continue
         if line.startswith("qubit") or line.startswith("bit") or line.startswith("include"):
             continue
         if line.startswith("qreg") or line.startswith("creg"):
             continue
 
-        # Classical feed-forward: if (c[0] == 1) x q[0];
-        cond_match = re.match(r"if\s*\(\s*c\[(\d+)\]\s*==\s*(\d+)\s*\)\s*(.+)$", line)
+        # Brace scopes from `if (...) { ... }` / `} else { ... }`.
+        if line == "}":
+            if cond_stack:
+                cond_stack.pop()
+            continue
+        if re.match(r"\}\s*else\s*\{?$", line):
+            if not cond_stack:
+                raise ValueError(
+                    f"from_qasm3 found an else block without a matching if: {line!r}"
+                )
+            cbit, value = cond_stack.pop()
+            cond_stack.append((cbit, 1 - value))
+            continue
+        if line == "{":
+            continue
+
+        # Classical feed-forward: if (c[0] == true) x q[0];  QASM3 compares
+        # a bit against a boolean literal (or nothing at all, meaning true),
+        # but `== 1` / `== 0` is accepted too.
+        cond_match = re.match(
+            r"if\s*\(\s*c\[(\d+)\]\s*(?:==\s*(true|false|\d+))?\s*\)\s*(.*)$",
+            line,
+        )
         if cond_match:
-            cbit, value, rest = (
-                int(cond_match.group(1)),
-                int(cond_match.group(2)),
-                cond_match.group(3).strip(),
-            )
-            rest = rest.rstrip(";").strip()
-            circuit.c_if(cbit, value)
-            try:
-                _apply_statement(rest, circuit, gate_map, _dispatch, strict)
-            finally:
-                # A condition is consumed by the next gate; if nothing was
-                # applied it must not leak onto an unrelated later gate.
-                circuit._pending_condition = None
+            cbit = int(cond_match.group(1))
+            raw_value = cond_match.group(2)
+            if raw_value is None or raw_value == "true":
+                value = 1
+            elif raw_value == "false":
+                value = 0
+            else:
+                value = int(raw_value)
+            rest = cond_match.group(3).strip()
+            if rest:
+                # Inline braced body: `if (c[0]) { x q[0]; }`.
+                if rest.startswith("{"):
+                    rest = rest[1:].rstrip()
+                    if rest.endswith("}"):
+                        rest = rest[:-1]
+                    rest = rest.strip()
+            if not rest:
+                if cond_stack:
+                    raise ValueError(
+                        "Nested QASM3 if blocks cannot be represented: "
+                        "Circuit.c_if tests one classical bit at a time. "
+                        f"Offending line: {line!r}"
+                    )
+                cond_stack.append((cbit, value))
+                continue
+            if cond_stack:
+                raise ValueError(
+                    "Nested QASM3 if blocks cannot be represented: "
+                    "Circuit.c_if tests one classical bit at a time. "
+                    f"Offending line: {line!r}"
+                )
+            _apply_guarded(rest, (cbit, value))
             continue
 
         # Measurement: c[0] = measure q[0];
         meas_match = re.match(r"c\[(\d+)\]\s*=\s*measure\s+q\[(\d+)\];", line)
         if meas_match:
+            if cond_stack:
+                circuit.c_if(*cond_stack[-1])
             circuit.measure(int(meas_match.group(2)), int(meas_match.group(1)))
             continue
 
@@ -147,7 +221,13 @@ def from_qasm3(qasm_str: str, strict: bool = True) -> Any:
         seed_match = re.match(r"measure\s+q;", line)
         if seed_match:
             for q in range(n_qubits):
+                if cond_stack:
+                    circuit.c_if(*cond_stack[-1])
                 circuit.measure(q, q)
+            continue
+
+        if cond_stack:
+            _apply_guarded(line, cond_stack[-1])
             continue
 
         _apply_statement(line.rstrip(";").strip(), circuit, gate_map, _dispatch, strict)

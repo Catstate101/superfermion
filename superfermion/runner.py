@@ -135,7 +135,17 @@ def run(
             f"  Fix: Call sf.run(circuit, params={{{unbound[0]!r}: 0.5, ...}})"
         )
 
-    # 2. Resolve device
+    # 2. Resolve device.  Gate noise needs the density-matrix path; without
+    # this an unqualified `sf.run(c, noise_model=...)` used the statevector
+    # default, warned, and returned noiseless counts.  An explicit
+    # method="statevector" keeps the warn-and-ignore behaviour.
+    if method is None and device in (None, "cpu"):
+        noise_model = kwargs.get("noise_model")
+        if noise_model is not None and getattr(noise_model, "has_noise", False):
+            from superfermion.devices.rust_device import _noise_has_gate_terms
+
+            if _noise_has_gate_terms(noise_model):
+                method = "density_matrix"
     executor = _resolve_device(device, method)
 
     # 3. Hardware-aware compilation

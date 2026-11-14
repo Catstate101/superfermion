@@ -144,12 +144,100 @@ def from_qiskit(qiskit_circuit: Any) -> sf.Circuit:
             f"Supported: {list(gate_map.keys()) + ['unitary']}"
         )
 
+    def import_if_else(operation) -> None:
+        """Import a Qiskit ``if_test`` / ``if_else`` block as ``c_if`` guards.
+
+        Every instruction in the body is guarded individually.  That is
+        equivalent to Qiskit's block semantics as long as the body does not
+        modify the condition bit itself (checked below); an ``else`` branch
+        is imported with the inverted guard.
+        """
+        from qiskit.circuit import Clbit
+
+        condition = getattr(operation, "condition", None)
+        blocks = [
+            block for block in getattr(operation, "blocks", ()) if len(block.data)
+        ]
+        if condition is None or not 1 <= len(blocks) <= 2:
+            raise ValueError(
+                "Only Qiskit if_test/if_else blocks with one or two non-empty "
+                "branches can be converted to Circuit.c_if()"
+            )
+        clbit, value = condition
+        if not isinstance(clbit, Clbit):
+            raise ValueError(
+                "Only single-Clbit if_test conditions can be converted to "
+                "Circuit.c_if(); whole-register comparisons are not supported"
+            )
+        cond_index = qiskit_circuit.find_bit(clbit).index
+        value = int(value)
+
+        for branch_index, block in enumerate(blocks):
+            # else-branch runs when the condition is false.
+            branch_value = value if branch_index == 0 else 1 - value
+            for body in block.data:
+                body_name = body.operation.name.lower()
+                if body_name == "if_else":
+                    raise ValueError(
+                        "Nested if_test/if_else blocks cannot be converted to "
+                        "Circuit.c_if()"
+                    )
+                body_qubits = [
+                    qiskit_circuit.find_bit(q).index for q in body.qubits
+                ]
+                if body_name == "measure":
+                    cbits = [
+                        qiskit_circuit.find_bit(c).index for c in body.clbits
+                    ]
+                    target = cbits[0] if cbits else body_qubits[0]
+                    if target == cond_index:
+                        # Later body instructions would then see a different
+                        # condition value than Qiskit's block semantics.
+                        raise ValueError(
+                            "An if_test/if_else body that measures into its "
+                            "own condition bit cannot be converted to "
+                            "Circuit.c_if()"
+                        )
+                    circuit.c_if(cond_index, branch_value)
+                    circuit.measure(body_qubits[0], target)
+                    continue
+                circuit.c_if(cond_index, branch_value)
+                convert_instruction(body.operation, body_qubits)
+
     for instruction in qiskit_circuit.data:
         gate = instruction.operation
+        name = gate.name.lower()
         qubits = [qiskit_circuit.find_bit(q).index for q in instruction.qubits]
+        if name == "if_else":
+            import_if_else(gate)
+            continue
+        if name == "measure":
+            # Qiskit's clbit target is explicit; Circuit.measure(qubit) would
+            # default it to the qubit index and silently remap c[i] -> c[q].
+            cbits = [qiskit_circuit.find_bit(c).index for c in instruction.clbits]
+            circuit.measure(qubits[0], cbits[0] if cbits else qubits[0])
+            continue
         convert_instruction(gate, qubits)
 
     return circuit
+
+
+def _reject_conditions(circuit: sf.Circuit, exporter: str) -> None:
+    """Raise when a ``c_if`` gate cannot be represented by ``exporter``.
+
+    Formats without classical feed-forward would otherwise emit the gate
+    unconditionally and silently change the circuit's semantics.
+    """
+    circuit._ensure_gates()
+    for gate in circuit._gates:
+        condition = getattr(gate, "condition", None)
+        if condition is not None:
+            raise ValueError(
+                f"{exporter} cannot represent classical conditions: gate "
+                f"'{gate.name}' is guarded by c_if({condition[0]}, "
+                f"{condition[1]}). Use to_qasm3(), which writes OpenQASM 3 "
+                "'if' statements."
+            )
 
 
 def to_qiskit(circuit: sf.Circuit) -> Any:
@@ -171,6 +259,7 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
         'H': 'h', 'X': 'x', 'Y': 'y', 'Z': 'z',
         'S': 's', 'SDG': 'sdg', 'T': 't', 'TDG': 'tdg',
         'SX': 'sx', 'ID': 'id',
+        'CRX': 'crx', 'CRZ': 'crz', 'R1': 'p', 'SXDG': 'sxdg',
         'RX': 'rx', 'RY': 'ry', 'RZ': 'rz',
         'P': 'p', 'U': 'u', 'U3': 'u3',
         'CU': 'cu', 'CU3': 'cu3', 'CP': 'cp',
@@ -185,24 +274,20 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
         'RESET': 'reset',
     }
 
-    for gate in circuit._gates:
-        if gate.name.upper() == "UNITARY" and gate.matrix is not None:
-            from qiskit.circuit.library import UnitaryGate
-            # ``circuit.unitary()`` stores big-endian matrices; Qiskit /
-            # SF state order is little-endian, so bit-reverse on export.
-            matrix = _bit_reverse_matrix(gate.matrix, len(gate.qubits))
-            qc.append(UnitaryGate(matrix), list(gate.qubits))
-            continue
+    from contextlib import nullcontext
 
-        qiskit_name = gate_map.get(gate.name.upper())
-        if qiskit_name is None:
-            raise ValueError(f"Cannot map gate '{gate.name}' to Qiskit")
+    def _condition_scope(gate: Any) -> Any:
+        """Wrap a gate in an ``if_test`` block when ``c_if`` is set."""
+        condition = getattr(gate, "condition", None)
+        if condition is None:
+            return nullcontext()
+        cbit, value = condition
+        # Qiskit dropped ``QuantumCircuit.c_if``; dynamic circuits express
+        # the same guard as ``with qc.if_test((clbit, value)):``.
+        return qc.if_test((qc.clbits[cbit], value))
 
+    def _emit(gate: Any, qiskit_name: str, mapped_qubits: list[int]) -> None:
         method = getattr(qc, qiskit_name)
-        # Qubit labels pass through unchanged: SF and Qiskit share the
-        # little-endian (q0=LSB) state order.
-        mapped_qubits = list(gate.qubits)
-
         if gate.name == "MEASURE":
             cbit = gate.classical_bits[0] if gate.classical_bits else gate.qubits[0]
             method(mapped_qubits[0], cbit)
@@ -217,6 +302,26 @@ def to_qiskit(circuit: sf.Circuit) -> Any:
             method(*gate.params, *mapped_qubits)
         else:
             method(*mapped_qubits)
+
+    for gate in circuit._gates:
+        if gate.name.upper() == "UNITARY" and gate.matrix is not None:
+            from qiskit.circuit.library import UnitaryGate
+            # ``circuit.unitary()`` stores big-endian matrices; Qiskit /
+            # SF state order is little-endian, so bit-reverse on export.
+            matrix = _bit_reverse_matrix(gate.matrix, len(gate.qubits))
+            with _condition_scope(gate):
+                qc.append(UnitaryGate(matrix), list(gate.qubits))
+            continue
+
+        qiskit_name = gate_map.get(gate.name.upper())
+        if qiskit_name is None:
+            raise ValueError(f"Cannot map gate '{gate.name}' to Qiskit")
+
+        # Qubit labels pass through unchanged: SF and Qiskit share the
+        # little-endian (q0=LSB) state order.
+        mapped_qubits = list(gate.qubits)
+        with _condition_scope(gate):
+            _emit(gate, qiskit_name, mapped_qubits)
 
     return qc
 
@@ -236,8 +341,20 @@ def from_pennylane(pennylane_circuit: Any, n_qubits: int = None) -> sf.Circuit:
     except ImportError:
         raise ImportError("PennyLane is required: pip install pennylane")
 
-    # Get the tape from the QNode
-    if hasattr(pennylane_circuit, 'tape'):
+    # Get the tape from the QNode.  A QNode only has a tape after it has been
+    # constructed, so build it first: passing the QNode itself used to fail
+    # with "'QNode' object has no attribute 'operations'".
+    if hasattr(pennylane_circuit, 'construct'):
+        try:
+            pennylane_circuit.construct([], {})
+        except TypeError:
+            pass
+        tape = (
+            getattr(pennylane_circuit, 'tape', None)
+            or getattr(pennylane_circuit, '_tape', None)
+            or pennylane_circuit
+        )
+    elif hasattr(pennylane_circuit, 'tape'):
         tape = pennylane_circuit.tape
     else:
         tape = pennylane_circuit
@@ -256,6 +373,8 @@ def from_pennylane(pennylane_circuit: Any, n_qubits: int = None) -> sf.Circuit:
         'RX': 'rx', 'RY': 'ry', 'RZ': 'rz',
         'PhaseShift': 'p',
         'CNOT': 'cx', 'CY': 'cy', 'CZ': 'cz',
+        'CRX': 'crx', 'CRY': 'cry', 'CRZ': 'crz',
+        'ControlledPhaseShift': 'cp',
         'SWAP': 'swap', 'ISWAP': 'iswap', 'CSWAP': 'cswap',
         'Toffoli': 'ccx',
     }
@@ -350,6 +469,336 @@ def _split_qasm2_statements(qasm_str: str) -> list[str]:
     return statements
 
 
+def _qasm2_fallback_error(message: str) -> ValueError:
+    """Build a fallback error that reports the native rejection first."""
+    reason = getattr(_RUST_QASM_STATE, "reason", None)
+    if reason:
+        return ValueError(f"{reason} (Python fallback: {message})")
+    return ValueError(message)
+
+
+def _parse_qasm2_python(qasm_str: str) -> sf.Circuit:
+    """Pure-Python OpenQASM 2 importer, used when the native parser rejects.
+
+    Mirrors the native parser's register model: declarations form a table
+    ``name -> (offset, size)``, so ``qreg a[1]; qreg b[1]; x b[0];`` is a
+    2-qubit circuit with X on qubit 1.  A whole register broadcasts over its
+    qubits (``h q;`` is one H per qubit; ``cx a, b;`` pairs the registers
+    element-wise), and ``if (c == N)`` lowers to ``Circuit.c_if``.
+    """
+    import re
+
+    from superfermion.circuit import GateRecord as _GateRecord
+
+    qasm_map = {
+        'h': 'h', 'x': 'x', 'y': 'y', 'z': 'z',
+        's': 's', 'sdg': 'sdg', 't': 't', 'tdg': 'tdg',
+        'sx': 'sx',
+        'rx': 'rx', 'ry': 'ry', 'rz': 'rz',
+        'u': 'u', 'u3': 'u', 'u2': 'u',
+        'p': 'p', 'u1': 'p', 'r1': 'p',
+        'cx': 'cx', 'cnot': 'cx',
+        'cz': 'cz',
+        'swap': 'swap',
+        'ccx': 'ccx',
+        'id': 'id', 'u0': 'id',
+        'ch': 'ch', 'crx': 'crx', 'cry': 'cry', 'crz': 'crz',
+        'cu': 'cu', 'cu3': 'cu3', 'cu1': 'cp', 'cp': 'cp',
+        'cy': 'cy', 'iswap': 'iswap', 'cswap': 'cswap',
+        'rxx': 'rxx', 'ryy': 'ryy', 'rzz': 'rzz', 'ecr': 'ecr',
+        'sxdg': 'sxdg',
+    }
+    raw_gate_names = frozenset({'sxdg'})
+
+    qregs: dict[str, tuple[int, int]] = {}
+    cregs: dict[str, tuple[int, int]] = {}
+    n_qubits = 0
+    n_cbits = 0
+    circuit = None
+
+    def resolve(text: str, table: dict, width: int) -> list:
+        """Resolve comma-separated operands to ('idx', i) / ('reg', off, size)."""
+        ops = []
+        for token in text.split(','):
+            token = token.strip()
+            if not token:
+                continue
+            m = re.fullmatch(r'([A-Za-z_]\w*)\s*(?:\[\s*(\d+)\s*\])?', token)
+            if not m:
+                raise _qasm2_fallback_error(f"cannot parse qubit operand {token!r}")
+            name, idx = m.group(1), m.group(2)
+            span = table.get(name)
+            if span is None:
+                raise _qasm2_fallback_error(f"unknown register {name!r}")
+            offset, size = span
+            if idx is None:
+                ops.append(('reg', offset, size))
+            else:
+                i = int(idx)
+                if i >= size:
+                    raise _qasm2_fallback_error(
+                        f"qubit index {i} out of range for register {name!r} "
+                        f"(size {size})"
+                    )
+                absolute = offset + i
+                if absolute >= width:
+                    raise _qasm2_fallback_error(
+                        f"qubit index {absolute} out of range for {width} qubits"
+                    )
+                ops.append(('idx', absolute))
+        if not ops:
+            raise _qasm2_fallback_error("statement names no qubit operand")
+        return ops
+
+    def expand(ops: list, gate_name: str) -> list:
+        """One index list per gate application (whole registers broadcast)."""
+        if all(op[0] == 'idx' for op in ops):
+            return [[op[1] for op in ops]]
+        if any(op[0] == 'idx' for op in ops):
+            raise _qasm2_fallback_error(
+                f"gate {gate_name!r} mixes whole-register and indexed operands"
+            )
+        sizes = {op[2] for op in ops}
+        if len(sizes) != 1:
+            raise _qasm2_fallback_error(
+                f"gate {gate_name!r} operands have different register sizes"
+            )
+        size = sizes.pop()
+        return [[op[1] + k for op in ops] for k in range(size)]
+
+    def apply_gate(gate_name: str, params: list, ops: list, condition=None) -> None:
+        instances = expand(ops, gate_name)
+        sf_name = qasm_map.get(gate_name)
+        if sf_name is None:
+            raise _qasm2_fallback_error(f"cannot map gate {gate_name!r}")
+        method = getattr(circuit, sf_name, None)
+        if method is None and sf_name not in raw_gate_names:
+            raise _qasm2_fallback_error(f"cannot map gate {gate_name!r}")
+        for inst in instances:
+            if len(set(inst)) != len(inst):
+                raise _qasm2_fallback_error(
+                    f"gate {gate_name!r} names a qubit more than once: {inst}"
+                )
+            if method is not None:
+                if condition is not None:
+                    circuit.c_if(*condition)
+                try:
+                    method(*params, *inst)
+                except (TypeError, ValueError) as exc:
+                    raise _qasm2_fallback_error(
+                        f"gate {gate_name!r} cannot take qubit operands {inst}: {exc}"
+                    ) from exc
+            else:
+                circuit._gates.append(_GateRecord(
+                    name=sf_name.upper(),
+                    qubits=list(inst),
+                    params=list(params),
+                    condition=condition,
+                ))
+
+    for line in _split_qasm2_statements(qasm_str):
+        if (
+            line.startswith('//')
+            or line.startswith('OPENQASM')
+            or line.startswith('include')
+        ):
+            continue
+
+        m = re.fullmatch(r'qreg\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;?', line)
+        if m:
+            if circuit is not None:
+                raise _qasm2_fallback_error(
+                    f"qreg declaration after the first instruction: {line!r}"
+                )
+            name, size = m.group(1), int(m.group(2))
+            qregs[name] = (n_qubits, size)
+            n_qubits += size
+            continue
+
+        m = re.fullmatch(r'qubit\s*\[\s*(\d+)\s*\]\s*([A-Za-z_]\w*)\s*;?', line)
+        if m:
+            if circuit is not None:
+                raise _qasm2_fallback_error(
+                    f"qubit declaration after the first instruction: {line!r}"
+                )
+            size, name = int(m.group(1)), m.group(2)
+            qregs[name] = (n_qubits, size)
+            n_qubits += size
+            continue
+
+        m = re.fullmatch(r'creg\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;?', line)
+        if m:
+            if circuit is not None:
+                raise _qasm2_fallback_error(
+                    f"creg declaration after the first instruction: {line!r}"
+                )
+            name, size = m.group(1), int(m.group(2))
+            cregs[name] = (n_cbits, size)
+            n_cbits += size
+            continue
+
+        # A bare barrier has no semantics (to_qasm drops BARRIER too).
+        if line.rstrip(';').strip() == 'barrier':
+            continue
+
+        if circuit is None:
+            if n_qubits == 0:
+                raise _qasm2_fallback_error(
+                    f"instruction before any qreg declaration: {line!r}"
+                )
+            circuit = sf.Circuit(n_qubits, n_cbits=n_cbits or n_qubits)
+
+        # Classical feed-forward.  OpenQASM 2 writes ``if (c == value)`` where
+        # ``c`` names a whole creg whose integer value is compared; the indexed
+        # form ``if (c[i] == value)`` is accepted too.  ``Circuit.c_if`` tests a
+        # single classical bit, so only one-bit conditions can be lowered.
+        cond = re.match(
+            r'if\s*\(\s*([A-Za-z_]\w*)\s*(?:\[\s*(\d+)\s*\])?\s*==\s*(\d+)\s*\)\s*(.+)',
+            line,
+        )
+        condition = None
+        if cond:
+            cname, cidx, cval = cond.group(1), cond.group(2), int(cond.group(3))
+            span = cregs.get(cname)
+            if span is None:
+                raise _qasm2_fallback_error(
+                    f"if statement names unknown classical register {cname!r}"
+                )
+            offset, size = span
+            if cidx is None:
+                if size != 1:
+                    raise _qasm2_fallback_error(
+                        f"if statement compares the whole {size}-bit register "
+                        f"{cname!r}, but Circuit.c_if only tests one bit"
+                    )
+                cidx = 0
+            else:
+                cidx = int(cidx)
+                if cidx >= size:
+                    raise _qasm2_fallback_error(
+                        f"if statement names classical bit {cidx} outside "
+                        f"register {cname!r} (size {size})"
+                    )
+            if cval not in (0, 1):
+                raise _qasm2_fallback_error(
+                    f"if statement compares {cname}[{cidx}] with {cval}, "
+                    f"but Circuit.c_if only tests 0 or 1"
+                )
+            condition = (offset + cidx, cval)
+            line = cond.group(4).strip()
+
+        if line.startswith('measure'):
+            mm = re.match(r'measure\s+(.+?)\s*(?:->\s*(.+?))?\s*;?$', line)
+            if not mm:
+                raise _qasm2_fallback_error(f"cannot parse measure: {line!r}")
+            q_rows = expand(resolve(mm.group(1), qregs, n_qubits), 'measure')
+            c_text = (mm.group(2) or '').strip()
+            c_rows = None
+            if c_text:
+                width = n_cbits or n_qubits
+                c_rows = expand(resolve(c_text, cregs, width), 'measure')
+            if c_rows is None:
+                pairs = [(q, q) for (q,) in q_rows]
+            elif len(c_rows) == len(q_rows):
+                pairs = [(q, c) for (q,), (c,) in zip(q_rows, c_rows)]
+            else:
+                raise _qasm2_fallback_error(
+                    f"measure qubit and classical operands have different sizes: {line!r}"
+                )
+            for q, c in pairs:
+                # `if(c==1) measure q[0] -> c[0];` guards the measurement
+                # itself (QASM3 / Qiskit if_test agree on these semantics).
+                if condition is not None:
+                    circuit.c_if(*condition)
+                circuit.measure(q, c)
+            continue
+
+        if line.startswith('barrier'):
+            if condition is not None:
+                # The native parser and Qiskit's QASM2 importer both reject a
+                # guarded barrier: OpenQASM 2 allows ``if`` only on gates,
+                # measurements and resets.
+                raise _qasm2_fallback_error("a barrier cannot be conditioned")
+            rest = line[len('barrier'):].strip().rstrip(';').strip()
+            if rest:
+                indices = []
+                for op in resolve(rest, qregs, n_qubits):
+                    if op[0] == 'idx':
+                        indices.append(op[1])
+                    else:
+                        indices.extend(range(op[1], op[1] + op[2]))
+                circuit.barrier(*indices)
+            continue
+
+        if line.startswith('reset'):
+            rest = line[len('reset'):].strip().rstrip(';').strip()
+            for inst in expand(resolve(rest, qregs, n_qubits), 'reset'):
+                # ``reset`` is a quantum operation, so ``if`` applies to it
+                # (Qiskit imports it as an IfElseOp).  This used to bypass the
+                # condition and silently make the reset unconditional.
+                if condition is not None:
+                    circuit.c_if(*condition)
+                circuit.reset(inst[0])
+            continue
+
+        m = re.match(r'([A-Za-z_]\w*)(?:\(([^)]*)\))?\s+(.+?)\s*;?$', line)
+        if not m:
+            raise _qasm2_fallback_error(f"cannot parse statement: {line!r}")
+        gate_name = m.group(1).lower()
+        params_str = m.group(2)
+        qubits_str = m.group(3)
+
+        params = []
+        if params_str:
+            for p in params_str.split(','):
+                p = p.strip()
+                try:
+                    as_int = int(p)
+                    if abs(as_int) > 2 ** 53:
+                        params.append(as_int)
+                    else:
+                        params.append(float(p))
+                except ValueError:
+                    try:
+                        params.append(float(p))
+                    except ValueError:
+                        if 'pi' in p:
+                            import math
+
+                            try:
+                                params.append(
+                                    eval(p.replace('pi', str(math.pi)),
+                                         {'__builtins__': {}}, {})
+                                )
+                            except Exception as exc:
+                                raise _qasm2_fallback_error(
+                                    f"cannot evaluate parameter {p!r} in {line!r}"
+                                ) from exc
+                        else:
+                            params.append(sf.param(p))
+
+        if gate_name == 'u2':
+            import math
+
+            params = [math.pi / 2] + params
+        if gate_name == 'u0':
+            # u0(gamma) is the idle gate; the native parser and the QASM
+            # definition both reduce it to U(0, 0, 0).
+            gate_name = 'u'
+            params = [0.0, 0.0, 0.0]
+
+        apply_gate(
+            gate_name, params, resolve(qubits_str, qregs, n_qubits), condition
+        )
+
+    if circuit is None:
+        if n_qubits == 0:
+            raise _qasm2_fallback_error("no qubit declaration found")
+        # A program may contain declarations only; return the empty circuit.
+        circuit = sf.Circuit(n_qubits, n_cbits=n_cbits or n_qubits)
+    return circuit
+
+
 def from_qasm(qasm_str: str) -> sf.Circuit:
     """Parse an OpenQASM 2.0/3.0 string into a Superfermion Circuit.
 
@@ -420,8 +869,9 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
             raise
         if dag is not None:
             try:
-                from superfermion.circuit import GateRecord as _GateRecord
-                records = dag.to_gate_records()
+                # Conditioned records keep the ``if (creg == value)`` guard
+                # the native parser now attaches; the plain export drops it.
+                records = dag.to_gate_records_with_conditions()
                 circ = sf.Circuit(dag.n_qubits(), n_cbits=dag.n_cbits())
                 # Single-pass bulk append: avoids intermediate list + double .upper()
                 circ.extend_raw_from_records(records)
@@ -442,228 +892,7 @@ def from_qasm(qasm_str: str) -> sf.Circuit:
 
         return from_qasm3(qasm_str)
 
-    import re
-
-    from superfermion.circuit import GateRecord as _GateRecord
-    lines = _split_qasm2_statements(qasm_str)
-    # Carried into fallback errors so a gate this parser cannot map still tells
-    # the caller why the native parser was not used.
-    _native_hint = (
-        f" (native parser: {_RUST_QASM_STATE.reason})"
-        if _RUST_QASM_STATE.reason else ""
-    )
-
-    # Gate-name → SF method mapping (hoisted outside loop for speed)
-    qasm_map = {
-        'h': 'h', 'x': 'x', 'y': 'y', 'z': 'z',
-        's': 's', 'sdg': 'sdg', 't': 't', 'tdg': 'tdg',
-        'sx': 'sx',
-        'rx': 'rx', 'ry': 'ry', 'rz': 'rz',
-        'u': 'u', 'u3': 'u',
-        'u2': 'u',  # u2(phi, lam) == u3(pi/2, phi, lam); params prepended below
-        'p': 'p', 'u1': 'p', 'r1': 'p',
-        'cx': 'cx', 'cnot': 'cx',
-        'cz': 'cz',
-        'swap': 'swap',
-        'ccx': 'ccx',
-        # Additive: the qelib1 names ``to_qasm`` now emits.  Without these the
-        # fallback rejected circuits the native parser accepts (and the export
-        # it was handed).  ``cu1(lam)`` is diag(1,1,1,e^{ilam}) == cp(lam);
-        # ``u0`` is the identity.
-        'id': 'id', 'u0': 'id',
-        'ch': 'ch', 'crx': 'crx', 'cry': 'cry', 'crz': 'crz',
-        'cu': 'cu', 'cu3': 'cu3', 'cu1': 'cp', 'cp': 'cp',
-        'cy': 'cy', 'iswap': 'iswap', 'cswap': 'cswap',
-        'rxx': 'rxx', 'ryy': 'ryy', 'rzz': 'rzz', 'ecr': 'ecr',
-        'sxdg': 'sxdg',
-    }
-    # Names with no ``Circuit`` method: appended as a raw GateRecord (the IR
-    # knows them even though there is no convenience builder).
-    _raw_gate_names = frozenset({"sxdg"})
-
-    n_qubits = None
-    circuit = None
-
-    for line in lines:
-        # Skip comments and headers
-        if line.startswith('//') or line.startswith('OPENQASM') or line.startswith('include'):
-            continue
-
-        # qubit declaration
-        if line.startswith('qubit[') or line.startswith('qreg'):
-            # qubit[N] q; OR qreg q[N];
-            m = re.search(r'\[(\d+)\]', line)
-            if not m:
-                raise ValueError(
-                    f"Could not parse QASM: malformed qubit declaration: {line!r}"
-                    f"{_native_hint}"
-                )
-            n_qubits = int(m.group(1))
-            circuit = sf.Circuit(n_qubits)
-            continue
-
-        # Classical register declarations carry no quantum operation.
-        if line.startswith('creg'):
-            continue
-
-        # A bare barrier has no semantics (to_qasm drops BARRIER too).
-        if line.rstrip(';').strip() == 'barrier':
-            continue
-
-        if circuit is None:
-            raise ValueError(
-                f"Could not parse QASM: instruction before any qreg declaration: {line!r}"
-                f"{_native_hint}"
-            )
-
-        # Gate instructions
-        # Format: gate_name q[i], q[j]; OR gate_name(param) q[i];
-        m = re.match(r'(\w+)(?:\(([^)]*)\))?\s+(.+);', line)
-        if m:
-            gate_name = m.group(1).lower()
-            params_str = m.group(2)
-            qubits_str = m.group(3)
-
-            if gate_name == 'barrier':
-                continue
-
-            if gate_name == 'measure':
-                # measure q[i] -> c[j];  (c[j] optional)
-                q_part, _, c_part = qubits_str.partition('->')
-                qm = re.search(r'\[(\d+)\]', q_part)
-                if not qm:
-                    # Whole-register form: `measure q -> c;` measures every
-                    # qubit into the classical bit of the same index.  QASM 2
-                    # allows it and random generators emit it.
-                    if q_part.strip() and c_part.strip():
-                        for i in range(n_qubits):
-                            circuit.measure(i, i)
-                        continue
-                    raise ValueError(
-                        f"Could not parse measure target: {line!r}{_native_hint}"
-                    )
-                q_idx = int(qm.group(1))
-                if q_idx >= n_qubits:
-                    raise ValueError(
-                        f"measure names qubit {q_idx} but the circuit has "
-                        f"{n_qubits} qubits{_native_hint}"
-                    )
-                cm = re.search(r'\[(\d+)\]', c_part)
-                circuit.measure(q_idx, int(cm.group(1)) if cm else q_idx)
-                continue
-
-            # Parse qubits
-            qubit_indices = [int(x) for x in re.findall(r'\[(\d+)\]', qubits_str)]
-            if any(i >= n_qubits for i in qubit_indices):
-                raise ValueError(
-                    f"gate {gate_name!r} names a qubit outside the "
-                    f"{n_qubits}-qubit circuit: {line!r}{_native_hint}"
-                )
-
-            # Parse params
-            params = []
-            if params_str:
-                for p in params_str.split(','):
-                    p = p.strip()
-                    # Handle big integers (> 2^53) that float() would lose precision on.
-                    # Try int first, then float, then symbolic.
-                    try:
-                        as_int = int(p)
-                        if abs(as_int) > 2**53:
-                            params.append(as_int)  # preserve as Python int
-                        else:
-                            params.append(float(p))  # small int → float
-                    except ValueError:
-                        try:
-                            params.append(float(p))
-                        except ValueError:
-                            if 'pi' in p:
-                                import math
-                                # ``eval`` on the caller's text: no builtins, and
-                                # a failure now reports the parameter instead of
-                                # escaping as a bare SyntaxError (the native
-                                # parser rejects these angles and hands them
-                                # here, so this is a reachable path).
-                                try:
-                                    params.append(
-                                        eval(p.replace('pi', str(math.pi)),
-                                             {'__builtins__': {}}, {})
-                                    )
-                                except Exception as exc:
-                                    raise ValueError(
-                                        f"Could not evaluate QASM parameter {p!r} "
-                                        f"in {line!r}{_native_hint}"
-                                    ) from exc
-                            else:
-                                params.append(sf.param(p))
-
-            # Map gate (qasm_map hoisted outside loop)
-
-            # SF and Qiskit/OpenQASM share the little-endian (q0=LSB) order,
-            # so qubit labels pass through unchanged -- matching the Rust fast
-            # path above and to_qasm below. Reversing here made this fallback
-            # disagree with both and broke the SF->QASM->SF round-trip for
-            # asymmetric circuits (the old MSB-first comment was wrong).
-            mapped_indices = list(qubit_indices)
-
-            sf_name = qasm_map.get(gate_name)
-            if gate_name == 'u2':
-                # u2(phi, lam) is u3(pi/2, phi, lam).
-                import math
-                params = [math.pi / 2] + params
-            if gate_name == 'u0':
-                # u0(gamma) is the identity; its angle is padding and the
-                # builder takes only a qubit, so passing it raised TypeError.
-                params = []
-            if sf_name is not None and (
-                hasattr(circuit, sf_name) or sf_name in _raw_gate_names
-            ):
-                if hasattr(circuit, sf_name):
-                    # Go through the builder instead of appending a record:
-                    # several methods store a different record name than the
-                    # method (`ch`, `cry`, `cu`, `cu3` all emit CU), so a raw
-                    # record named after the method produced a circuit that
-                    # `to_unitary()` could not load ("Unknown gate: 'ch'").
-                    try:
-                        getattr(circuit, sf_name)(*params, *mapped_indices)
-                    except (TypeError, ValueError) as exc:
-                        # The builder is the authority on arity and on repeated
-                        # operands.  Re-raise with the gate and the operand list
-                        # so a malformed line reads as a QASM problem rather
-                        # than as a TypeError about argument counts.
-                        raise ValueError(
-                            f"gate {gate_name!r} cannot take qubit operands "
-                            f"{mapped_indices}: {exc}{_native_hint}"
-                        ) from exc
-                else:
-                    # No builder for this name: append the record directly
-                    # (qubits already verified by the parser above).
-                    if len(set(mapped_indices)) != len(mapped_indices):
-                        raise ValueError(
-                            f"gate {gate_name!r} names a qubit more than once: "
-                            f"{mapped_indices}{_native_hint}"
-                        )
-                    circuit._gates.append(_GateRecord(
-                        name=sf_name.upper(),
-                        qubits=mapped_indices,
-                        params=params,
-                    ))
-            else:
-                # Previously this branch silently dropped the gate, so the
-                # returned circuit was missing operations with no signal.
-                raise ValueError(
-                    f"Pure-Python QASM fallback cannot map gate {gate_name!r} "
-                    f"in {line!r}{_native_hint}"
-                )
-        else:
-            raise ValueError(f"Could not parse QASM statement: {line!r}{_native_hint}")
-
-    if circuit is None:
-        raise ValueError(
-            f"Could not parse QASM: no qubit declaration found{_native_hint}"
-        )
-
-    return circuit
+    return _parse_qasm2_python(qasm_str)
 
 
 def to_ionq(circuit: sf.Circuit) -> list[dict[str, Any]]:
@@ -676,6 +905,7 @@ def to_ionq(circuit: sf.Circuit) -> list[dict[str, Any]]:
         List of gate dictionaries as required by IonQ API.
     """
     ionq_gates = []
+    _reject_conditions(circuit, "to_ionq")
 
     # Mapper for Superfermion gate names to IonQ gate names
     # Note: IonQ gate names are lowercase (e.g., 'h', 'x', 'cnot')
@@ -853,6 +1083,8 @@ def to_braket(circuit: sf.Circuit) -> Any:
     Requires: pip install amazon-braket-sdk
     """
     from superfermion.devices.braket import _to_braket
+
+    _reject_conditions(circuit, "to_braket")
     return _to_braket(circuit)
 
 
@@ -886,6 +1118,9 @@ def to_qasm(circuit: sf.Circuit) -> str:
         'ID': 'id', 'R1': 'u1', 'SXDG': 'sxdg',
         'CRX': 'crx', 'CRY': 'cry', 'CRZ': 'crz', 'CH': 'ch',
         'CU': 'cu', 'CU3': 'cu3', 'ECR': 'ecr',
+        # `barrier` is a native OpenQASM 2.0 statement; it used to be dropped
+        # with the (incorrect) claim that the format has no equivalent.
+        'BARRIER': 'barrier',
     }
 
     circuit._ensure_gates()  # no-op for default Python storage
@@ -893,20 +1128,53 @@ def to_qasm(circuit: sf.Circuit) -> str:
     for gate in circuit._gates:
         qasm_name = gate_map.get(gate.name.upper())
         if not qasm_name:
-            # BARRIER has no OpenQASM 2.0 equivalent and is safe to omit.
-            # Any *other* unmapped gate must not be silently dropped --
-            # that would emit a circuit that is missing operations. Raise
-            # instead, matching to_qiskit / to_cirq / to_ionq.
-            if gate.name.upper() == "BARRIER":
-                continue
+            # An unmapped gate must not be silently dropped -- that would
+            # emit a circuit that is missing operations. Raise instead,
+            # matching to_qiskit / to_cirq / to_ionq.
             raise ValueError(
                 f"Cannot map gate '{gate.name}' to OpenQASM 2.0 "
                 f"(supported names: {sorted(set(gate_map.values()))})"
             )
 
+        # OpenQASM 2 applies `if(c==value)` to the *whole* classical
+        # register, so a single-bit c_if is only expressible when the
+        # circuit declares exactly one classical bit (which is how Qiskit
+        # exports `if(c==1) measure q[0] -> c[0];`).  Wider registers have
+        # no OpenQASM 2 spelling; to_qasm3() writes the per-bit form.
+        guard = ""
+        if gate.condition is not None:
+            cbit, value = gate.condition
+            if circuit.n_cbits != 1:
+                raise ValueError(
+                    "Cannot map a conditional gate to OpenQASM 2.0: "
+                    "`if(c==value)` compares the whole classical register, "
+                    f"but Circuit.c_if tests c[{cbit}] and this circuit has "
+                    f"{circuit.n_cbits} classical bits. Use to_qasm3(), "
+                    f"which writes 'if (c[{cbit}] == {value})'."
+                )
+            guard = f"if(c=={value}) "
+
+        def emit(statements: list[str], _guard: str = guard) -> None:
+            qasm.extend(_guard + stmt for stmt in statements)
+
         if gate.name == "MEASURE":
             cbit = gate.classical_bits[0] if gate.classical_bits else gate.qubits[0]
-            qasm.append(f"measure q[{gate.qubits[0]}] -> c[{cbit}];")
+            emit([f"measure q[{gate.qubits[0]}] -> c[{cbit}];"])
+            continue
+
+        if gate.name.upper() == "BARRIER":
+            if gate.condition is not None:
+                # OpenQASM 2 allows `if` only on gates, measurements and
+                # resets; Qiskit's importer rejects `if(c==1) barrier ...`.
+                # Both SF parsers reject a guarded barrier for the same
+                # reason.  QASM3 has no such restriction.
+                raise ValueError(
+                    "Cannot map a conditional barrier to OpenQASM 2.0: "
+                    "`if` may only guard gates, measurements and resets. "
+                    "Use to_qasm3(), which writes 'if (...) barrier ...;'."
+                )
+            qubits_str = ", ".join(f"q[{i}]" for i in gate.qubits)
+            emit([f"barrier {qubits_str};"])
             continue
 
         # Handle Parameters for U Gates
@@ -922,7 +1190,7 @@ def to_qasm(circuit: sf.Circuit) -> str:
         #   U3(0,0,pi/2)(0) . U3(pi/2,-pi/2,pi/2)(1) . CX(0,1) . U3(pi,0,pi)(0)
         if name_upper == "ECR":
             q0, q1 = gate.qubits[0], gate.qubits[1]
-            qasm.extend([
+            emit([
                 f"u3(0, 0, pi/2) q[{q0}];",
                 f"u3(pi/2, -pi/2, pi/2) q[{q1}];",
                 f"cx q[{q0}], q[{q1}];",
@@ -933,7 +1201,7 @@ def to_qasm(circuit: sf.Circuit) -> str:
         if name_upper in ("RXX", "RYY", "RZZ", "ISWAP"):
             q0, q1 = gate.qubits[0], gate.qubits[1]
             if name_upper == "ISWAP":
-                qasm.extend([
+                emit([
                     f"u3(0, 0, 1.57079632679) q[{q0}];",
                     f"u3(1.57079632679, 0, pi) q[{q0}];",
                     f"u3(0, 0, 1.57079632679) q[{q1}];",
@@ -944,23 +1212,23 @@ def to_qasm(circuit: sf.Circuit) -> str:
                 continue
             theta = gate.params[0]
             if name_upper == "RXX":
-                prefix = [f"h q[{q0}];", f"h q[{q1}];"]
-                suffix = [f"h q[{q0}];", f"h q[{q1}];"]
+                pre = [f"h q[{q0}];", f"h q[{q1}];"]
+                suf = [f"h q[{q0}];", f"h q[{q1}];"]
             elif name_upper == "RYY":
                 # Y = S X S^dagger, so conjugating RXX gives RYY exactly.
-                prefix = [f"s q[{q0}];", f"s q[{q1}];",
-                          f"h q[{q0}];", f"h q[{q1}];"]
-                suffix = [f"h q[{q0}];", f"h q[{q1}];",
-                          f"sdg q[{q0}];", f"sdg q[{q1}];"]
+                pre = [f"s q[{q0}];", f"s q[{q1}];",
+                       f"h q[{q0}];", f"h q[{q1}];"]
+                suf = [f"h q[{q0}];", f"h q[{q1}];",
+                       f"sdg q[{q0}];", f"sdg q[{q1}];"]
             else:
-                prefix, suffix = [], []
-            qasm.extend(prefix)
-            qasm.extend([
+                pre, suf = [], []
+            emit(pre)
+            emit([
                 f"cx q[{q0}], q[{q1}];",
                 f"u1({theta}) q[{q1}];",
                 f"cx q[{q0}], q[{q1}];",
             ])
-            qasm.extend(suffix)
+            emit(suf)
             continue
 
         if qasm_name == 'u1':
@@ -1003,7 +1271,7 @@ def to_qasm(circuit: sf.Circuit) -> str:
                 )
 
         qubits_str = ", ".join([f"q[{i}]" for i in gate.qubits])
-        qasm.append(f"{qasm_name}{params_str} {qubits_str};")
+        emit([f"{qasm_name}{params_str} {qubits_str};"])
 
     return "\n".join(qasm)
 
@@ -1161,6 +1429,7 @@ def to_cirq(circuit: sf.Circuit) -> Any:
     }
 
     operations = []
+    _reject_conditions(circuit, "to_cirq")
 
     circuit._ensure_gates()  # no-op for default Python storage
 
@@ -1235,6 +1504,7 @@ def to_pennylane(circuit: sf.Circuit) -> Any:
     }
 
     # Store circuit data
+    _reject_conditions(circuit, "to_pennylane")
     circuit._ensure_gates()  # no-op for default Python storage
     n_qubits = circuit.n_qubits
     gates = list(circuit._gates)
@@ -1324,6 +1594,7 @@ def to_stim(circuit: sf.Circuit):
 
     lines = []
     record_cbits = []
+    _reject_conditions(circuit, "to_stim")
     for gate in circuit.to_gate_list():
         name = str(gate["name"]).upper()
         qubits = [int(q) for q in gate["qubits"]]

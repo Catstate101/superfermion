@@ -131,6 +131,38 @@ def compile(
             )
         target = resolved
 
+    # The Rust optimizer is unitary-only: every pass rewrites gates and would
+    # silently drop each c_if guard, rewrite a RESET into an X-like gate and
+    # mis-order a mid-circuit MEASURE (a terminal measurement survives and is
+    # safe).  Refuse loudly instead of returning a silently wrong circuit.
+    # ``level=0`` with no target already returned above, so a true no-op
+    # compile still works.
+    circuit._ensure_gates()
+    gates = circuit._gates
+    reasons: list[str] = []
+    for i, gate in enumerate(gates):
+        name = gate.name.upper()
+        if gate.condition is not None:
+            reasons.append(f"conditioned {gate.name}")
+        elif name == "RESET":
+            reasons.append("RESET")
+        elif name == "MEASURE":
+            qubit = gate.qubits[0]
+            if any(qubit in later.qubits for later in gates[i + 1:]):
+                reasons.append(f"non-terminal MEASURE on q[{qubit}]")
+    if reasons:
+        unique = list(dict.fromkeys(reasons))
+        shown = ", ".join(unique[:5]) + ("..." if len(unique) > 5 else "")
+        raise ValueError(
+            f"compile() does not support dynamic circuits yet ({shown}): "
+            "classical feed-forward (c_if), RESET and mid-circuit "
+            "measurement are not representable by the unitary-only Rust "
+            "optimizer, which would silently drop or rewrite them.\n"
+            "  Fix: simulate without compile/target "
+            "(sf.run(circuit, shots=...)), or export the dynamic circuit "
+            "with to_qasm3()/to_qiskit() instead of compiling it"
+        )
+
     # Rust compilation evaluates parameters, which requires concrete
     # values. Symbolic (unbound) parameters must not reach the Rust
     # pipeline - it panics on them (PanicException, SUP-19). Reject up

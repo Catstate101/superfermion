@@ -124,6 +124,16 @@ except RuntimeError as exc:
 0 or 1, a condition cannot precede `measure()`/`unitary()`/bulk
 extension, and conditions cannot be stacked (apply one gate per `c_if`).
 
+## Compilation and export
+
+`sf.compile()` and `sf.run(..., target="...")` are unitary-only and refuse a
+dynamic circuit with a `ValueError` naming the offending gates (`conditioned
+X`, `RESET`, mid-circuit `MEASURE`). Run dynamic programs with
+`sf.run(..., shots=N)` instead, or export them with `to_qasm3()` /
+`to_qiskit()`, which keep the guards. `Circuit.to_unitary()` refuses the same
+shapes; `to_ir().to_unitary()` remains the raw IR path for callers that know
+the circuit is unitary.
+
 ## Surface formats
 
 Conditions survive every surface format: `to_gate_list()` adds a

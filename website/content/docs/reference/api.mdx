@@ -89,7 +89,7 @@ than dropping the gate.
 | `.to_ir()` | `QuantumDAG` | Export to Rust IR |
 | `.to_qasm3()` | `str` | Export to OpenQASM 3.0 |
 | `.to_json()` | `str` | Export to JSON |
-| `.to_unitary()` | `ndarray` | Unitary matrix (exponential cost); little-endian, qubit 0 = LSB |
+| `.to_unitary()` | `ndarray` | Unitary matrix (exponential cost); little-endian, qubit 0 = LSB. Raises for `MEASURE`/`RESET`/`c_if` — dynamic circuits have no unitary |
 | `.to_gate_list()` | `list` | Export as gate list |
 | `.draw(ascii_only=None)` | `str` | Text diagram; auto-ASCII when the stream cannot encode the box glyphs |
 | `.count_ops()` | `dict` | Count gates by type |
@@ -421,6 +421,12 @@ compiled = sf.compile(qc, level=2, target="ibm_eagle", twirl_seed=7)
 
 Compilation preserves the input unitary up to a global phase; compare with
 `abs(trace(A.conj().T @ B)) / d` rather than a raw elementwise difference.
+
+Dynamic circuits are refused: `c_if` guards, `RESET` and non-terminal
+measurements raise `ValueError`, because the Rust optimizer is unitary-only and
+would drop or rewrite them. A trailing measurement block still compiles with
+its `measure(q, cbit)` mapping. Run dynamic programs with `sf.run(...,
+shots=N)`, or export them with `to_qasm3()` / `to_qiskit()`.
 
 ### Optimization Levels
 
@@ -898,7 +904,7 @@ sf.Circuit(n)                     Circuit builder
   .n_parameters -> int            Number of unbound parameters
   .parameters -> list[str]        Parameter names
   .to_qasm3() -> str              Export to OpenQASM 3.0
-  .to_unitary() -> ndarray        Export to unitary matrix (qubit 0 = LSB)
+  .to_unitary() -> ndarray        Export to unitary matrix (unitary circuits only; qubit 0 = LSB)
   .to_ir() -> QuantumDAG          Export to Rust IR
   .to_json() -> str               Export to JSON
   .to_gate_list() -> list         Export to gate list
