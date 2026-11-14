@@ -110,6 +110,7 @@ result = sf.run(qc, method="density_matrix", noise_model=noise, shots=0)
 Key and layout conventions:
 
 - `counts` / `probabilities` keys are **little-endian** — qubit `q` is bit `q` of `int(key, 2)` — identical to `statevector`, `mps` and the default sampling path (`x(2)` on 3 qubits reports `"100"`).
+- **A lossless permutation of measurements is keyed by classical bit.** When every qubit is measured exactly once, each into a distinct classical bit, on a circuit with `n_cbits == n_qubits` and no gate after the first measurement, `counts` and `probabilities` switch to classical-register order: `"10"` means `c[1] = 1, c[0] = 0`, `result.metadata["counts_keyed_by"]` is `"classical_bits"`, and `result.metadata["qubit_char_index"]` maps each qubit to its character position so `result.expectation` still reads the right bit. A partial measurement, a qubit measured twice, two qubits into one classical bit, or a gate after a measurement leaves the keys qubit-indexed and adds neither metadata entry; hardware adapters return provider keys unchanged and never re-key.
 - `result.metadata["density_matrix"]` is a 2-D array in **big-endian** order (qubit 0 = most significant): for `x(0)` on 2 qubits the weight sits at `rho[2, 2]`.
 - `sf.State.numpy()` returns the density matrix as a flat **little-endian** array (length 4^n); reshape to `(2**n, 2**n)` to read the matrix (the bit-reversed image of the metadata rho).
 
@@ -257,6 +258,6 @@ except RuntimeError as e:
 ## Bit Order & Conventions
 
 - **Statevectors are little-endian**: qubit `q` lives at bit position `q` of the amplitude index, so `state.numpy()[3]` is the amplitude of `|q0=1, q1=1⟩`.
-- **Bitstring keys are q0-last**: in `counts` and `probabilities`, `"001"` means qubit 0 is `|1⟩` and qubits 1, 2 are `|0⟩`. This matches `format(index, f"0{n}b")` for the little-endian amplitude index.
+- **Bitstring keys are q0-last**: in `counts` and `probabilities`, `"001"` means qubit 0 is `|1⟩` and qubits 1, 2 are `|0⟩`. This matches `format(index, f"0{n}b")` for the little-endian amplitude index. When the measurements are a lossless permutation onto the classical register, the keys are classical-bit ordered instead; see Key and layout conventions above.
 - **Observable labels are q0-leftmost**: in `SparsePauliOp.from_string("ZI")`, the first character acts on qubit 0 — `"ZI"` is `Z⊗I` (Z on qubit 0).
 - `counts`, `probabilities`, and `state.numpy()` all agree with each other and with the expectation-value paths (`sf.expval`, `state.expectation`, adjoint gradients).
