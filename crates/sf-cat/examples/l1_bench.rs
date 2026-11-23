@@ -328,6 +328,34 @@ fn run_adj(job: &serde_json::Value) -> serde_json::Value {
         .map(|v| (v * 1e6).round() / 1e6)
         .collect();
 
+    // ── Paired phase: alternate the two lanes inside every repetition ──
+    //
+    // This host's medians move by ~30% between processes (thermal, page cache,
+    // scheduler), which is larger than any kernel difference the campaign is
+    // chasing -- so a ratio taken from two separate runs, or from two phases of
+    // one run, is not evidence.  Alternating the lanes per repetition makes
+    // drift common-mode: whatever slows cat slows sf_ir in the same repetition,
+    // and the paired ratio is the drift-free quantity.  `ratio_cat_over_ir`
+    // below 1 means cat is faster; `cat`/`sf_ir` above keep their old meaning
+    // and are NOT cross-process comparable.
+    let mut ratios: Vec<f64> = Vec::new();
+    if job["paired"].as_bool().unwrap_or(false) {
+        for _ in 0..reps {
+            let t = std::time::Instant::now();
+            let _ = prog.grad(&theta, &terms).expect("cat grad");
+            let tc = t.elapsed().as_secs_f64() * 1e3;
+            let t = std::time::Instant::now();
+            let _ = sf_ir::adjoint::adjoint_grad(&dag, &terms, &values).expect("sf_ir adj");
+            let ti = t.elapsed().as_secs_f64() * 1e3;
+            ratios.push(tc / ti);
+        }
+    }
+    let paired_median = if ratios.is_empty() {
+        f64::NAN
+    } else {
+        median_ms(ratios.clone())
+    };
+
     serde_json::json!({
         "mode": "adj",
         "n": n,
@@ -357,6 +385,14 @@ fn run_adj(job: &serde_json::Value) -> serde_json::Value {
         "grad_norm": grad_norm,
         "grad_head": grad_head,
         "grad": g_cat,
+        "paired": if ratios.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({
+                "ratio_cat_over_ir": ratios,
+                "median": paired_median,
+            })
+        },
     })
 }
 

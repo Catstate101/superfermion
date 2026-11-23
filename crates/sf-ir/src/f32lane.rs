@@ -1349,7 +1349,87 @@ pub fn simulate_f32(dag: &QuantumDAG) -> Vec<Complex32> {
                 &[c32(d[0]), c32(d[1]), c32(d[2]), c32(d[3])],
                 use_par,
             ),
+            // Plain per-entry multiply: the 3q diagonal has no scatter, so the
+            // f32 lane can walk it directly instead of mirroring the
+            // table-based f64 kernel.
+            SimInst::Diag3 { q1, q2, q3, d } => {
+                let d3: [Complex32; 8] = [
+                    c32(d[0]),
+                    c32(d[1]),
+                    c32(d[2]),
+                    c32(d[3]),
+                    c32(d[4]),
+                    c32(d[5]),
+                    c32(d[6]),
+                    c32(d[7]),
+                ];
+                let (m1, m2, m3) = (1usize << q1, 1usize << q2, 1usize << q3);
+                let body = |base: usize, s: &mut [Complex32]| {
+                    for (j, z) in s.iter_mut().enumerate() {
+                        let a = base + j;
+                        let i = (((a & m1) != 0) as usize) << 2
+                            | (((a & m2) != 0) as usize) << 1
+                            | (((a & m3) != 0) as usize);
+                        *z *= d3[i];
+                    }
+                };
+                if use_par {
+                    let chunk = (state.len() / 16).max(1024);
+                    use rayon::prelude::*;
+                    state
+                        .par_chunks_mut(chunk)
+                        .enumerate()
+                        .for_each(|(c, s)| body(c * chunk, s));
+                } else {
+                    body(0, &mut state);
+                }
+            }
             SimInst::PhaseRun { plan } => apply_phase(&mut state, n, plan, use_par),
+            // Sequential group walk: the other arms split by slice chunk, but a
+            // strided 8-group cannot straddle a split, and the f32 lane is a
+            // precision A/B path where the parallel walk is not worth it.
+            SimInst::C2Q { c, q1, q2, m0, m1 } => {
+                let (cc, qa, qb) = (*c, *q1, *q2);
+                let mut w = [[[Complex32::new(0.0, 0.0); 4]; 4]; 2];
+                for (h, m) in [m0, m1].iter().enumerate() {
+                    for (r, row) in m.iter().enumerate() {
+                        for (ci, z) in row.iter().enumerate() {
+                            w[h][r][ci] = c32(*z);
+                        }
+                    }
+                }
+                let mut masks = [1usize << cc, 1usize << qa, 1usize << qb];
+                masks.sort_unstable();
+                let mut offs = [0usize; 8];
+                for (s, slot) in offs.iter_mut().enumerate() {
+                    *slot = (((s >> 2) & 1) << cc) | (((s >> 1) & 1) << qa) | ((s & 1) << qb);
+                }
+                for g in 0..state.len() >> 3 {
+                    let base = crate::dag::deposit_bits_masked(g, &masks);
+                    let mut v = [Complex32::new(0.0, 0.0); 8];
+                    for (s, slot) in v.iter_mut().enumerate() {
+                        *slot = state[base | offs[s]];
+                    }
+                    for h in 0..2 {
+                        let b0 = h << 2;
+                        let x = [v[b0], v[b0 + 1], v[b0 + 2], v[b0 + 3]];
+                        for r in 0..4 {
+                            let row = w[h][r];
+                            v[b0 + r] =
+                                row[0] * x[0] + row[1] * x[1] + row[2] * x[2] + row[3] * x[3];
+                        }
+                    }
+                    for (s, val) in v.iter().enumerate() {
+                        state[base | offs[s]] = *val;
+                    }
+                }
+            }
+            SimInst::OneQ { q, m } => inplace_1q_general(
+                &mut state,
+                1usize << q,
+                [[c32(m[0][0]), c32(m[0][1])], [c32(m[1][0]), c32(m[1][1])]],
+                use_par,
+            ),
             SimInst::Fused {
                 qs,
                 u,

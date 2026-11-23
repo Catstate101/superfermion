@@ -339,10 +339,24 @@ Modes, all live:
 |---|---|---|
 | `statevector` | `.simulate(values)` | a pure `State` (`state.method == "statevector"`) |
 | `density_matrix` (alias `dm`) | `.simulate(values)` | a density-matrix `State` (`state.method == "density_matrix"`) |
-| `adjoint` | `.run_gradient(pauli, theta)` | one `d⟨P⟩/dθ` per parameter (Pauli string `"IXYZ…"`, character `i` acts on qubit `i`) |
+| `adjoint` | `.run_gradient(pauli, theta)` or `.run_gradient_terms(terms, theta)` | one `d⟨P⟩/dθ` per parameter (Pauli string `"IXYZ…"`, character `i` acts on qubit `i`); the k-term form costs one forward + one reverse for the whole sum |
+| `mps` | `.simulate(values)` (bond cap `bond_dim=`) | a tensor-network `State`; `.run_gradient` / `.run_gradient_terms` answer via the exact shift rule |
 | `stabilizer` / `clifford` | `.sample(shots, seed=…)` | little-endian counts |
 
 The handle also exposes `.n_qubits` and `.parameter_names`. A build that does not export `CatCircuit` makes `sf.cat()` raise a clear `ImportError`.
+
+`mode="adjoint"` differentiates `RX`/`RY`/`RZ`, `P`/`R1`, `U`/`U3`, the
+controlled rotations `CRX`/`CRY`/`CRZ`/`CP`/`CU` (and `CH`, which is a `CU`),
+and the Pauli entanglers `RXX`/`RYY`/`RZZ`, each parameter slot separately.
+`H`/`X`/`Y`/`Z`/`S`/`T`/`SX` (and their daggers), `CZ`/`CY`/`SWAP`/`CNOT` are
+applied as constants, and an angle that was already bound is baked into the
+plan. `ECR` and opaque `unitary()` gates are refused by name. `run_gradient_terms`
+takes `[(pauli_string, coefficient), …]` and accumulates every term into a single
+adjoint state, so the cost is one forward plus one reverse pass regardless of
+term count. `mode="mps"` has no reverse sweep: it answers with the exact shift
+rule on its chain (`2P` evolutions at an exact bond, `4P` once the cap discards
+weight) and reports the discarded weight instead of hiding it. Worked examples
+for both are in [Gradients & VQE](/docs/guides/gradients#gradients-on-the-compile-once-handle).
 
 #### Density-matrix mode
 
@@ -373,7 +387,7 @@ A pure vector cannot hold a collapse, and a tableau cannot hold a non-Clifford g
 | gate on a qubit already measured | **reject** | accept | **reject** | **reject** |
 | feed-forward (`c_if`) | **reject** | **reject** | **reject** | **reject** |
 
-¹ Within the adjoint gate set (`RY`/`RZ` with variable parameters and `CNOT`). A shape built from `H` is refused there for that reason, not because of anything dynamic.
+¹ Within the adjoint gate set: `RX`/`RY`/`RZ`, `P`/`R1`, `U`/`U3`, `CP`, `CRX`/`CRY`/`CRZ`, `CU` (and `CH`), and `RXX`/`RYY`/`RZZ`, each slot separately. `H`, `X`, `Y`, `Z`, `S`, `T`, `SX` (and daggers), `CZ`, `CY`, `SWAP` and `CNOT` are constants, and a bound angle is baked into the plan. `ECR` and opaque `unitary()` gates are the ones refused, by name. The rejections in the last three rows are dynamic (reset after use, gate after measure, feed-forward), not gate-set limits.
 
 The first four columns follow from what the representation can hold: a reset after use and a non-selective readout are *channels*, so the density matrix answers them exactly, while the pure and tableau lanes refuse them rather than return the pre-collapse state. Feed-forward is refused everywhere because the state becomes a mixture over branches — one `rho` does not hold it; sample the trajectories with `sf.run(..., shots=N)` instead.
 

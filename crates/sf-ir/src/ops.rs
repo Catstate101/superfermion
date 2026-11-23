@@ -360,6 +360,11 @@ impl OpType {
     /// Rx(θ) = [[cos(θ/2), -i·sin(θ/2)], [-i·sin(θ/2), cos(θ/2)]]
     /// This is the exp(-iθX/2) convention.
     pub fn to_matrix(&self) -> nalgebra::DMatrix<num_complex::Complex64> {
+        // Fast path first: the common 2x2/4x4 gates build straight into the
+        // matrix with no intermediate `Vec<Vec<..>>` (see `to_matrix_small`).
+        if let Some(m) = self.to_matrix_small() {
+            return m;
+        }
         let u_vec = self.to_unitary_matrix().unwrap_or_else(|| {
             // Return IDENTITY for non-unitary ops so contraction doesn't fail.
             // (Previously this returned an all-ones matrix — a subtle correctness
@@ -379,6 +384,258 @@ impl OpType {
         // nalgebra::DMatrix::from_iterator expects column-major data.
         // Since u_vec is row-major (vec of rows), we must transpose the result.
         nalgebra::DMatrix::from_iterator(rows, cols, u_vec.into_iter().flatten()).transpose()
+    }
+
+    /// Build the matrix for the gates every circuit is made of by writing the
+    /// entries straight into a fixed-size buffer.
+    ///
+    /// Why: the historical path in [`Self::to_matrix`] goes
+    /// `to_unitary_matrix` (one `Vec` per row plus the outer `Vec` — three
+    /// allocations on a 2x2) → `DMatrix::from_iterator` (1) → `transpose()`
+    /// (1), i.e. five allocations and a full copy for a gate whose matrix is
+    /// four complex numbers.  Measured on the benchmark host it costs 518 ns
+    /// cold and 1.06-1.32 us per call inside the evolve loop, which was 29%
+    /// of a rotations-only evolution's wall clock at chi=1 — the second
+    /// largest term after per-layer dispatch (see `PAR_MIN_LAYER_WORK` in
+    /// `mps.rs`).  This path is one allocation and one copy of `k*k` entries.
+    ///
+    /// Entries are bit-identical to `to_unitary_matrix`'s: every arm repeats
+    /// that function's formula verbatim.  Returns `None` for everything not
+    /// covered (3-qubit gates, `Unitary`, `Custom`, and the non-unitary ops),
+    /// leaving [`Self::to_matrix`] on its existing path unchanged.
+    fn to_matrix_small(&self) -> Option<nalgebra::DMatrix<num_complex::Complex64>> {
+        let mut arr = [Complex64::new(0.0, 0.0); 16];
+        let k = self.write_matrix_small(&mut arr)?;
+        Some(nalgebra::DMatrix::from_row_slice(k, k, &arr[..k * k]))
+    }
+
+    /// Fixed-size form of [`Self::to_matrix_small`]: row-major entries written
+    /// into `out`, returning the side length (2 or 4).  No allocation.
+    ///
+    /// `to_matrix_small` already computes exactly these entries on the stack
+    /// and then copies them into a heap-allocated `DMatrix`.  Callers that
+    /// want the numbers rather than the container — the adjoint matrix pass,
+    /// which asks for a gate's unitary *and* its dagger, so two `to_matrix`
+    /// calls per gate — paid for that allocation twice per gate (~1.1 us per
+    /// call, i.e. ~94 us on the 47-gate ladder at (16,1), more than the whole
+    /// gradient call at n=8).  The arms below are unchanged; only the final
+    /// copy differs, so the entries are bit-identical to `to_matrix_small`'s.
+    pub(crate) fn write_matrix_small(&self, out: &mut [Complex64; 16]) -> Option<usize> {
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let neg_one = Complex64::new(-1.0, 0.0);
+        let i = Complex64::i();
+        let inv_sqrt2 = Complex64::new(1.0 / SQRT_2, 0.0);
+
+        // Row-major, so `from_row_slice` needs no transpose.
+        let m2: [Complex64; 4] = match self {
+            OpType::Id => [one, zero, zero, one],
+            OpType::H => [inv_sqrt2, inv_sqrt2, inv_sqrt2, -inv_sqrt2],
+            OpType::X => [zero, one, one, zero],
+            OpType::Y => [zero, -i, i, zero],
+            OpType::Z => [one, zero, zero, neg_one],
+            OpType::S => [one, zero, zero, i],
+            OpType::Sdg => [one, zero, zero, -i],
+            OpType::T => {
+                let t_phase = Complex64::from_polar(1.0, FRAC_PI_4);
+                [one, zero, zero, t_phase]
+            }
+            OpType::Tdg => {
+                let t_phase = Complex64::from_polar(1.0, -FRAC_PI_4);
+                [one, zero, zero, t_phase]
+            }
+            OpType::SX => {
+                let a = Complex64::new(0.5, 0.5);
+                let b = Complex64::new(0.5, -0.5);
+                [a, b, b, a]
+            }
+            OpType::SXdg => {
+                let a = Complex64::new(0.5, -0.5);
+                let b = Complex64::new(0.5, 0.5);
+                [a, b, b, a]
+            }
+            OpType::Rx(param) => {
+                let theta = param.evaluate();
+                let c = Complex64::new((theta / 2.0).cos(), 0.0);
+                let s = Complex64::new(0.0, -(theta / 2.0).sin());
+                [c, s, s, c]
+            }
+            OpType::Ry(param) => {
+                let theta = param.evaluate();
+                let c = Complex64::new((theta / 2.0).cos(), 0.0);
+                let s = Complex64::new((theta / 2.0).sin(), 0.0);
+                [c, -s, s, c]
+            }
+            OpType::Rz(param) => {
+                let theta = param.evaluate();
+                let em = Complex64::from_polar(1.0, -theta / 2.0);
+                let ep = Complex64::from_polar(1.0, theta / 2.0);
+                [em, zero, zero, ep]
+            }
+            OpType::R1(param) | OpType::P(param) => {
+                let phi = param.evaluate();
+                let ep = Complex64::from_polar(1.0, phi);
+                [one, zero, zero, ep]
+            }
+            OpType::U(theta, phi, lam) => {
+                let t = theta.evaluate();
+                let p = phi.evaluate();
+                let l = lam.evaluate();
+                let ct = Complex64::new((t / 2.0).cos(), 0.0);
+                let st = Complex64::new((t / 2.0).sin(), 0.0);
+                let el = Complex64::from_polar(1.0, l);
+                let ep = Complex64::from_polar(1.0, p);
+                let epl = Complex64::from_polar(1.0, p + l);
+                [ct, -el * st, ep * st, epl * ct]
+            }
+            _ => {
+                let m4: [Complex64; 16] = match self {
+                    OpType::CNOT => [
+                        one, zero, zero, zero, //
+                        zero, one, zero, zero, //
+                        zero, zero, zero, one, //
+                        zero, zero, one, zero,
+                    ],
+                    OpType::CZ => [
+                        one, zero, zero, zero, //
+                        zero, one, zero, zero, //
+                        zero, zero, one, zero, //
+                        zero, zero, zero, neg_one,
+                    ],
+                    OpType::SWAP => [
+                        one, zero, zero, zero, //
+                        zero, zero, one, zero, //
+                        zero, one, zero, zero, //
+                        zero, zero, zero, one,
+                    ],
+                    OpType::Rzz(param) => {
+                        let theta = param.evaluate();
+                        let em = Complex64::from_polar(1.0, -theta / 2.0);
+                        let ep = Complex64::from_polar(1.0, theta / 2.0);
+                        [
+                            em, zero, zero, zero, //
+                            zero, ep, zero, zero, //
+                            zero, zero, ep, zero, //
+                            zero, zero, zero, em,
+                        ]
+                    }
+                    OpType::Rxx(param) => {
+                        let theta = param.evaluate();
+                        let c = Complex64::new((theta / 2.0).cos(), 0.0);
+                        let nis = Complex64::new(0.0, -(theta / 2.0).sin());
+                        [
+                            c, zero, zero, nis, //
+                            zero, c, nis, zero, //
+                            zero, nis, c, zero, //
+                            nis, zero, zero, c,
+                        ]
+                    }
+                    OpType::Ryy(param) => {
+                        let theta = param.evaluate();
+                        let c = Complex64::new((theta / 2.0).cos(), 0.0);
+                        let s = (theta / 2.0).sin();
+                        let pis = Complex64::new(0.0, s);
+                        let nis = Complex64::new(0.0, -s);
+                        [
+                            c, zero, zero, pis, //
+                            zero, c, nis, zero, //
+                            zero, nis, c, zero, //
+                            pis, zero, zero, c,
+                        ]
+                    }
+                    OpType::CP(param) => {
+                        let phi = param.evaluate();
+                        let phase = Complex64::from_polar(1.0, phi);
+                        [
+                            one, zero, zero, zero, //
+                            zero, one, zero, zero, //
+                            zero, zero, one, zero, //
+                            zero, zero, zero, phase,
+                        ]
+                    }
+                    OpType::CRx(param) => {
+                        let theta = param.evaluate();
+                        let c = Complex64::new((theta / 2.0).cos(), 0.0);
+                        let nis = Complex64::new(0.0, -(theta / 2.0).sin());
+                        [
+                            one, zero, zero, zero, //
+                            zero, one, zero, zero, //
+                            zero, zero, c, nis, //
+                            zero, zero, nis, c,
+                        ]
+                    }
+                    OpType::CRz(param) => {
+                        let theta = param.evaluate();
+                        let em = Complex64::from_polar(1.0, -theta / 2.0);
+                        let ep = Complex64::from_polar(1.0, theta / 2.0);
+                        [
+                            one, zero, zero, zero, //
+                            zero, one, zero, zero, //
+                            zero, zero, em, zero, //
+                            zero, zero, zero, ep,
+                        ]
+                    }
+                    OpType::Cu(theta, phi, lam, gamma) => {
+                        let t = theta.evaluate();
+                        let p = phi.evaluate();
+                        let l = lam.evaluate();
+                        let g = gamma.evaluate();
+                        let ct = Complex64::new((t / 2.0).cos(), 0.0);
+                        let st = Complex64::new((t / 2.0).sin(), 0.0);
+                        let el = Complex64::from_polar(1.0, l);
+                        let ep = Complex64::from_polar(1.0, p);
+                        let epl = Complex64::from_polar(1.0, p + l);
+                        let eg = Complex64::from_polar(1.0, g);
+                        [
+                            one,
+                            zero,
+                            zero,
+                            zero, //
+                            zero,
+                            one,
+                            zero,
+                            zero, //
+                            zero,
+                            zero,
+                            eg * ct,
+                            -eg * el * st, //
+                            zero,
+                            zero,
+                            eg * ep * st,
+                            eg * epl * ct,
+                        ]
+                    }
+                    OpType::CY => [
+                        one, zero, zero, zero, //
+                        zero, one, zero, zero, //
+                        zero, zero, zero, -i, //
+                        zero, zero, i, zero,
+                    ],
+                    OpType::ISWAP => [
+                        one, zero, zero, zero, //
+                        zero, zero, i, zero, //
+                        zero, i, zero, zero, //
+                        zero, zero, zero, one,
+                    ],
+                    OpType::ECR => {
+                        let s = Complex64::new(1.0 / SQRT_2, 0.0);
+                        let is_ = Complex64::new(0.0, 1.0 / SQRT_2);
+                        let nis = Complex64::new(0.0, -1.0 / SQRT_2);
+                        [
+                            zero, zero, s, is_, //
+                            zero, zero, is_, s, //
+                            s, nis, zero, zero, //
+                            nis, s, zero, zero,
+                        ]
+                    }
+                    _ => return None,
+                };
+                out.copy_from_slice(&m4);
+                return Some(4);
+            }
+        };
+        out[..4].copy_from_slice(&m2);
+        Some(2)
     }
 
     /// Get the 2×2 or 4×4 unitary matrix for this gate (as Vec<Vec>).
@@ -1026,6 +1283,70 @@ mod tests {
                     b[i][j],
                     (a[i][j] - b[i][j]).norm()
                 );
+            }
+        }
+    }
+
+    /// `to_matrix` now prefers `to_matrix_small`, which builds the matrix
+    /// straight from the gate formulas instead of going through
+    /// `to_unitary_matrix` → `from_iterator` → `transpose`.  That is an
+    /// allocation change, so every entry must still be **bit-identical** to
+    /// the reference path — otherwise a speedup silently became a numerics
+    /// change.  Each gate is also asserted to be *covered* by the fast path,
+    /// so this cannot pass vacuously while `to_matrix_small` returns `None`.
+    #[test]
+    fn test_to_matrix_fast_path_matches_reference_path() {
+        let p = |v: f64| Parameter::Const(v);
+        let gates: Vec<OpType> = vec![
+            // 2x2
+            OpType::Id,
+            OpType::H,
+            OpType::X,
+            OpType::Y,
+            OpType::Z,
+            OpType::S,
+            OpType::Sdg,
+            OpType::T,
+            OpType::Tdg,
+            OpType::SX,
+            OpType::SXdg,
+            OpType::Rx(p(0.37)),
+            OpType::Ry(p(-1.21)),
+            OpType::Rz(p(2.9)),
+            OpType::R1(p(0.88)),
+            OpType::P(p(-0.4)),
+            OpType::U(p(0.3), p(-0.7), p(1.9)),
+            // 4x4
+            OpType::CNOT,
+            OpType::CZ,
+            OpType::CY,
+            OpType::SWAP,
+            OpType::ISWAP,
+            OpType::ECR,
+            OpType::Rzz(p(0.53)),
+            OpType::Rxx(p(-2.1)),
+            OpType::Ryy(p(1.47)),
+            OpType::CP(p(0.66)),
+            OpType::CRx(p(-0.9)),
+            OpType::CRz(p(1.03)),
+            OpType::Cu(p(0.2), p(0.4), p(-1.1), p(0.35)),
+        ];
+        for g in &gates {
+            assert!(
+                g.to_matrix_small().is_some(),
+                "{g:?} fell through to the reference path; the fast-path arm is missing"
+            );
+            let fast = g.to_matrix();
+            let rows = g.to_unitary_matrix().expect("listed gates are unitary");
+            let k = rows.len();
+            assert_eq!((fast.nrows(), fast.ncols()), (k, k), "{g:?}: shape");
+            for r in 0..k {
+                for c in 0..k {
+                    assert_eq!(
+                        fast[(r, c)], rows[r][c],
+                        "to_matrix fast path differs from to_unitary_matrix at [{r}][{c}] for {g:?}"
+                    );
+                }
             }
         }
     }

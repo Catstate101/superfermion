@@ -36,6 +36,10 @@ pub fn run(plan: &CatPlan, values: &HashMap<String, f64>) -> Result<Exec, String
         Mode::Adj => {
             Err("cat: adjoint plans execute via run_gradient (observable required)".to_string())
         }
+        // MPS produces a tensor network, not a flat buffer, so `Exec` cannot
+        // carry it: the handle calls `CatPlan::execute_mps` and wraps the
+        // `MPSState` directly.  Named here so the match stays exhaustive.
+        Mode::Mps => Err("cat: mps plans execute via simulate (bond_dim required)".to_string()),
         Mode::Stab | Mode::Cliff => {
             Err(format!("cat: mode {:?} is not executable yet", plan.mode()))
         }

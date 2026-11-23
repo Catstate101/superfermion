@@ -242,7 +242,13 @@ class RunResult:
     def grad(self, observable, dag=None, param_values=None) -> dict:
         """Compute gradient of an observable.
 
-        Uses adjoint differentiation from state (if available).
+        Uses adjoint differentiation from state (if available).  Method="mps"
+        has no adjoint (a reverse pass would need the dense 2^n state it
+        exists to avoid), so it takes the parameter-shift gradient on the
+        tensor-network forward: 2 forwards per parameter, exact in pi/2 for
+        the rotation gates (Rx/Ry/Rz/R1/P/Rxx/Ryy/Rzz/CP/U) and a five-point
+        stencil for controlled rotations, repeated parameters and expression
+        angles.
 
         Args:
             observable: Pauli observable — str (one character per qubit,
