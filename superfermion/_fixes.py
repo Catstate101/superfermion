@@ -9,9 +9,15 @@ Nothing in the compiled core is replaced.  This module adds:
   the full circuit unitary instead, and raises for methods that cannot
   represent it.
 * `unpermute_statevector` / `remap_counts` — helpers that undo the MPS
-  routing permutation (D10).
+  routing permutation (D10).  Only needed for cores that predate the
+  `WIRE_ORDER_READOUT` capability flag; see below.
 * A wrapper on ``MPSState.to_statevector`` that applies that inverse
-  permutation, so direct MPS reads use the documented qubit order.
+  permutation, so direct MPS reads use the documented qubit order.  Installed
+  only when the core does *not* undo the map itself: from the routed-lane
+  readout repair on, `MPSState.to_statevector` already answers in wire order
+  and re-applying `perm()` would rotate a correct statevector into a wrong
+  one.  The flag is checked on the class, so an older `_sf_core` still gets
+  the compensating map.
 * Matrix JSON helpers shared by the two circuit serializers (D2).
 
 All additions are read-only with respect to the Rust extension and the
@@ -159,24 +165,48 @@ def remap_counts(
 class PermutedMPSState:
     """Expose an MPS ``State`` handle in documented qubit order (D10).
 
-    ``State.numpy()`` / ``State.sample()`` / ``State.probabilities()`` keep
-    the physical-site layout of the lazy-SWAP routing.  Every other method
-    is delegated unchanged to the Rust handle.
+    Historical shim.  Cores without ``WIRE_ORDER_READOUT`` keep the physical
+    site layout of the lazy-SWAP routing in ``numpy()`` / ``sample()`` /
+    ``probabilities()`` and need a remap; cores that advertise the flag
+    already answer in wire order, so the three readouts pass straight
+    through.  Without the branch this class would rotate an already-correct
+    statevector into a wrong one, which is exactly the routed-lane defect
+    §46 fixed inside the core.
+
+    ``expectation`` / ``partial_trace`` / ``mutual_info`` / ``fidelity``
+    already take wire indices in the core (they map through ``perm``), so
+    they are delegated unchanged either way; ``entropy`` / ``purity`` are
+    permutation invariant.
     """
 
     def __init__(self, state: Any, perm: Sequence[int]) -> None:
         self._state = state
         self._perm = [int(p) for p in perm]
+        self._wire_order = bool(
+            getattr(type(state), "WIRE_ORDER_READOUT", False)
+            or getattr(state, "WIRE_ORDER_READOUT", False)
+        )
 
     def numpy(self) -> np.ndarray:
+        if self._wire_order:
+            return np.asarray(self._state.numpy())
         return unpermute_statevector(self._state.numpy(), self._perm)
 
     def sample(self, shots: int, seed: int = 42) -> Dict[str, int]:
+        if self._wire_order:
+            return self._state.sample(shots, seed)
         return remap_counts(self._state.sample(shots, seed), self._perm)
 
     def probabilities(self) -> np.ndarray:
-        statevector = self.numpy()
-        return (np.abs(statevector) ** 2).astype(float)
+        if self._wire_order:
+            return np.asarray(self._state.probabilities()).astype(float)
+        # Pre-flag cores: the Rust handle answers this from its own sweep (no
+        # 2^n complex buffer), and the unpermute is a pure index permutation,
+        # so permuting the real table gives the same values with half the
+        # memory.
+        return unpermute_statevector(
+            np.asarray(self._state.probabilities()), self._perm
+        ).astype(float)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._state, name)
@@ -255,9 +285,17 @@ class LargeUnitaryDAG:
 
 
 def _install_mps_output_fix() -> None:
-    """Apply the inverse routing permutation in ``MPSState.to_statevector``."""
+    """Apply the inverse routing permutation in ``MPSState.to_statevector``.
+
+    A no-op when the core advertises ``WIRE_ORDER_READOUT``: it undoes the
+    map itself (see `MPSState.to_statevector_sites` for the raw view), so a
+    second application would be wrong.  Kept for older `_sf_core` builds,
+    which still report physical-site order.
+    """
     mps_state = getattr(_core, "MPSState", None)
     if mps_state is None:
+        return
+    if getattr(mps_state, "WIRE_ORDER_READOUT", False):
         return
     original = getattr(mps_state, "to_statevector", None)
     if original is None or getattr(original, "_sf_qubit_order", False):
@@ -280,6 +318,31 @@ def _install_mps_output_fix() -> None:
 
 
 _install_mps_output_fix()
+
+
+def _install_state_operand_unwrap() -> None:
+    """Let ``State.fidelity`` accept the MPS routing wrapper as an operand.
+
+    ``PermutedMPSState`` is a Python proxy, so the PyO3 signature
+    (``fidelity(other: State)``) rejects it before the core can compare
+    anything.  Unwrapping here keeps the proxy invisible to callers that
+    pass a handle back in (``a.fidelity(b)`` with either side routed); the
+    core itself maps wire indices through the chain's ``perm``.
+    """
+    state_cls = getattr(_core, "State", None)
+    original = getattr(state_cls, "fidelity", None) if state_cls is not None else None
+    if original is None or getattr(original, "_sf_unwrap_operand", False):
+        return
+
+    def fidelity(self: Any, other: Any) -> float:
+        return float(original(self, getattr(other, "_state", other)))
+
+    fidelity._sf_unwrap_operand = True  # type: ignore[attr-defined]
+    fidelity.__doc__ = getattr(original, "__doc__", None)
+    state_cls.fidelity = fidelity
+
+
+_install_state_operand_unwrap()
 
 
 def reject_compat_dag(dag: Any, api: str) -> None:

@@ -481,6 +481,103 @@ impl QuantumDAG {
         layers
     }
 
+    /// [`Self::parallel_layers`] with flat scratch instead of two maps.
+    ///
+    /// Same output — the same stable-Kahn order, the same depth per node, the
+    /// same set of gates in every layer — but the storage is a `Vec<u32>`
+    /// indegree table and a `Vec<u32>` depth table, and the depth is propagated
+    /// forward while Kahn's heap drains, so there is one adjacency walk and no
+    /// hashing at all. The historical version hashes every node twice (once in
+    /// `topological_order`, once in the depth map) and at n=16 with 192 gates
+    /// costs 0.057 ms of a 0.181 ms MPS evolution.
+    ///
+    /// Gates inside one layer are qubit-disjoint by construction — two ops on
+    /// the same wire always have a path between them, so their depths differ —
+    /// which is what makes the within-layer order free. This version emits
+    /// ascending node index; the old one iterated a `HashMap`, whose order is
+    /// randomized per process, so this order is also *more* reproducible than
+    /// the one it mirrors.
+    pub fn parallel_layers_fast(&self) -> Vec<Vec<NodeId>> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        // Fully qualified so the file's imports stay untouched;
+        // `node_bound` is `NodeIndexable`, an upper bound on node indices.
+        let bound = petgraph::visit::NodeIndexable::node_bound(&self.graph);
+        if bound == 0 {
+            return vec![];
+        }
+
+        // Indegree over every node, boundary nodes included: Kahn needs them
+        // to release the first gates. Then drain smallest-index-first so the
+        // emitted order matches `topological_order`.
+        let mut indeg = vec![0u32; bound];
+        for node in self.graph.node_indices() {
+            for succ in self
+                .graph
+                .neighbors_directed(node, petgraph::Direction::Outgoing)
+            {
+                indeg[succ.index()] += 1;
+            }
+        }
+        let mut heap: BinaryHeap<Reverse<usize>> = self
+            .graph
+            .node_indices()
+            .filter(|n| indeg[n.index()] == 0)
+            .map(|n| Reverse(n.index()))
+            .collect();
+
+        // `depth[i]` carries the running max over the node's non-boundary
+        // predecessors until the node is popped, then holds its own 1-based
+        // depth. Boundary nodes emit `d = 0` into this table, which is why the
+        // final loop skips them explicitly.
+        let mut depth = vec![0u32; bound];
+        let mut max_depth = 0u32;
+        let mut seen = 0usize;
+
+        while let Some(Reverse(i)) = heap.pop() {
+            let node = NodeId::new(i);
+            seen += 1;
+            let d = if self.graph[node].op_type.is_boundary() {
+                0
+            } else {
+                let d = depth[i] + 1;
+                depth[i] = d;
+                if d > max_depth {
+                    max_depth = d;
+                }
+                d
+            };
+            for succ in self
+                .graph
+                .neighbors_directed(node, petgraph::Direction::Outgoing)
+            {
+                let s = succ.index();
+                if depth[s] < d {
+                    depth[s] = d;
+                }
+                indeg[s] -= 1;
+                if indeg[s] == 0 {
+                    heap.push(Reverse(s));
+                }
+            }
+        }
+        assert!(seen == self.graph.node_count(), "DAG must be acyclic");
+
+        let mut layers: Vec<Vec<NodeId>> = vec![Vec::new(); max_depth as usize];
+        for (i, &d) in depth.iter().enumerate() {
+            if d == 0 {
+                continue;
+            }
+            let node = NodeId::new(i);
+            if self.graph[node].op_type.is_boundary() {
+                continue;
+            }
+            layers[(d - 1) as usize].push(node);
+        }
+        layers
+    }
+
     /// Compute circuit depth (length of critical path through DAG).
     pub fn depth(&self) -> usize {
         let topo = self.topological_order();
@@ -927,7 +1024,8 @@ impl QuantumDAG {
 
         // Optional plan census for tuning (SF_PLAN_DUMP=1, stderr).
         if std::env::var_os("SF_PLAN_DUMP").is_some() {
-            let (mut cg, mut d1, mut d2, mut pr, mut fu, mut pm) = (0, 0, 0, 0, 0, 0);
+            let (mut cg, mut d1, mut d2, mut d3, mut c2, mut pr, mut fu, mut pm, mut oq) =
+                (0, 0, 0, 0, 0, 0, 0, 0, 0);
             let mut fu_sizes: Vec<usize> = Vec::new();
             let mut pm_sizes: Vec<usize> = Vec::new();
             for inst in &insts {
@@ -935,6 +1033,9 @@ impl QuantumDAG {
                     SimInst::Gate { .. } => cg += 1,
                     SimInst::Diag1 { .. } => d1 += 1,
                     SimInst::Diag2 { .. } => d2 += 1,
+                    SimInst::Diag3 { .. } => d3 += 1,
+                    SimInst::C2Q { .. } => c2 += 1,
+                    SimInst::OneQ { .. } => oq += 1,
                     SimInst::PhaseRun { .. } => pr += 1,
                     SimInst::Fused { qs, .. } => {
                         fu += 1;
@@ -947,8 +1048,20 @@ impl QuantumDAG {
                 }
             }
             eprintln!(
-                "[sf-plan] n={} total={} gate={} diag1={} diag2={} phase={} fused={} {:?} perm={} {:?}",
-                self.n_qubits, insts.len(), cg, d1, d2, pr, fu, fu_sizes, pm, pm_sizes
+                "[sf-plan] n={} total={} gate={} diag1={} diag2={} diag3={} c2q={} oneq={} phase={} fused={} {:?} perm={} {:?}",
+                self.n_qubits,
+                insts.len(),
+                cg,
+                d1,
+                d2,
+                d3,
+                c2,
+                oq,
+                pr,
+                fu,
+                fu_sizes,
+                pm,
+                pm_sizes
             );
             let (mut f_sides, mut f_stages) = (0usize, 0usize);
             for inst in &insts {
@@ -983,6 +1096,13 @@ impl QuantumDAG {
                         SimInst::Diag2 { q1, q2, .. } => {
                             line.push_str(&format!("D2({},{}) ", q1, q2))
                         }
+                        SimInst::Diag3 { q1, q2, q3, .. } => {
+                            line.push_str(&format!("D3({},{},{}) ", q1, q2, q3))
+                        }
+                        SimInst::C2Q { c, q1, q2, .. } => {
+                            line.push_str(&format!("C2Q({};{},{}) ", c, q1, q2))
+                        }
+                        SimInst::OneQ { q, .. } => line.push_str(&format!("Q({}) ", q)),
                         SimInst::PhaseRun { .. } => line.push_str("PR "),
                         SimInst::Fused { qs, .. } => line.push_str(&format!("F{} ", qs.len())),
                         SimInst::PermuteRun { plan } => {
@@ -1857,7 +1977,12 @@ fn inplace_swap_pairs(state: &mut [num_complex::Complex64], stride: usize, use_p
 /// `swap_nonoverlapping` (vectorizable, branch-free) — the previous
 /// elementwise bit-test scan tested two bits per amplitude and swapped
 /// across a 2^lo stride, hurting cache and blocking auto-vectorization.
-fn inplace_cnot(state: &mut [num_complex::Complex64], ctrl: usize, tgt: usize, use_par: bool) {
+pub(crate) fn inplace_cnot(
+    state: &mut [num_complex::Complex64],
+    ctrl: usize,
+    tgt: usize,
+    use_par: bool,
+) {
     let dim = state.len();
     let (lo, hi) = if ctrl < tgt { (ctrl, tgt) } else { (tgt, ctrl) };
     let run = 1usize << lo; // contiguous run length of each swap side
@@ -2205,7 +2330,16 @@ pub(crate) struct Diag2Stage {
 }
 
 /// One planned step for `QuantumDAG::simulate`.
+///
+/// The variants differ ~67x in size (`C2Q` carries two 4x4 blocks, `Gate`
+/// carries an index), which `large_enum_variant` flags. Kept flat on purpose:
+/// the plan is a `Vec` built once and walked once per simulation, next to a
+/// state of 2^n amplitudes, so the plan is never the bandwidth bottleneck --
+/// while boxing `C2Q` would add an allocation per planned triple and a
+/// pointer chase on every dispatch, in exchange for bytes the walk does not
+/// care about.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum SimInst {
     /// Apply the precomputed gate matrix `fused[idx].1` to `fused[idx].0.qubits`
     /// via the standard per-op kernel.
@@ -2221,6 +2355,47 @@ pub(crate) enum SimInst {
         q1: usize,
         q2: usize,
         d: [num_complex::Complex64; 4],
+    },
+    /// Diagonal 3q gate: entry indexed by
+    /// (bit(q1) << 2) | (bit(q2) << 1) | bit(q3).
+    ///
+    /// Emitted for a native diagonal 3q gate, and by Rewrite 1b for
+    /// `CNOT(a,t)·D2(t,o)·CNOT(a,t)` — the 3-body block
+    /// `CX·RZZ·CX = exp(-i th ZZZ/2)`. One diagonal sweep replaces three
+    /// gate sweeps and, because the block is exactly `d3`, no scatter is
+    /// needed: every entry is one complex multiply.
+    Diag3 {
+        q1: usize,
+        q2: usize,
+        q3: usize,
+        d: [num_complex::Complex64; 8],
+    },
+    /// Controlled 2q gate: `P0(c) ⊗ m0 + P1(c) ⊗ m1`, where both 4×4 blocks
+    /// act on `(q1, q2)` and are indexed by `(bit(q1) << 1) | bit(q2)`.
+    ///
+    /// Emitted by Rewrite 1b for `CNOT(a,t)·G2(t,o)·CNOT(a,t)` when `G2` is
+    /// not diagonal. Conjugation by the control splits the block cleanly:
+    /// `a = 0` sees `G2`, `a = 1` sees `X_t·G2·X_t` (both precomputed at plan
+    /// time), so the whole triple is ONE gather/scatter sweep. The 3-body
+    /// term `CX·RYY·CX = exp(-i th ZYY/2)` has `m0 = RYY(+th)`,
+    /// `m1 = RYY(-th)`. A `Diag3` would be cheaper still but cannot express
+    /// it: the CX conjugation leaves a Y on the target qubit.
+    C2Q {
+        c: usize,
+        q1: usize,
+        q2: usize,
+        m0: [[num_complex::Complex64; 4]; 4],
+        m1: [[num_complex::Complex64; 4]; 4],
+    },
+    /// A single-qubit gate carried as a raw 2×2 block (row-major, so
+    /// out[0] = m[0][0]·in[0] + m[0][1]·in[1]). No `ops` entry exists for it:
+    /// the Pauli-entangler rewrite synthesizes these when it lifts a gate's
+    /// local basis changes out of the gate's own neighbourhood. `fuse_1q_blocks`
+    /// absorbs them into `Fused` blocks exactly like a 1q `Gate`/`Diag1`, so an
+    /// emitted basis change costs no extra sweep.
+    OneQ {
+        q: usize,
+        m: [[num_complex::Complex64; 2]; 2],
     },
     /// A whole run of diagonal gates collapsed into one Gray-code phase sweep.
     PhaseRun { plan: PhasePlan },
@@ -2280,7 +2455,27 @@ const MERGE_MIN_RUN: usize = 32;
 /// parallel gate (2^16): the auto policy was 1.34-2.63x SLOWER at n=16-18
 /// while n=20-24 (>=16 MB, DRAM-bound) won 1.5-2.6x — so auto rewriting
 /// starts only where the state stops fitting in L3.
+///
+/// Scope: this constant now gates `merge_min_run` only. The k-qubit fusion
+/// pass stopped sharing it after the fused plan was measured 2.2x faster than
+/// the unfused one at n=14-18 (see `FUSE_MIN_DIM`); the older 1.34-2.63x loss
+/// above was measured against the plain parallel gate, before the fused
+/// kernel and the Pauli-entangler rewrite existed.
 const AUTO_REWRITE_MIN_DIM: usize = 1 << 20;
+
+/// Smallest state for which the fused k-qubit pass replaces the faithful
+/// one-gate-at-a-time plan.
+///
+/// Fusion is a win only once the per-group window work is amortized over
+/// enough amplitudes. Measured on this box (4 lanes, `L=4` RY/RYY ladder over
+/// n=8..22, one process, `SF_FUSE_K` toggled at plan-build time, ABBA median):
+/// 0.59x at n=8, 0.94x at n=10, then 1.25x at 12, 2.46x at 14, 2.22x at 16,
+/// 2.16x at 18, 1.03x at 20 and 1.00x at 22 (the last two already fused by
+/// default, which checks the two arms really are the same policy there).
+/// The crossover sits between n=10 and n=12, so the rewrite starts at 2^12.
+/// This is deliberately *not* `AUTO_REWRITE_MIN_DIM`: the merged-sweep
+/// break-even (`merge_min_run`) is a separate policy and keeps its own gate.
+const FUSE_MIN_DIM: usize = 1 << 12;
 
 /// Effective merge break-even for the current lane count, overridable via
 /// `SF_MERGE_MIN_RUN` (entry counts).
@@ -2345,6 +2540,23 @@ fn unit_modulus(z: num_complex::Complex64) -> bool {
     (z.norm() - 1.0).abs() < 1e-9
 }
 
+/// True when the 3q matrix is diagonal to 1e-14.
+#[inline(always)]
+fn is_diag_3q(mat: &nalgebra::DMatrix<num_complex::Complex64>) -> bool {
+    if mat.nrows() != 8 || mat.ncols() != 8 {
+        return false;
+    }
+    let mut ok = true;
+    for r in 0..8 {
+        for c in 0..8 {
+            if r != c && mat[(r, c)].norm() >= 1e-14 {
+                ok = false;
+            }
+        }
+    }
+    ok
+}
+
 /// Plan the instruction list from the 1q-fused gate list.
 fn build_sim_instructions(
     ops: &[(&QuantumOp, nalgebra::DMatrix<num_complex::Complex64>)],
@@ -2384,6 +2596,104 @@ fn build_sim_instructions(
                     i += 3;
                     continue;
                 }
+                // ── Rewrite 1b: CNOT(a,t) · G2(t,o) · CNOT(a,t) ──────────
+                // Conjugating a 2q diagonal by the CX maps its target bit
+                // b_t to b_t ^ b_a, so the block is the 3q diagonal
+                // diag3[b_a, b_t, b_o] = d[(b_t ^ b_a), b_o]. Two CX sweeps
+                // and one diagonal sweep collapse into one diagonal sweep —
+                // the 3-body term (CX·RZZ·CX = exp(-i th ZZZ/2)) is exactly
+                // this pattern.
+                //
+                // A *non*-diagonal body never reaches a diagonal this way.
+                // The conjugation touches only the target, so it maps a Y on
+                // t to Z_a·Y_t and leaves the Y on t in place:
+                //   CX·RYY·CX = exp(-i th Z_a Y_t Y_o),
+                // which no diagonal form can absorb. Decomposing the body as
+                // G2 = (V⊗V)·Dzz·(V†⊗V†) and keeping the basis change on o
+                // only (the V on t does not cancel — the earlier claim that
+                // it did is wrong) gives an operator off by O(1); measured
+                // 3.4e-01 at n=10. What the block always is, for any body, is
+                // a controlled 2q gate: split by the control bit it acts as
+                // `G2` for a = 0 and as `X_t·G2·X_t` for a = 1. Both 4×4
+                // blocks are built here, so the triple still collapses into
+                // ONE sweep (`C2Q`, 4 mults/amplitude) instead of three.
+                if mid_op.qubits.len() == 2 {
+                    let a = op0.qubits[0];
+                    let t = op0.qubits[1];
+                    let mq0 = mid_op.qubits[0];
+                    let mq1 = mid_op.qubits[1];
+                    if mq0 == t || mq1 == t {
+                        let o = if mq0 == t { mq1 } else { mq0 };
+                        if o != a && o != t {
+                            // The gate matrix is indexed by `mid_op.qubits`;
+                            // re-index it to (b_t, b_o).
+                            let at = |bt: usize, bo: usize| -> usize {
+                                if mq0 == t {
+                                    (bt << 1) | bo
+                                } else {
+                                    (bo << 1) | bt
+                                }
+                            };
+                            let mut gt = [[num_complex::Complex64::new(0.0, 0.0); 4]; 4];
+                            for bt in 0..2 {
+                                for bo in 0..2 {
+                                    for bt2 in 0..2 {
+                                        for bo2 in 0..2 {
+                                            gt[(bt << 1) | bo][(bt2 << 1) | bo2] =
+                                                mid_mat[(at(bt, bo), at(bt2, bo2))];
+                                        }
+                                    }
+                                }
+                            }
+                            let mut diag = true;
+                            for (r, row) in gt.iter().enumerate() {
+                                for (ci, z) in row.iter().enumerate() {
+                                    if r != ci && z.norm() >= 1e-14 {
+                                        diag = false;
+                                    }
+                                }
+                            }
+                            if diag {
+                                let mut d3 = [num_complex::Complex64::new(0.0, 0.0); 8];
+                                for (g3, e) in d3.iter_mut().enumerate() {
+                                    let ba = (g3 >> 2) & 1;
+                                    let tv = ((g3 >> 1) & 1) ^ ba;
+                                    let bo = g3 & 1;
+                                    *e = gt[(tv << 1) | bo][(tv << 1) | bo];
+                                }
+                                insts.push(SimInst::Diag3 {
+                                    q1: a,
+                                    q2: t,
+                                    q3: o,
+                                    d: d3,
+                                });
+                            } else {
+                                // X_t·G2·X_t flips the b_t index on both
+                                // sides.
+                                let mut m1m = [[num_complex::Complex64::new(0.0, 0.0); 4]; 4];
+                                for bt in 0..2 {
+                                    for bo in 0..2 {
+                                        for bt2 in 0..2 {
+                                            for bo2 in 0..2 {
+                                                m1m[(bt << 1) | bo][(bt2 << 1) | bo2] = gt
+                                                    [((bt ^ 1) << 1) | bo][((bt2 ^ 1) << 1) | bo2];
+                                            }
+                                        }
+                                    }
+                                }
+                                insts.push(SimInst::C2Q {
+                                    c: a,
+                                    q1: t,
+                                    q2: o,
+                                    m0: gt,
+                                    m1: m1m,
+                                });
+                            }
+                            i += 3;
+                            continue;
+                        }
+                    }
+                }
             }
         }
 
@@ -2401,11 +2711,31 @@ fn build_sim_instructions(
                 q2: op.qubits[1],
                 d: [mat[(0, 0)], mat[(1, 1)], mat[(2, 2)], mat[(3, 3)]],
             });
+        } else if op.qubits.len() == 3 && is_diag_3q(mat) {
+            insts.push(SimInst::Diag3 {
+                q1: op.qubits[0],
+                q2: op.qubits[1],
+                q3: op.qubits[2],
+                d: [
+                    mat[(0, 0)],
+                    mat[(1, 1)],
+                    mat[(2, 2)],
+                    mat[(3, 3)],
+                    mat[(4, 4)],
+                    mat[(5, 5)],
+                    mat[(6, 6)],
+                    mat[(7, 7)],
+                ],
+            });
         } else {
             insts.push(SimInst::Gate { idx: i });
         }
         i += 1;
     }
+
+    // Rewrite 2: a run of Pauli entanglers becomes local basis changes around
+    // one diagonal run (see `hoist_pauli_entangler_runs`).
+    let insts = hoist_pauli_entangler_runs(insts, ops, n_qubits);
 
     // Third planning pass: consolidate instruction runs into fewer sweeps —
     // (a) maximal runs of commuting 1q gates on distinct qubits become ONE
@@ -2439,6 +2769,9 @@ fn cluster_commuting_diags(
             SimInst::Gate { idx, .. } => ops[*idx].0.qubits.iter().copied().collect(),
             SimInst::Diag1 { q, .. } => vec![*q],
             SimInst::Diag2 { q1, q2, .. } => vec![*q1, *q2],
+            SimInst::Diag3 { q1, q2, q3, .. } => vec![*q1, *q2, *q3],
+            SimInst::C2Q { c, q1, q2, .. } => vec![*c, *q1, *q2],
+            SimInst::OneQ { q, .. } => vec![*q],
             SimInst::Fused { qs, .. } => qs.to_vec(),
             SimInst::PermuteRun { plan } => plan.touch.clone(),
             // A PhaseRun (not produced by the planner) touches every qubit.
@@ -2474,7 +2807,10 @@ fn cluster_commuting_diags(
     };
 
     for inst in insts {
-        let is_diag = matches!(inst, SimInst::Diag1 { .. } | SimInst::Diag2 { .. });
+        let is_diag = matches!(
+            inst,
+            SimInst::Diag1 { .. } | SimInst::Diag2 { .. } | SimInst::Diag3 { .. }
+        );
         if is_diag {
             for q in inst_qubits(&inst, ops) {
                 used[q] = true;
@@ -2515,16 +2851,15 @@ const FUSE_K_MAX: usize = 10;
 /// gate path: zz_20 1.19x, ang_20 1.47x, zz_22 1.26x, ang_22 1.58x at K=8), and
 /// qsim/qiskit lane1 baselines sit near their lane8 numbers, so the old gate
 /// only cost the lane1 comparisons.
-/// Cells below `AUTO_REWRITE_MIN_DIM` keep the faithful pair-pass plan: their
-/// state is cache-resident, so there is no DRAM traffic to trade (measured
-/// 1.34-2.63x slower at n=16-18 under a plain parallel gate).
+/// Cells below `FUSE_MIN_DIM` keep the faithful pair-pass plan: their state is
+/// so small that the k-qubit window work dominates (0.59x at n=8).
 fn fuse_1q_max_k(n_qubits: usize) -> usize {
     if let Ok(v) = std::env::var("SF_FUSE_K") {
         if let Ok(k) = v.trim().parse::<usize>() {
             return k.clamp(1, FUSE_K_MAX);
         }
     }
-    if (1usize << n_qubits) >= AUTO_REWRITE_MIN_DIM {
+    if (1usize << n_qubits) >= FUSE_MIN_DIM {
         if n_qubits >= 23 {
             6
         } else {
@@ -2550,7 +2885,7 @@ fn spread_bits(s: usize, masks: &[usize]) -> usize {
 /// Insert zero bits at the (ascending) positions of `masks` in `g` — maps a
 /// group index to the base amplitude index with all masked qubit bits cleared.
 #[inline(always)]
-fn deposit_bits_masked(g: usize, masks: &[usize]) -> usize {
+pub(crate) fn deposit_bits_masked(g: usize, masks: &[usize]) -> usize {
     let mut x = g;
     for &m in masks {
         let p = m.trailing_zeros() as usize;
@@ -2560,11 +2895,19 @@ fn deposit_bits_masked(g: usize, masks: &[usize]) -> usize {
     x
 }
 
-/// Fuse maximal runs of consecutive 1q instructions on distinct qubits into
-/// ONE `Fused` sweep (k ≤ SF_FUSE_K). The per-qubit 2×2 matrices are already
-/// circuit-ordered by `fuse_1q_sequence`; disjoint qubits commute, so the
-/// kernel simply applies them one after another to each 2^k-element group —
-/// same arithmetic as k separate passes, 1/k of the memory traffic.
+/// Fuse maximal runs of consecutive 1q instructions into `Fused` sweeps
+/// (k ≤ SF_FUSE_K). The per-qubit 2×2 matrices are already circuit-ordered by
+/// `fuse_1q_sequence`; disjoint qubits commute, so the kernel simply applies
+/// them one after another to each 2^k-element group — same arithmetic as k
+/// separate passes, 1/k of the memory traffic.
+///
+/// The whole run is merged *per qubit* before it is partitioned into blocks.
+/// Gates on distinct qubits commute, so a run may be re-ordered by qubit as
+/// long as every qubit keeps its own order, and that collapses a layer of m
+/// gates on d distinct qubits into ceil(d/k) sweeps instead of ceil(m/k).
+/// It is also what lets the Pauli-entangler basis changes (see
+/// `hoist_pauli_entangler_runs`) ride along inside a neighbouring block for
+/// free instead of costing one sweep each.
 fn fuse_1q_blocks(
     insts: Vec<SimInst>,
     ops: &[(&QuantumOp, nalgebra::DMatrix<num_complex::Complex64>)],
@@ -2595,6 +2938,7 @@ fn fuse_1q_blocks(
                     [num_complex::Complex64::new(0.0, 0.0), *d1],
                 ],
             )),
+            SimInst::OneQ { q, m } => Some((*q, *m)),
             _ => None,
         }
     };
@@ -2602,45 +2946,399 @@ fn fuse_1q_blocks(
     let mut out = Vec::with_capacity(insts.len());
     let mut i = 0;
     while i < insts.len() {
+        if one_q(&insts[i]).is_none() {
+            out.push(insts[i].clone());
+            i += 1;
+            continue;
+        }
+        // `qs[k]` = k-th distinct qubit in first-appearance order, `mats[k]` =
+        // the product of its gates in circuit order (newest applied last).
         let mut qs: Vec<usize> = Vec::new();
         let mut mats: Vec<[[num_complex::Complex64; 2]; 2]> = Vec::new();
         let mut j = i;
-        while j < insts.len() && qs.len() < kmax {
+        while j < insts.len() {
             match one_q(&insts[j]) {
-                Some((q, m)) if !qs.contains(&q) => {
-                    qs.push(q);
-                    mats.push(m);
+                Some((q, m)) => {
+                    match qs.iter().position(|&x| x == q) {
+                        Some(t) => mats[t] = mul_2x2(m, mats[t]),
+                        None => {
+                            qs.push(q);
+                            mats.push(m);
+                        }
+                    }
                     j += 1;
                 }
-                _ => break,
+                None => break,
             }
         }
-        if qs.len() >= 2 {
-            // Order factors by ascending qubit; bit s of the group index is
-            // qubit qs[s] (matches `deposit_bits_masked`). Flatten the k 2×2
-            // blocks as [u00, u01, u10, u11] each.
-            let mut order: Vec<usize> = (0..qs.len()).collect();
-            order.sort_by_key(|&t| qs[t]);
-            let mut sv: SmallVec<[usize; 8]> = SmallVec::new();
-            let mut u: Vec<num_complex::Complex64> = Vec::with_capacity(4 * qs.len());
-            for &t in &order {
-                sv.push(qs[t]);
-                u.push(mats[t][0][0]);
-                u.push(mats[t][0][1]);
-                u.push(mats[t][1][0]);
-                u.push(mats[t][1][1]);
+        // Bit s of a group index is qubit qs[s] (matches
+        // `deposit_bits_masked`), so the block windows must be ascending.
+        let mut order: Vec<usize> = (0..qs.len()).collect();
+        order.sort_by_key(|&t| qs[t]);
+        let mut s = 0;
+        while s < order.len() {
+            let e = (s + kmax).min(order.len());
+            if e - s == 1 {
+                // A lone gate keeps the raw 2×2 form: the fused kernels start
+                // at k=2, and one stage over the state is exactly what the
+                // single-qubit pass does anyway.
+                out.push(SimInst::OneQ {
+                    q: qs[order[s]],
+                    m: mats[order[s]],
+                });
+            } else {
+                let mut sv: SmallVec<[usize; 8]> = SmallVec::new();
+                let mut u: Vec<num_complex::Complex64> = Vec::with_capacity(4 * (e - s));
+                for &t in &order[s..e] {
+                    sv.push(qs[t]);
+                    u.push(mats[t][0][0]);
+                    u.push(mats[t][0][1]);
+                    u.push(mats[t][1][0]);
+                    u.push(mats[t][1][1]);
+                }
+                out.push(SimInst::Fused {
+                    qs: sv,
+                    u,
+                    pre_diag: Vec::new(),
+                    post_diag: Vec::new(),
+                });
             }
-            out.push(SimInst::Fused {
-                qs: sv,
-                u,
-                pre_diag: Vec::new(),
-                post_diag: Vec::new(),
-            });
-            i = j;
-        } else {
+            s = e;
+        }
+        i = j;
+    }
+    out
+}
+
+/// Row-major 2×2 product `a · b` (the operator `a` applied after `b`).
+#[inline]
+fn mul_2x2(
+    a: [[num_complex::Complex64; 2]; 2],
+    b: [[num_complex::Complex64; 2]; 2],
+) -> [[num_complex::Complex64; 2]; 2] {
+    [
+        [
+            a[0][0] * b[0][0] + a[0][1] * b[1][0],
+            a[0][0] * b[0][1] + a[0][1] * b[1][1],
+        ],
+        [
+            a[1][0] * b[0][0] + a[1][1] * b[1][0],
+            a[1][0] * b[0][1] + a[1][1] * b[1][1],
+        ],
+    ]
+}
+
+/// Recognise a 2-qubit unitary of the form `(V⊗V)·dzz·(V†⊗V†)` with `dzz`
+/// diagonal, and return `(V, dzz)`.
+///
+/// The two local bases a Pauli entangler can have are tried — `H` (X⊗X) and
+/// `S·H` (Y⊗Y) — together with both signs of θ, and a candidate is accepted
+/// only when it re-binds every matrix entry to 1e-12. This is a check, never
+/// an assumption: a gate that merely looks like an entangler keeps the plain
+/// gate path.
+fn local_diag_form(
+    mat: &nalgebra::DMatrix<num_complex::Complex64>,
+) -> Option<(
+    [[num_complex::Complex64; 2]; 2],
+    [num_complex::Complex64; 4],
+)> {
+    use num_complex::Complex64;
+    if mat.nrows() != 4 || mat.ncols() != 4 {
+        return None;
+    }
+    let s = std::f64::consts::FRAC_1_SQRT_2;
+    let bases = [
+        // H
+        [
+            [Complex64::new(s, 0.0), Complex64::new(s, 0.0)],
+            [Complex64::new(s, 0.0), Complex64::new(-s, 0.0)],
+        ],
+        // S·H
+        [
+            [Complex64::new(s, 0.0), Complex64::new(s, 0.0)],
+            [Complex64::new(0.0, s), Complex64::new(0.0, -s)],
+        ],
+    ];
+    // tr(V⊗V·D·V†⊗V†) = tr(D) = 4·cos(θ/2) — the basis change drops out, so
+    // θ/2 is recoverable up to sign without knowing the basis or the gate name.
+    let tr = mat[(0, 0)] + mat[(1, 1)] + mat[(2, 2)] + mat[(3, 3)];
+    let c = (tr.re * 0.25).clamp(-1.0, 1.0);
+    let half = c.acos();
+    for v in bases {
+        for sgn in [1.0f64, -1.0] {
+            let th = 2.0 * half * sgn;
+            let (cp, sp) = ((th * 0.5).cos(), (th * 0.5).sin());
+            let dm = Complex64::new(cp, -sp); // e^{-iθ/2}  (Z⊗Z eigenvalue +1)
+            let dp = Complex64::new(cp, sp); // e^{+iθ/2}  (Z⊗Z eigenvalue -1)
+            let d = [dm, dp, dp, dm];
+            // (V⊗V)·D·(V†⊗V†) at ((i,j),(k,l)) =
+            //   Σ_{a,b} V[i,a]·V[j,b]·d[2a+b]·conj(V[k,a])·conj(V[l,b])
+            let mut err = 0.0f64;
+            for i in 0..2 {
+                for j in 0..2 {
+                    for k in 0..2 {
+                        for l in 0..2 {
+                            let mut acc = Complex64::new(0.0, 0.0);
+                            for a in 0..2 {
+                                for b in 0..2 {
+                                    acc += v[i][a]
+                                        * v[j][b]
+                                        * d[2 * a + b]
+                                        * v[k][a].conj()
+                                        * v[l][b].conj();
+                                }
+                            }
+                            err = err.max((acc - mat[(2 * i + j, 2 * k + l)]).norm());
+                        }
+                    }
+                }
+            }
+            if err < 1e-12 {
+                return Some((v, d));
+            }
+        }
+    }
+    None
+}
+
+/// Rewrite 2: Pauli-entangler runs → local basis changes around one diagonal run.
+///
+/// `Rxx(θ)` and `Ryy(θ)` factor exactly as `(V⊗V)·Dzz(θ)·(V†⊗V†)` with a fixed
+/// local basis (`V = H` for X⊗X, `V = S·H` for Y⊗Y) and a *diagonal*
+/// `Dzz(θ) = exp(-iθ/2 Z⊗Z)`. Inside a run of such gates the 1q factors cancel
+/// pairwise (`V†·V = I` between neighbours that share a qubit) and the
+/// survivors commute past every diagonal they are not attached to, so a whole
+/// entanglement layer collapses to `[basis block] · [all Dzz] · [inverse basis
+/// block]` — the per-gate sweep chain becomes ~2 sweeps plus one merged phase
+/// run. Sweep count is the lever that matters here: at n≥20 the state is DRAM
+/// resident, so one sweep per gate *is* the runtime (measured 18 GB/s at n=20,
+/// i.e. the roofline), and no arithmetic change can win what fewer streams win.
+///
+/// The schedule is exact, not heuristic. Each basis change carries the number
+/// of diagonals that must precede it and is pushed as far out (left for the `V`
+/// side, right for the `V†` side) as adjacent swaps with *disjoint*
+/// instructions allow, so every swap is a commutation and the state is
+/// preserved bit for bit up to fp rounding. `V`/`V†` on one qubit never swap
+/// (per-qubit order kept), diagonals never swap with each other (their order is
+/// the circuit order). A gate that cannot move just splits the diagonal run,
+/// and the rewrite is skipped entirely when the resulting sweep count is not
+/// strictly below the original gate count. `SF_HOIST=0` disables the pass,
+/// `SF_HOIST_MIN` sets the minimum run length (default 3).
+fn hoist_pauli_entangler_runs(
+    insts: Vec<SimInst>,
+    ops: &[(&QuantumOp, nalgebra::DMatrix<num_complex::Complex64>)],
+    n_qubits: usize,
+) -> Vec<SimInst> {
+    use num_complex::Complex64;
+    let kmax = fuse_1q_max_k(n_qubits);
+    if kmax < 2 || std::env::var("SF_HOIST").map(|v| v == "0").unwrap_or(false) {
+        return insts;
+    }
+    let min_run = std::env::var("SF_HOIST_MIN")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(2);
+
+    #[derive(Clone, Copy)]
+    enum Item {
+        /// `dir` = -1 basis change applied before its entangler, +1 after,
+        /// 0 = merged set whose halves move in opposite directions.
+        One {
+            q: usize,
+            m: [[Complex64; 2]; 2],
+            dir: i8,
+        },
+        Diag {
+            q1: usize,
+            q2: usize,
+            d: [Complex64; 4],
+        },
+    }
+
+    fn disjoint_from(other: &Item, q: usize) -> bool {
+        match other {
+            Item::One { q: oq, .. } => *oq != q,
+            Item::Diag { q1, q2, .. } => *q1 != q && *q2 != q,
+        }
+    }
+
+    fn push_one(items: &mut Vec<Item>, q: usize, m: [[Complex64; 2]; 2], dir: i8) {
+        let last_same = match items.last() {
+            Some(Item::One { q: pq, .. }) => *pq == q,
+            _ => false,
+        };
+        if last_same {
+            let t = items.len() - 1;
+            let prev = match items[t] {
+                Item::One { m, .. } => m,
+                _ => unreachable!(),
+            };
+            let merged = mul_2x2(m, prev);
+            let eye = Complex64::new(1.0, 0.0);
+            let is_id = (merged[0][0] - eye).norm() < 1e-12
+                && merged[0][1].norm() < 1e-12
+                && merged[1][0].norm() < 1e-12
+                && (merged[1][1] - eye).norm() < 1e-12;
+            if is_id {
+                // The `V†·V` pair between two entanglers that share a qubit
+                // cancels exactly — the whole point of the rewrite.
+                items.pop();
+            } else {
+                let same_dir = matches!(&items[t], Item::One { dir: pd, .. } if *pd == dir);
+                items[t] = Item::One {
+                    q,
+                    m: merged,
+                    dir: if same_dir { dir } else { 0 },
+                };
+            }
+            return;
+        }
+        items.push(Item::One { q, m, dir });
+    }
+
+    // `(q0, q1, V, D)` as returned by `ent`; named so the closure signature
+    // does not read as a wall of nesting.
+    type EntForm = (usize, usize, [[Complex64; 2]; 2], [Complex64; 4]);
+    let ent = |inst: &SimInst| -> Option<EntForm> {
+        if let SimInst::Gate { idx } = inst {
+            let op = ops[*idx].0;
+            if op.qubits.len() != 2 {
+                return None;
+            }
+            let (v, d) = local_diag_form(&ops[*idx].1)?;
+            return Some((op.qubits[0], op.qubits[1], v, d));
+        }
+        None
+    };
+
+    let mut out: Vec<SimInst> = Vec::with_capacity(insts.len() + 8);
+    let mut i = 0;
+    while i < insts.len() {
+        if ent(&insts[i]).is_none() {
             out.push(insts[i].clone());
             i += 1;
+            continue;
         }
+        let mut j = i;
+        while j < insts.len() && ent(&insts[j]).is_some() {
+            j += 1;
+        }
+        let keep_original = |out: &mut Vec<SimInst>, from: usize, to: usize| {
+            for inst in &insts[from..to] {
+                out.push(inst.clone());
+            }
+        };
+        if j - i < min_run {
+            keep_original(&mut out, i, j);
+            i = j;
+            continue;
+        }
+
+        // Build the drift list in circuit order. `U = (V⊗V)·D·(V†⊗V†)` as an
+        // operator, so the *rightmost* factor `V†` is what the state sees first:
+        // the stream from the far side is V† → D → V.
+        let mut items: Vec<Item> = Vec::with_capacity(6 * (j - i));
+        for k in i..j {
+            let (q1, q2, v, d) = ent(&insts[k]).unwrap();
+            let vd = [
+                [v[0][0].conj(), v[1][0].conj()],
+                [v[0][1].conj(), v[1][1].conj()],
+            ];
+            push_one(&mut items, q1, vd, -1);
+            push_one(&mut items, q2, vd, -1);
+            items.push(Item::Diag { q1, q2, d });
+            push_one(&mut items, q1, v, 1);
+            push_one(&mut items, q2, v, 1);
+        }
+
+        // Push every basis change as far out as disjointness allows: one
+        // ascending pass for the `V` side (drifts left), one descending pass for
+        // the `V†` side (drifts right). Both cursors are monotone — two basis
+        // changes on *different* qubits are mutually swappable, so re-visiting
+        // a displaced item would swap the pair back and forth forever.
+        for t in 0..items.len() {
+            let (q, dir) = match items[t] {
+                Item::One { q, dir, .. } => (q, dir),
+                Item::Diag { .. } => continue,
+            };
+            if dir >= 0 {
+                continue;
+            }
+            let mut p = t;
+            while p > 0 && disjoint_from(&items[p - 1], q) {
+                items.swap(p - 1, p);
+                p -= 1;
+            }
+        }
+        for t in (0..items.len()).rev() {
+            let (q, dir) = match items[t] {
+                Item::One { q, dir, .. } => (q, dir),
+                Item::Diag { .. } => continue,
+            };
+            if dir <= 0 {
+                continue;
+            }
+            let mut p = t;
+            while p + 1 < items.len() && disjoint_from(&items[p + 1], q) {
+                items.swap(p, p + 1);
+                p += 1;
+            }
+        }
+
+        // Accept only when this really is fewer sweeps than the gate chain.
+        let (mut groups, mut sweeps, mut prev_diag) = (0usize, 0usize, false);
+        let mut run_q: Vec<usize> = Vec::new();
+        for it in &items {
+            match it {
+                Item::Diag { .. } => {
+                    if !run_q.is_empty() {
+                        sweeps += run_q.len().div_ceil(kmax);
+                        run_q.clear();
+                    }
+                    if !prev_diag {
+                        groups += 1;
+                    }
+                    prev_diag = true;
+                }
+                Item::One { q, .. } => {
+                    prev_diag = false;
+                    if !run_q.contains(q) {
+                        run_q.push(*q);
+                    }
+                }
+            }
+        }
+        if !run_q.is_empty() {
+            sweeps += run_q.len().div_ceil(kmax);
+        }
+        if std::env::var_os("SF_HOIST_DEBUG").is_some() {
+            eprintln!(
+                "[hoist] run={} gates={} items={} diag_groups={} one_sweeps={} accept={}",
+                j - i,
+                j - i,
+                items.len(),
+                groups,
+                sweeps,
+                groups + sweeps < j - i
+            );
+        }
+        if groups + sweeps >= j - i {
+            keep_original(&mut out, i, j);
+            i = j;
+            continue;
+        }
+        for it in &items {
+            match it {
+                Item::One { q, m, .. } => out.push(SimInst::OneQ { q: *q, m: *m }),
+                Item::Diag { q1, q2, d } => out.push(SimInst::Diag2 {
+                    q1: *q1,
+                    q2: *q2,
+                    d: *d,
+                }),
+            }
+        }
+        i = j;
     }
     out
 }
@@ -3851,9 +4549,15 @@ fn build_phase_plan(run: &[SimInst], n: usize) -> Option<PhasePlan> {
                 plan.quad[q2 * n + q1] += a12;
             }
             SimInst::Gate { .. }
+            | SimInst::OneQ { .. }
             | SimInst::PhaseRun { .. }
             | SimInst::Fused { .. }
             | SimInst::PermuteRun { .. } => return None,
+            // A cubic term is outside the global+linear+quadratic form, so a
+            // 3q diagonal can never join a PhaseRun; a controlled 2q body is
+            // not diagonal at all.
+            SimInst::Diag3 { .. } => return None,
+            SimInst::C2Q { .. } => return None,
         }
     }
     Some(plan)
@@ -4143,6 +4847,91 @@ fn apply_diag2_inplace(
     }
 }
 
+/// Controlled 2q sweep: `P0(c) ⊗ m0 + P1(c) ⊗ m1` in ONE gather/scatter pass.
+///
+/// Groups of 8 amplitudes (the control bit plus the 4 amplitudes of the 2q
+/// block for each control value) are enumerated by mask deposit, so the kernel
+/// needs no slice offset: a band owns whole groups and groups are disjoint,
+/// which is what makes the parallel raw-pointer walk sound. Rayon therefore
+/// splits by groups rather than by slice chunks — a group is a strided set of 8
+/// (contiguous only when the three qubits are adjacent) and must never straddle
+/// a split.
+fn apply_c2q_inplace(
+    state: &mut [num_complex::Complex64],
+    c: usize,
+    q1: usize,
+    q2: usize,
+    m0: &[[num_complex::Complex64; 4]; 4],
+    m1: &[[num_complex::Complex64; 4]; 4],
+    use_par: bool,
+) {
+    use num_complex::Complex64;
+    let n_groups = state.len() >> 3;
+    if n_groups == 0 {
+        return;
+    }
+    let mut masks = [1usize << c, 1usize << q1, 1usize << q2];
+    masks.sort_unstable();
+    // Group-local index s = (b_c << 2) | (b_q1 << 1) | b_q2, so the two
+    // control halves are s in 0..4 and 4..8.
+    let mut offs = [0usize; 8];
+    for (s, slot) in offs.iter_mut().enumerate() {
+        *slot = (((s >> 2) & 1) << c) | (((s >> 1) & 1) << q1) | ((s & 1) << q2);
+    }
+    // 4096 groups = 32K amplitude touches per band: the gather stays in cache
+    // and the task count stays small.
+    let band = 4096usize.min(n_groups);
+    let n_bands = n_groups.div_ceil(band);
+    let sp = SendPtr(state.as_mut_ptr());
+    let run_band = |b: usize| {
+        let g1 = ((b + 1) * band).min(n_groups);
+        for g in b * band..g1 {
+            let base = deposit_bits_masked(g, &masks);
+            let mut v = [Complex64::new(0.0, 0.0); 8];
+            for (s, slot) in v.iter_mut().enumerate() {
+                *slot = unsafe { sp.get(base | offs[s]) };
+            }
+            for (half, m) in [m0, m1].iter().enumerate() {
+                let b0 = half << 2;
+                let x = [v[b0], v[b0 + 1], v[b0 + 2], v[b0 + 3]];
+                for (r, row) in m.iter().enumerate() {
+                    v[b0 + r] = row[0] * x[0] + row[1] * x[1] + row[2] * x[2] + row[3] * x[3];
+                }
+            }
+            for (s, val) in v.iter().enumerate() {
+                unsafe { sp.set(base | offs[s], *val) };
+            }
+        }
+    };
+    // `run_band` only captures shared refs and copy values, so it is itself
+    // `Copy` and can be handed to both arms by value.
+    if use_par {
+        (0..n_bands).into_par_iter().for_each(run_band);
+    } else {
+        (0..n_bands).for_each(run_band);
+    }
+}
+
+/// Diagonal 3q sweep: `state[i] *= d[(bit_q1 << 2) | (bit_q2 << 1) | bit_q3]`.
+fn apply_diag3_inplace(
+    state: &mut [num_complex::Complex64],
+    q1: usize,
+    q2: usize,
+    q3: usize,
+    d: &[num_complex::Complex64; 8],
+    use_par: bool,
+) {
+    let qs = [q1, q2, q3];
+    if use_par {
+        let chunk = (state.len() / 16).max(1024);
+        state.par_chunks_mut(chunk).enumerate().for_each(|(c, s)| {
+            crate::simd::diag3_pass(s, c * chunk, qs, d);
+        });
+    } else {
+        crate::simd::diag3_pass(state, 0, qs, d);
+    }
+}
+
 /// Sort 3 qubit indices for iteration.
 fn sorted_3(a: usize, b: usize, c: usize) -> [usize; 3] {
     let mut arr = [a, b, c];
@@ -4268,6 +5057,53 @@ mod tests {
         dag.add_op(OpType::X, &[1]);
         assert_eq!(dag.gate_count(), 2);
         assert_eq!(dag.depth(), 1); // parallel — depth is 1
+    }
+
+    /// `parallel_layers_fast` must be `parallel_layers`, up to the
+    /// within-layer order the reference randomizes through a `HashMap`.
+    #[test]
+    fn test_parallel_layers_fast_matches_reference() {
+        let mut dag = QuantumDAG::new(6, 0);
+        // A brick pattern with a varying stride plus a skip-2 gate, so the DAG
+        // has depth variety and non-trivial predecessor sets at every level.
+        for k in 0..4usize {
+            for q in 0..6usize {
+                dag.add_op(OpType::Ry(Parameter::Const(0.1 * (k + q) as f64)), &[q]);
+            }
+            let mut q = 0usize;
+            while q + 1 < 6 {
+                dag.add_op(OpType::CNOT, &[q, q + 1]);
+                q += 1 + (k % 2);
+            }
+            dag.add_op(OpType::CZ, &[0, 3]);
+        }
+
+        let reference = dag.parallel_layers();
+        let fast = dag.parallel_layers_fast();
+        assert!(!fast.is_empty());
+        assert_eq!(reference.len(), fast.len(), "layer count");
+
+        for (li, (a, b)) in reference.iter().zip(fast.iter()).enumerate() {
+            let mut sa = a.clone();
+            let mut sb = b.clone();
+            sa.sort_by_key(|n| n.index());
+            sb.sort_by_key(|n| n.index());
+            assert_eq!(sa, sb, "layer {} membership", li);
+        }
+
+        // The fast path is the deterministic one: ascending node index.
+        for (li, layer) in fast.iter().enumerate() {
+            assert!(
+                layer.windows(2).all(|w| w[0].index() < w[1].index()),
+                "layer {} is not in ascending node order",
+                li
+            );
+        }
+
+        // Every gate appears exactly once, and no boundary node appears.
+        let total: usize = fast.iter().map(|l| l.len()).sum();
+        assert_eq!(total, dag.gate_count());
+        assert!(fast.iter().flatten().all(|&n| !dag.is_boundary_node(n)));
     }
 
     #[test]
@@ -4582,6 +5418,235 @@ mod tests {
                 a[i],
                 b[i]
             );
+        }
+    }
+
+    /// `CX(a,t)·RZZ(t,o)·CX(a,t)` is the 3-body phase `exp(-i th ZZZ/2)`.
+    ///
+    /// Checked twice: structurally the plan must be one `Diag3` (both CXs and
+    /// the RZZ gone), and numerically the evolved state must equal the
+    /// state prepared without the block times the closed-form phase — so the
+    /// reference never goes through the rewrite it is checking.
+    #[test]
+    fn test_zzz_triple_is_one_diag3_and_matches_closed_form() {
+        let theta = 0.6;
+        let n = 4usize;
+        let prep = |d: &mut QuantumDAG| {
+            d.add_op(OpType::H, &[0]);
+            d.add_op(OpType::H, &[1]);
+            d.add_op(OpType::Ry(Parameter::Const(0.35)), &[1]);
+            d.add_op(OpType::H, &[2]);
+        };
+
+        let mut dag_a = QuantumDAG::new(n, 0);
+        prep(&mut dag_a);
+        dag_a.add_op(OpType::CNOT, &[0, 1]);
+        dag_a.add_op(OpType::Rzz(Parameter::Const(theta)), &[1, 2]);
+        dag_a.add_op(OpType::CNOT, &[0, 1]);
+
+        let (fused, insts) = dag_a.build_sim_plan();
+        let diag3: Vec<&SimInst> = insts
+            .iter()
+            .filter(|i| matches!(i, SimInst::Diag3 { .. }))
+            .collect();
+        assert_eq!(diag3.len(), 1, "block must plan as exactly one Diag3");
+        assert!(
+            !insts.iter().any(
+                |i| matches!(i, SimInst::Gate { idx } if fused[*idx].0.op_type == OpType::CNOT)
+            ),
+            "both CX sweeps must be absorbed"
+        );
+        if let SimInst::Diag3 { q1, q2, q3, d } = diag3[0] {
+            assert_eq!((*q1, *q2, *q3), (0, 1, 2), "diag3 qubit order");
+            for (g, want) in d.iter().enumerate() {
+                let z = 1.0 - 2.0 * (g.count_ones() as f64 % 2.0);
+                let phase = num_complex::Complex64::from_polar(1.0, -0.5 * theta * z);
+                assert!((want - phase).norm() < 1e-12, "d3[{g}] {want} != {phase}");
+            }
+        }
+
+        let mut dag_b = QuantumDAG::new(n, 0);
+        prep(&mut dag_b);
+        let a = dag_a.simulate();
+        let b = dag_b.simulate();
+        for i in 0..a.len() {
+            if b[i].norm() < 1e-15 {
+                assert!(a[i].norm() < 1e-12, "idx {i}: {} should be zero", a[i]);
+                continue;
+            }
+            let z = [0usize, 1, 2]
+                .iter()
+                .map(|&q| if (i >> q) & 1 == 1 { -1.0 } else { 1.0 })
+                .product::<f64>();
+            let want = b[i] * num_complex::Complex64::from_polar(1.0, -0.5 * theta * z);
+            assert!(
+                (a[i] - want).norm() < 1e-12,
+                "idx {i}: {} != {}",
+                a[i],
+                want
+            );
+        }
+    }
+
+    /// Same sandwich with a NON-diagonal body: `CX(a,t)·RYY(t,o)·CX(a,t)`
+    /// is `exp(-i th Z_a Y_t Y_o)`, which is NOT a 3q diagonal — the CX
+    /// conjugation leaves the Y on the target. The block has to become one
+    /// controlled 2q gate with `m0 = RYY(+th)` and `m1 = X_t·RYY·X_t =
+    /// RYY(-th)`; the reference below applies those two 4×4 blocks directly,
+    /// so a wrong pairing or a swapped control bit cannot pass.
+    #[test]
+    fn test_zyy_triple_is_one_controlled_2q_and_matches_closed_form() {
+        let theta = 0.6;
+        let n = 4usize;
+        let prep = |d: &mut QuantumDAG| {
+            d.add_op(OpType::H, &[0]);
+            d.add_op(OpType::H, &[1]);
+            d.add_op(OpType::Ry(Parameter::Const(0.35)), &[1]);
+            d.add_op(OpType::H, &[2]);
+        };
+
+        let mut dag_a = QuantumDAG::new(n, 0);
+        prep(&mut dag_a);
+        dag_a.add_op(OpType::CNOT, &[0, 1]);
+        dag_a.add_op(OpType::Ryy(Parameter::Const(theta)), &[1, 2]);
+        dag_a.add_op(OpType::CNOT, &[0, 1]);
+
+        let (fused, insts) = dag_a.build_sim_plan();
+        assert!(
+            insts.iter().any(|i| matches!(i, SimInst::C2Q { .. })),
+            "the block must be planned as one controlled 2q gate"
+        );
+        assert!(
+            !insts.iter().any(
+                |i| matches!(i, SimInst::Gate { idx } if fused[*idx].0.op_type == OpType::CNOT)
+            ),
+            "both CX sweeps must be absorbed"
+        );
+
+        // Reference: the block acts as RYY(+th) on (t,o) when the control is 0
+        // and as RYY(-th) when it is 1. RYY(th) = (V⊗V)·exp(-i th ZZ/2)·(V†⊗V†)
+        // with V = S·H, expanded here into an explicit 4×4 — no diagonal form
+        // and nothing shared with the planner's own construction.
+        let mut dag_b = QuantumDAG::new(n, 0);
+        prep(&mut dag_b);
+        let a = dag_a.simulate();
+        let b = dag_b.simulate();
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        let v = [
+            [
+                num_complex::Complex64::new(h, 0.0),
+                num_complex::Complex64::new(h, 0.0),
+            ],
+            [
+                num_complex::Complex64::new(0.0, h),
+                num_complex::Complex64::new(0.0, -h),
+            ],
+        ];
+        let ryy = |sgn: f64| -> [[num_complex::Complex64; 4]; 4] {
+            let d = [
+                num_complex::Complex64::from_polar(1.0, -0.5 * sgn * theta),
+                num_complex::Complex64::from_polar(1.0, 0.5 * sgn * theta),
+                num_complex::Complex64::from_polar(1.0, 0.5 * sgn * theta),
+                num_complex::Complex64::from_polar(1.0, -0.5 * sgn * theta),
+            ];
+            let mut m = [[num_complex::Complex64::new(0.0, 0.0); 4]; 4];
+            for (r, row) in m.iter_mut().enumerate() {
+                for (ci, slot) in row.iter_mut().enumerate() {
+                    let mut acc = num_complex::Complex64::new(0.0, 0.0);
+                    for p in 0..2 {
+                        for k in 0..2 {
+                            acc += v[(r >> 1) & 1][p]
+                                * v[r & 1][k]
+                                * d[(p << 1) | k]
+                                * v[(ci >> 1) & 1][p].conj()
+                                * v[ci & 1][k].conj();
+                        }
+                    }
+                    *slot = acc;
+                }
+            }
+            m
+        };
+        let (m0, m1) = (ryy(1.0), ryy(-1.0));
+        // Control = qubit 0, target = qubit 1, other = qubit 2.
+        let mut want = vec![num_complex::Complex64::new(0.0, 0.0); b.len()];
+        for (i, slot) in want.iter_mut().enumerate() {
+            let ba = i & 1;
+            let base = i & !0b111usize;
+            let m = if ba == 0 { &m0 } else { &m1 };
+            let row = (((i >> 1) & 1) << 1) | ((i >> 2) & 1);
+            let mut acc = num_complex::Complex64::new(0.0, 0.0);
+            for k in 0..4 {
+                let src = base | ba | ((k >> 1) << 1) | ((k & 1) << 2);
+                acc += m[row][k] * b[src];
+            }
+            *slot = acc;
+        }
+        for i in 0..a.len() {
+            assert!(
+                (a[i] - want[i]).norm() < 1e-12,
+                "idx {i}: {} != {}",
+                a[i],
+                want[i]
+            );
+        }
+    }
+
+    /// The controlled-2q sweep itself: every qubit placement (adjacent, sparse,
+    /// high) and both chunk modes against a naive per-group multiply.
+    #[test]
+    fn c2q_pass_matches_naive() {
+        let n = 16usize;
+        let dim = 1usize << n;
+        let zval = |k: usize| {
+            num_complex::Complex64::new(
+                (k as f64 * std::f64::consts::FRAC_PI_4).sin(),
+                (k as f64 * 0.479_425_538_605_010_2).cos(),
+            )
+        };
+        let mk = |off: usize| -> [[num_complex::Complex64; 4]; 4] {
+            let mut m = [[num_complex::Complex64::new(0.0, 0.0); 4]; 4];
+            for (r, row) in m.iter_mut().enumerate() {
+                for (c, slot) in row.iter_mut().enumerate() {
+                    *slot = zval(off + r * 4 + c);
+                }
+            }
+            m
+        };
+        let (m0, m1) = (mk(1), mk(17));
+        for &(c, q1, q2) in &[
+            (0usize, 1usize, 2usize),
+            (2, 0, 5),
+            (5, 1, 4),
+            (3, 4, 5),
+            (0, 4, 1),
+        ] {
+            let base: Vec<num_complex::Complex64> = (0..dim).map(|i| zval(i * 3 + 7)).collect();
+            let mask = (1usize << c) | (1usize << q1) | (1usize << q2);
+            let mut want = base.clone();
+            for (i, slot) in want.iter_mut().enumerate() {
+                let ba = (i >> c) & 1;
+                let m = if ba == 0 { &m0 } else { &m1 };
+                let row = (((i >> q1) & 1) << 1) | ((i >> q2) & 1);
+                let mut acc = num_complex::Complex64::new(0.0, 0.0);
+                for k in 0..4 {
+                    let src = (i & !mask) | (ba << c) | (((k >> 1) & 1) << q1) | ((k & 1) << q2);
+                    acc += m[row][k] * base[src];
+                }
+                *slot = acc;
+            }
+            for &par in &[false, true] {
+                let mut got = base.clone();
+                apply_c2q_inplace(&mut got, c, q1, q2, &m0, &m1, par);
+                for i in 0..dim {
+                    assert!(
+                        (got[i] - want[i]).norm() < 1e-12,
+                        "c={c} q=({q1},{q2}) par={par} idx {i}: {} != {}",
+                        got[i],
+                        want[i]
+                    );
+                }
+            }
         }
     }
 
@@ -5109,6 +6174,19 @@ fn execute_statevector_plan(
             }
             SimInst::Diag1 { q, d0, d1 } => apply_diag1_inplace(&mut state, *q, *d0, *d1, use_par),
             SimInst::Diag2 { q1, q2, d } => apply_diag2_inplace(&mut state, *q1, *q2, d, use_par),
+            SimInst::Diag3 { q1, q2, q3, d } => {
+                apply_diag3_inplace(&mut state, *q1, *q2, *q3, d, use_par)
+            }
+            SimInst::C2Q { c, q1, q2, m0, m1 } => {
+                apply_c2q_inplace(&mut state, *c, *q1, *q2, m0, m1, use_par)
+            }
+            SimInst::OneQ { q, m } => {
+                let stride = 1usize << q;
+                inplace_1q_general(
+                    &mut state, stride, m[0][0].re, m[0][0].im, m[0][1].re, m[0][1].im, m[1][0].re,
+                    m[1][0].im, m[1][1].re, m[1][1].im, use_par,
+                )
+            }
             SimInst::PhaseRun { plan } => apply_phase_run(&mut state, n_qubits, plan, use_par),
             SimInst::Fused {
                 qs,

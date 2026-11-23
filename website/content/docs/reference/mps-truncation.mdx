@@ -32,6 +32,14 @@ m.truncation_events()       # 15
 m.fidelity_lower_bound()    # 0.670201
 ```
 
+These values — and the bond ladder under [Choosing a bond](#choosing-a-bond),
+which is the same circuit — come from the 0.1.18 kernel. Two later fixes, a rank
+clamp in the block-diagonal merge and the mixed-canonical gauge before a
+truncating merge, change *which* weight a given bond discards, so re-read these
+four numbers on the build you are using (see
+[The same cap in three engines](#the-same-cap-in-three-engines)). The definitions
+and the reading rules below are unchanged.
+
 ## The returned state is a survivor, not a normalised state
 
 `to_statevector()` and `mps_todense()` return the state the bond cap left behind. It is not
@@ -42,9 +50,20 @@ psi = np.asarray(m.to_statevector())
 norm2 = float(np.vdot(psi, psi).real)      # 0.828381
 ir.mps_norm_sq(16)                          # 0.828381 — same number
 
+# High-level handles answer the same question without densifying 2^n values.
+# Works on every lane (statevector, density_matrix, stabilizer, mps).
+st = sf.cat(qc, mode="mps", bond_dim=16).simulate({})
+st.norm_squared()                           # the same number, without densifying
+
 exact = np.asarray(ir.simulate_to_state("statevector").numpy())
 fidelity = abs(np.vdot(exact, psi)) ** 2 / norm2   # 0.832776
 ```
+
+`State.norm_squared()` is exact to `4.4e-16` relative against the densified sum on
+`mps` handles and contracts the chain in place — it previously raised `MethodError`,
+which forced callers to either densify (O(n·2^n·D²)) or divide by the wrong
+normalisation. `purity()`, `probabilities()` and `fidelity(self)` renormalise and are
+*not* substitutes when you want the survivor weight.
 
 Dividing by `norm2` is not optional when comparing against an exact reference. Without it the
 overlap is scaled by the survivor weight and the comparison is meaningless. For this circuit the
@@ -65,19 +84,118 @@ the measured fidelity `0.832776` sits above both. This is why the method is call
 bound: it is conservative, empirical, and not a certified bound. When it prints `0.0`, the only
 conclusion is Σε ≥ 1 — not that the state is orthogonal to the reference.
 
-## bond_dim is not portable across engines
+## The same cap in three engines
 
-The same gates at the same nominal cap do not produce the same state:
+At a fixed cap the three engines now keep the same weight, because each
+truncates the Schmidt tensor of its own cut. A 16-qubit, 12-layer random
+brickwork (948 gates), one call per arm, bond 128:
 
-| engine | setting | fidelity at bond 16 |
-|---|---|---:|
-| SuperFermion | `bond_dim=16` | 0.832776 |
-| Qiskit Aer | `matrix_product_state_max_bond_dimension=16` | 0.961090 |
-| PennyLane `default.tensor` | MPS at bond 16 | 0.961425 |
+| engine | setting | 1 − fidelity | ms |
+|---|---|---:|---:|
+| SuperFermion `cat` MPS | `bond_dim=128` | 9.88e-03 | 1,655 |
+| Qiskit Aer | `matrix_product_state_max_bond_dimension=128` | 9.88e-03 | 4,176 |
+| PennyLane `default.tensor` | MPS at bond 128 | 9.88e-03 | 19,315 |
 
-The cap means "keep at most this many bond indices", but which indices are kept, in what order,
-and how the local tensors are factorised differ per engine. Compare each engine against a dense
-reference, not against another engine's bond number.
+`n = 20` repeats it: `4.18e-02` for SuperFermion and PennyLane, `4.22e-02` for
+Aer, whose third digit differs because it renormalizes (`norm² = 1.003`) and
+breaks ties differently. The times are one window on one host and are **not** a
+speedup of record — the PennyLane arm has read 5.1x slower than a previous
+session on unchanged code — so the accuracy column is the claim.
+
+At caps below 128 the engines stop agreeing, and the direction is informative. Same circuit,
+against the exact state, `n = 16`:
+
+| bond | 8 | 16 | 32 | 64 | 128 |
+|---|---:|---:|---:|---:|---:|
+| SuperFermion, 1 − fidelity | 0.9528 | 0.7702 | 0.4354 | 0.1176 | 9.88e-03 |
+| PennyLane, 1 − fidelity | 0.9528 | 0.7702 | 0.4354 | 0.1176 | 9.88e-03 |
+| Qiskit Aer, 1 − fidelity | 0.9597 | 0.7820 | 0.4408 | 0.1180 | 9.88e-03 |
+
+SuperFermion and PennyLane return the same state at every cap, survivor norm included
+(`0.049479`, `0.232135`, `0.565862`, `0.882611`, `0.990128`). Aer is slightly *less* accurate
+below 128 because it renormalises after each cut (its `norm²` reads `1.059` at bond 8, `1.027`
+at 16, `1.011` at 32, `1.000` at 64 and 128). A low cap is inaccurate in every engine; below
+128 the ordering is SF = PL, and Aer is the one that differs.
+
+Two fixes put that column together, both on by default: the block-diagonal merge
+clamps its kept rank by the rank of the merged tensor (it had inflated the bond
+past it), and the chain is held in the mixed-canonical gauge before a merge that
+can truncate (it had truncated a non-Schmidt tensor). `SF_MPS_GAUGE=0` restores
+the pre-gauge behaviour for an A/B.
+
+An earlier version of this section measured a gap at bond 16, before both fixes.
+What still does not travel is the *number*: `bond_dim` is a cap on indices, and
+the fidelity it buys depends on the Schmidt spectrum at the circuit's worst cut,
+so a bond that is exact for one circuit truncates another. Compare each engine
+against a dense reference at the bond you intend to use, not against another
+engine's bond number.
+
+## Where the truncating-cap time goes
+
+A cap that truncates is slower than a rank-limited cap at the same width: at `n = 16`,
+bond 128 takes 1,044 ms against 487 ms at bond 256 (interleaved, four threads). The
+intuitive explanation — "it pays SVD selection even when nothing is dropped" — is only a
+third right. Per-merge instrumentation (`SF_MPS_SVD_DEBUG=1`) prints one line per merge attempt; an exact
+split that its own `ε > 1e-10` test rejects is retried on the SVD path, so lines are not
+merges. That cell (build #29, before the pivoted split added inside the exact path),
+n = 16, bond 128, 12-cycle brickwork:
+
+| | count | note |
+|---|---:|---|
+| merge attempts (lines) | 150 | 124 merging gates plus 26 retries |
+| exact block-diagonal split | 81 | 55 accepted outright, 26 rejected |
+| thin SVD | 69 | 43 direct + 26 retries; the large merges, mean `min(nrows, ncols)` = 41.7 |
+| ... of those, every direction kept | 64 | `k == r`, so nothing was dropped |
+| merges that drop material weight | 5 | largest 7.6e-3, each fires the measured-loss guard |
+
+Of the 1,035 ms of merge work: 397 ms factorisation, 173 ms factor rebuild, 116 ms guard
+QR, 40 ms bookkeeping.
+
+* **The factorisation is not skippable by asking "is the cap binding?"** — `k` is an
+  *output* of the spectrum, and the spectrum is also what prunes phantom bonds. Routing
+  `min(nrows, ncols) <= bond_dim` merges into the QR split instead was implemented and
+  reverted: the unpivoted row cut perturbs near-degenerate Schmidt spectra (a dirty bond
+  ladder {34, 42, 52, 64}, ~5e-4 error, and slower). `SF_MPS_TRUNCATION=qr` still exposes
+  that path for an A/B; it is not the default for this reason. What *is* avoidable is the
+  SVD on merges the split's own row selection cannot certify — see the last bullet.
+* **The guard is accuracy-critical.** It re-selects by measured `‖M·v_c‖` when the reported
+  σ and the factors disagree, which is what keeps `discarded_weight` honest on the 5 merges
+  that actually cut.
+* **The factor rebuild was pure overhead, and is fixed.** With `k == r` the old code
+  rebuilt the factors with `r` scalar matvecs; it now does one BLAS-3 product. Interleaved
+  A/B on the same cell: 1,108 → 1,044 ms at bond 128 (−5.8%) and 563 → 487 ms at bond 256
+  (−13.5%), with `1 − fidelity` between the two builds at 0 to 2.2e-16.
+* **The 26 rejected retries are gone (current build).** A row *subset* cannot certify a
+  merge whose mass sits on more rows than its rank, even when that rank fits the cap, so
+  the exact split now falls back to a column-pivoted QR of the same middle matrix: it keeps
+  all `2·d_r2` columns, is exact by construction, and measured `ε = 0` on all 26 merges at
+  n=16/bond 128. That cell now makes **43** thin-SVD calls per run, not 69. Interleaved at
+  two pinned threads: 1,796 → 1,705 ms at bond 128 and 833 → 582 ms at bond 256, with
+  `1 − fidelity` between builds at `-2.2e-16`; `SF_MPS_BD_PIVOT=0` reproduces the previous
+  build bit for bit. Accuracy does **not** move — those merges were already exact under the
+  SVD (`k == r`), so read this as time saved, not as a defect repaired. Report §46.21.10.
+
+If you monitor `truncation_events`, read it together with `discarded_weight`: the counter
+increments once per merge with ε > 1e-15, so merges sitting at machine noise flip in and
+out. On one binary the same cell reports 12 events at four threads and 10 at the default
+thread count, while ε agrees to 13 digits (`9.89002031524577e-03` vs `9.89002031524981e-03`).
+The weight is the stable number; the count is a threshold tally and is not comparable across
+thread settings. Full tables and the build hashes: report §46.21.9 and §46.21.10,
+reproduced by `_sfpl_bench/_mps_selcost.py wall` / `attrib`, `_sfpl_bench/_ab_time.py` and
+`_sfpl_bench/_bd_pivot_check.py`.
+
+## Gradients through a truncated chain
+
+`mode="mps"` handles differentiate too, with the exact shift rule on the chain
+rather than a dense reverse sweep. At a bond large enough to be exact the answer
+matches the adjoint lane to `2.3e-15` measured; once the cap discards weight the
+shift rule differentiates the **survivor** functional — the state as returned,
+without renormalisation — so a truncated gradient is the derivative of what the
+cap kept, not of the ideal state. Raise the bond until `discarded_weight()` is
+zero, or use `mode="adjoint"`, when the ideal state's gradient is what you need.
+The cost is `2P` evolutions at an exact bond and `4P` once the cap bites; the
+[gradients guide](/docs/guides/gradients#gradients-through-an-mps) has the
+runnable example.
 
 ## Truncation policy
 
@@ -101,6 +219,41 @@ Raise the bond until fidelity stops moving, and check that it never decreases on
 
 Monotonicity is the check that catches a bad cap without needing the exact state — a larger bond
 must never return a worse state.
+
+### Measured on 0.1.30: the ladder is not the old ladder
+
+The table above is 0.1.18. The brickwork behind it — the seed-20261119 generator, which
+reproduces the page's `0.832776` at bond 16 on the 0.1.18 wheel — gives a different, lower
+ladder on the current kernel:
+
+| bond | 8 | 16 | 32 | 64 | 128 | 256 |
+|---|---:|---:|---:|---:|---:|---:|
+| fidelity | 0.0472 | 0.2298 | 0.5646 | 0.8824 | 0.9901 | 1.0000 |
+
+Bond 64 returns `1.000000` in the 0.1.18 table and `0.8824` here. That is the rank clamp and
+the gauge fix acting on *this* circuit, not a regression being hidden: the older table is kept
+for provenance, and you should re-measure a bond you carried over from 0.1.18.
+
+At `n = 16` bond 256 is exact because a 16-qubit chain can have rank at most `2^8 = 256`; 256,
+512 and 1024 all return the same state. That rank limit is why the cap stops mattering — and
+why it cannot be a constant. At `n = 24` even bond 256 leaves a `1.1e-2` defect, and at `n = 32`
+it still discards `0.72%`.
+
+Depth moves the requirement while the qubit count stays fixed. `n = 16`, bond 128:
+
+| cycles | gates | 1 − fidelity | bond for 1 − fidelity ≤ 1e-6 |
+|---:|---:|---:|---:|
+| 2 | 158 | 6.7e-16 | 128 |
+| 8 | 632 | 6.3e-08 | 128 |
+| 12 | 948 | 9.9e-03 | 256 |
+| 16 | 1,264 | 6.0e-02 | 256 |
+| 24 | 1,896 | 0.322 | 256 |
+| 32 | 2,528 | 0.549 | 256 |
+
+Bond 128 is exact to 8 cycles and retains only **44.7% of its norm** by 32 cycles. Choosing a
+cap *at* the rank limit is also cheaper than one below it: at `n = 16`, bond 256 took 1,023 ms
+against 2,020 ms for bond 128, because the truncating path pays for SVD selection the exact
+path does not.
 
 ## Common mistakes
 

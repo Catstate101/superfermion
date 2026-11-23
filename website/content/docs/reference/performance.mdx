@@ -35,6 +35,69 @@ Note: GHZ is the trivially-best case for MPS (bond dimension 2) — it
 demonstrates framework overhead, not tensor-network scaling on heavily
 entangled workloads.
 
+### MPS at Scale: Accuracy and Time (Current Tree)
+
+The rows above are weakly-entangled circuits where MPS is the right tool. On a generic
+entangling brickwork the trade is different: below about `n = 22` the dense kernel is faster,
+and MPS is the memory lane. One circuit per cell (seed 20261119, 12 cycles, four threads),
+fidelity against the exact dense state, bond 128:
+
+| n | gates | 1 − fidelity | MPS | dense | MPS / dense |
+|---:|---:|---:|---:|---:|---:|
+| 12 | 708 | exact (< 1e-15) | 27 ms | 3 ms | 8.8x |
+| 16 | 948 | 9.88e-03 | 1,429 ms | 51 ms | 27.9x |
+| 18 | 1,068 | 2.02e-02 | 2,915 ms | 113 ms | 25.7x |
+| 20 | 1,188 | 4.19e-02 | 4,543 ms | 508 ms | 8.9x |
+| 22 | 1,308 | 5.83e-02 | 6,191 ms | 2,218 ms | 2.8x |
+| 24 | 1,428 | 9.70e-02 | 8,542 ms | 10,518 ms | 0.81x |
+
+At `n = 24` the dense state is 268 MB and MPS is now **faster**, 8,542 ms against
+10,518 ms (1.23x), in the same window. That flip is not all code: against the previous
+window the MPS lane dropped 20% (10,633 → 8,542 ms, the nothing-dropped factor build in
+§46.21.9) while the dense lane rose 10% (9,528 → 10,518 ms) with no change on that path, so
+treat "MPS wins at 24" as window-specific and "MPS is within ~1.2x of dense from 24 up" as
+the durable claim. Beyond that the comparison stops being runnable on an 8 GB host: dense is
+1.07 GB at 26, 4.3 GB at 28 and 68.7 GB at 32 qubits (arithmetic, not allocated), while the
+MPS chain measured 0.07–0.09 GB of RSS at every size up to 32. That memory is what the lane
+buys.
+
+At a fixed cap the cost is set by depth as much as by width. `n = 16`, bond 128 goes from
+`6.3e-08` defect at 8 cycles to `9.9e-03` at 12 and `0.549` at 32 (2,528 gates). Bond 256 —
+the rank limit at 16 qubits — is exact at all three depths and much *faster* than bond 128
+at 12 cycles (427 ms vs 1,028 ms). The reason is not "selection work when nothing is
+dropped": at bond 256 the exact block-diagonal split admits the large merges and leaves the
+SVD only small ones (`r̄ = 25.0`, all exact), while at bond 128 the same merges fail its
+structural bound `2·min(d_l1, d_m, d_r2) ≤ bond_dim` and must run a thin SVD at `r̄ = 41.7`.
+Bond 128's three biggest costs are measured in the campaign report (§46.21.9); one of them
+(rebuilding factors with `r` scalar matvecs when every direction is kept) was pure overhead
+and is gone in this build.
+
+The second of those costs is gone too. A merge whose mass sits on more rows than its rank
+cannot be certified by the exact split's row selection, so it used to be retried through a
+thin SVD that then answered `k == r` — 26 retries per run at n=16/bond 128. The fallback is
+now a column-pivoted QR of the same middle matrix, exact by construction: that cell makes 43
+SVD calls instead of 69. Interleaved at two pinned threads, 1,796 → 1,705 ms at bond 128 and
+833 → 582 ms at bond 256, with the state unchanged (`1 − fidelity` = `-2.2e-16`; bit
+identical with `SF_MPS_BD_PIVOT=0`). The defect does not move because those merges were
+already exact — this is time, not accuracy. Report §46.21.10.
+
+Same-window cross-engine rows above `n = 20`, exact reference (build #28 window; the SF
+rows were re-read on the current build at 6,191 ms for n=22/bond 128 and 24,881 ms for
+n=22/bond 256, so the SF side of this table is now conservative):
+
+| n | bond | SuperFermion | Qiskit Aer | PennyLane |
+|---:|---:|---:|---:|---:|
+| 22 | 128 | 5.8323e-02 / 10,985 ms | 5.8743e-02 / 57,838 ms | 5.8323e-02 / 30,535 ms |
+| 22 | 256 | 2.6936e-03 / 50,455 ms | 2.6983e-03 / 212,090 ms | not run |
+
+PennyLane and SuperFermion return the same state at the same cap (defects agree to `1e-15`);
+Aer's defect differs by `7e-4` because it renormalises after each cut. Aer was run with
+`matrix_product_state_truncation_threshold=0.0`, stricter than its default, so these Aer times
+are not comparable with the default-setting row in the [MPS truncation
+page](/docs/reference/mps-truncation#the-same-cap-in-three-engines). All times in this
+subsection are one window on one host; the accuracy columns are the claim, and the ratios
+are only valid within this window.
+
 ### Statevector vs Qulacs (v0.1.15)
 
 56 statevector cases, the `superfermion_optimized` build against Qulacs 0.6.14
@@ -165,6 +228,45 @@ measures 3.5 ms. The notebook attributes its number to the PennyLane side
 building the observable as nested `qml.prod`, which measures observable
 construction, not the adjoint. The n >= 18 loss came from a 0.1.x build that
 turned in 579 ms at n=18; the current build turns in 102 ms there.
+
+### Against Lightning at Four Threads (Current Tree)
+
+The tables above are the 0.1.15 lane and do not record a thread setting for
+either arm. This is a separate re-measurement on the current tree, at a setting
+a training loop can reproduce: four rayon threads to `cat`'s adjoint handle and
+`OMP_NUM_THREADS=1` for `lightning.qubit` — its best measured setting on this
+4-core part, where four OMP threads run 12% slower. Both arms are end-user calls
+(`plan.run_gradient` against `qml.grad`). Each pair times both arms once in
+alternating order and takes the ratio *per pair*, because this host's absolute
+times move by up to 2.5x between windows while the paired ratio holds.
+
+The observable is `Z` on wire 0. `P = 2nL` parameters on the grid family and
+`nL` on the ry+cx family; "stream" marks the cells where the plan recomputes the
+intermediate states instead of caching them.
+
+| family | n | L | P | cache | SuperFermion ms | Lightning ms | ratio | pair range |
+|---|---|---|---|---|---|---|---|---|
+| grid | 18 | 4 | 144 | cached | 311 | 1,094 | **0.284** | 0.268–0.304 |
+| grid | 20 | 4 | 160 | stream | 1,928 | 5,428 | **0.353** | 0.348–0.395 |
+| grid | 22 | 4 | 176 | stream | 7,908 / 13,881 | 29,570 / 24,353 | **0.419** | 0.267–0.570 |
+| ry+cx | 20 | 3 | 60 | cached | 1,129 | 2,286 | **0.494** | 0.473–0.513 |
+| ry+cx | 20 | 4 | 80 | stream | 1,472 | 3,610 | **0.408** | 0.363–0.454 |
+| ry+cx | 21 | 1 | 21 | cached | 826 | 1,838 | **0.450** | 0.412–0.488 |
+| ry+cx | 21 | 2 | 42 | stream | 1,433 | 3,135 | **0.457** | 0.441–0.459 |
+
+Worst single pair 0.570 (1.75x), worst median 0.494 (2.02x), best 0.284
+(3.52x). Gradients agree with Lightning to `9.9e-17–1.3e-12` against a gradient
+infinity norm of 0.30–0.79, which is cross-engine summation order rather than an
+accuracy difference: the parameter-shift comparison on the same ansatz reads
+`1e-16`. The two grid rows that show two timings per arm are the ones whose
+pairs disagree — `n = 22` moved +76% on the SuperFermion arm and −18% on
+Lightning's between its two pairs, so the median is reported with its range
+rather than as a point.
+
+Scope: one host (4 cores, 15 W), `n <= 22`, no Qiskit row because `qiskit-aer`
+has no adjoint mode, and no Lightning MPS row because `lightning.qubit` has no
+MPS. Absolute milliseconds here are not comparable to the 0.1.15 tables above;
+the paired ratios are the claim.
 
 ## Per-Operation Benchmarks
 

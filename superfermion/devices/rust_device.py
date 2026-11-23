@@ -33,6 +33,11 @@ from superfermion.results import LazyDict, RunResult
 # build than typical runs save by reading it — defer it until first use.
 _EAGER_PROBS_MAX_QUBITS = 12
 
+# Past this register size the shots=0 densification (2^n complex amplitudes)
+# cannot be materialized; the MPS path returns the tensor-network handle and a
+# warning instead of raising before the caller can touch ``result.state``.
+_MPS_DENSIFY_MAX_QUBITS = 26
+
 # The stabilizer tableau cannot enumerate the full probability table.  At
 # shots=0 the Python wrapper falls back to an exact statevector read; above
 # this register size that fallback is larger than the table is useful.
@@ -152,28 +157,49 @@ def _resolve_seed(kwargs: dict[str, Any]) -> tuple:
         return _DEFAULT_SEED, False
 
 
-def _mps_perm_for_sampling(dag: Any, circuit: Circuit, bond_dim: int):
+def _mps_perm_for_sampling(dag: Any, circuit: Circuit, bond_dim: int, state: Any = None):
     """Return the lazy-SWAP site map (None when routing is identity).
 
-    The map is replicated from the gate records (mirroring the Rust
-    ``apply_gate_lazy_routed``), so sampling labels can be corrected without
-    a second MPS evolution.  It is cached on the circuit and invalidated
+    Prefers the evolved handle's own ``perm()``: the router that ran is the
+    only authority on where it parked each wire, and the Python replay below
+    is a second implementation of the same rule that can drift from it.
+    Falls back to replaying the gate records (``mps_routing_permutation``,
+    mirroring the Rust ``apply_gate_lazy_routed``) for handles that do not
+    expose ``perm()``, so the labels can still be corrected without a second
+    MPS evolution.  Either answer is cached on the circuit and invalidated
     whenever the gate list changes.
+
+    Unbound parameters make ``dag.to_gate_records()`` raise a PyO3
+    ``PanicException``, which derives from ``BaseException`` and therefore
+    slips through ``except Exception`` -- the fallback guard is broad on
+    purpose.  Skipping the remap is harmless on a core that already reports
+    wire order (``WIRE_ORDER_READOUT``).
     """
+    n_qubits = int(circuit.n_qubits)
     cache_key = ("sf_mps_perm", int(bond_dim))
     cache_get = getattr(circuit, "_engine_cache_get", None)
     cache_put = getattr(circuit, "_engine_cache_put", None)
-    perm = cache_get(cache_key) if cache_get is not None else None
+
+    perm = None
+    if state is not None:
+        handle_perm = getattr(state, "perm", None)
+        if handle_perm is not None:
+            try:
+                perm = [int(p) for p in handle_perm()]
+            except BaseException:  # noqa: BLE001 - PanicException is not Exception
+                perm = None
+    if perm is None:
+        perm = cache_get(cache_key) if cache_get is not None else None
     if perm is None:
         try:
             records = dag.to_gate_records()
-        except Exception:
+        except BaseException:  # noqa: BLE001 - PanicException is not Exception
             return None
-        perm = mps_routing_permutation(records, int(circuit.n_qubits))
+        perm = mps_routing_permutation(records, n_qubits)
         if cache_put is not None:
             cache_put(cache_key, perm)
     perm = list(perm)
-    if perm == list(range(int(circuit.n_qubits))):
+    if perm == list(range(n_qubits)):
         return None
     return perm
 
@@ -762,19 +788,38 @@ class RustDevice:
                 Pass densify=False to skip that work and receive only the
                 MPS state handle — then sample via shots>0 runs or call
                 ``result.state.numpy()`` once. Recommended for n > 20.
+                Past n=26 the default (``None``) keeps the handle and warns
+                instead of raising, so ``result.state`` stays usable; an
+                explicit ``densify=True`` still raises ``MemoryError``.
         """
         bond_dim = validate_bond_dim(kwargs.get("bond_dim", 64))
         seed = kwargs.get("seed", 42)
-        densify = kwargs.get("densify", True)
+        # ``densify`` is tri-state:
+        #   None (default) - legacy behaviour while the table fits
+        #                    (n <= _MPS_DENSIFY_MAX_QUBITS); past that the
+        #                    tensor-network handle is returned with a
+        #                    RuntimeWarning instead of raising before the
+        #                    caller can use ``result.state``.
+        #   True           - densify, or raise: an explicit request is honoured.
+        #   False          - never densify (unchanged).
+        densify_opt = kwargs.get("densify", None)
+        densify = (
+            circuit.n_qubits <= _MPS_DENSIFY_MAX_QUBITS
+            if densify_opt is None
+            else bool(densify_opt)
+        )
         dag = circuit.to_ir()
 
         state = dag.simulate_to_state("mps", "cpu", bond_dim)
         _check_mps_truncation(state, bond_dim)
 
-        # D10: lazy-SWAP routing keeps qubits at their new physical sites, so
-        # State.sample / State.numpy report site order.  Remap once here and
-        # expose a handle whose readout methods use qubit order.
-        mps_perm = _mps_perm_for_sampling(dag, circuit, bond_dim)
+        # D10: lazy-SWAP routing used to leave qubits at their new physical
+        # sites, so State.sample / State.numpy reported site order and this
+        # handle remapped them.  Cores that advertise WIRE_ORDER_READOUT do
+        # that remap inside the kernel, and PermutedMPSState then passes the
+        # readouts through unchanged (it branches on the flag).  Kept so an
+        # older _sf_core still gets qubit order, and so perm() stays readable.
+        mps_perm = _mps_perm_for_sampling(dag, circuit, bond_dim, state)
         if mps_perm is not None:
             state = PermutedMPSState(state, mps_perm)
 
@@ -788,7 +833,7 @@ class RustDevice:
 
         sv = None
         if shots == 0 and densify:
-            if circuit.n_qubits > 26:
+            if circuit.n_qubits > _MPS_DENSIFY_MAX_QUBITS:
                 raise MemoryError(
                     "MPS simulation with shots=0 densifies the state into a full "
                     f"2^{circuit.n_qubits}-amplitude statevector "
@@ -800,14 +845,16 @@ class RustDevice:
                 # (sparse-prefix for area-law states, GEMM sweep otherwise)
                 # instead of re-contracting the canonical handle. Same
                 # amplitudes up to floating-point reassociation (~1e-15).
-                # ``MPSState.to_statevector`` is wrapped by superfermion._fixes
-                # to return qubit order even when the routing map is not the
-                # identity.
+                # ``MPSState.to_statevector`` reports qubit order on cores
+                # with the WIRE_ORDER_READOUT flag (and is wrapped by
+                # superfermion._fixes to do the same on older ones), so no
+                # perm is applied here.
                 sv = np.asarray(dag.evolve_mps(bond_dim).to_statevector())
             except Exception:
                 try:
-                    # ``PermutedMPSState.numpy`` unpermutes; a bare State
-                    # handle (identity routing) is already in qubit order.
+                    # ``PermutedMPSState.numpy`` unpermutes only for pre-flag
+                    # cores; a flag-aware permuted handle and a bare State
+                    # handle (identity routing) are already in qubit order.
                     sv = state.numpy()
                 except Exception:
                     pass
@@ -845,6 +892,20 @@ class RustDevice:
             )
         else:
             probabilities = {}
+            if shots == 0 and densify_opt is None:
+                warnings.warn(
+                    "method='mps' with shots=0 at n=%d did not densify the "
+                    "state (the 2^n amplitudes would need %.1f GiB); returning "
+                    "the tensor-network handle only. Read counts with shots>0, "
+                    "or pass densify=True to force the densification "
+                    "(MemoryError) / densify=False to silence this."
+                    % (
+                        circuit.n_qubits,
+                        2 ** circuit.n_qubits * 16 / 2**30,
+                    ),
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
 
         return RunResult(
             counts=counts,

@@ -2,9 +2,9 @@
 //!
 //! A `CatPlan` is built once from a `&QuantumDAG` and reused many times:
 //! statevector snapshots, the compiled adjoint program, the Pauli-frame
-//! stabilizer/Clifford tableau, and the density-matrix channel program all
-//! hang off the same handle, so the public surface (`sf.cat(...)`) never
-//! changes across milestones.
+//! stabilizer/Clifford tableau, the density-matrix channel program, and the
+//! symbolic circuit the MPS lane re-evolves all hang off the same handle, so
+//! the public surface (`sf.cat(...)`) never changes across milestones.
 //!
 //! Density-matrix mode was the last hold-out — the feasibility probe measured
 //! a statistical tie with the routed aer path, so per keep-only-if-win it was
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use num_complex::Complex64;
 use sf_ir::adjoint::PauliTerm;
 use sf_ir::dag::{PreparedStatevector, QuantumDAG};
-use sf_ir::OpType;
+use sf_ir::{MPSState, MethodError, OpType, QuantumStateImpl};
 
 use crate::adj::AdjProgram;
 use crate::dmlane::DmProgram;
@@ -185,7 +185,11 @@ fn has_resets(dag: &QuantumDAG) -> bool {
 /// from `reject_dynamic_ops`: the guard and this filter have to be correct
 /// independently, or a later relaxation of one would silently make the other
 /// drop a real reset.
-fn strip_leading_resets(dag: &QuantumDAG) -> Result<QuantumDAG, String> {
+///
+/// `lane` only names the caller in the error text: the statevector and MPS
+/// plans share this filter but must not tell the user they were holding the
+/// other handle.
+fn strip_leading_resets(dag: &QuantumDAG, lane: &str) -> Result<QuantumDAG, String> {
     let nq = dag.n_qubits;
     let mut touched = vec![false; nq];
     let mut measured = vec![false; nq];
@@ -195,10 +199,10 @@ fn strip_leading_resets(dag: &QuantumDAG) -> Result<QuantumDAG, String> {
             for &q in op.qubits.iter() {
                 if q < nq && (touched[q] || measured[q]) {
                     return Err(format!(
-                        "cat: statevector plan: Reset on qubit {q} after it was used; \
+                        "cat: {lane} plan: Reset on qubit {q} after it was used; \
                          reset means collapse-and-reprepare, which produces a mixed state \
                          and this lane returns a single pure vector - sample a trajectory \
-                         with sf.run(circuit, method=\"statevector\", shots=N) instead"
+                         with sf.run(circuit, method=\"{lane}\", shots=N) instead"
                     ));
                 }
             }
@@ -235,6 +239,7 @@ pub enum Mode {
     Adj,
     Stab,
     Cliff,
+    Mps,
 }
 
 impl Mode {
@@ -249,6 +254,7 @@ impl Mode {
             Mode::Adj => "adjoint",
             Mode::Stab => "stabilizer",
             Mode::Cliff => "clifford",
+            Mode::Mps => "mps",
         }
     }
 }
@@ -260,12 +266,14 @@ pub struct CatPlan {
     parameter_names: Vec<String>,
     mode: Mode,
     // Statevector snapshot, compiled adjoint program, the Pauli-frame tableau
-    // shared by the stabilizer and Clifford modes, and the density-matrix
-    // channel program.  Exactly one is `Some`, selected by `mode`.
+    // shared by the stabilizer and Clifford modes, the density-matrix channel
+    // program, and the symbolic circuit the MPS lane re-evolves.  Exactly one
+    // is `Some`, selected by `mode`.
     sv: Option<PreparedStatevector>,
     adj: Option<AdjProgram>,
     stab: Option<FrameTableau>,
     dm: Option<DmProgram>,
+    mps: Option<QuantumDAG>,
 }
 
 impl CatPlan {
@@ -285,7 +293,7 @@ impl CatPlan {
                 // way the adjoint lane drops it; a reset after use stays an
                 // error inside `strip_leading_resets`.
                 let filtered = if has_measurements(dag) || has_resets(dag) {
-                    let resets_dropped = strip_leading_resets(dag)?;
+                    let resets_dropped = strip_leading_resets(dag, "statevector")?;
                     Some(without_measurements(&resets_dropped))
                 } else {
                     None
@@ -299,6 +307,7 @@ impl CatPlan {
                     adj: None,
                     stab: None,
                     dm: None,
+                    mps: None,
                 })
             }
             Mode::Dm => {
@@ -316,6 +325,7 @@ impl CatPlan {
                     adj: None,
                     stab: None,
                     dm: Some(dm),
+                    mps: None,
                 })
             }
             Mode::Adj => {
@@ -336,6 +346,7 @@ impl CatPlan {
                     adj: Some(adj),
                     stab: None,
                     dm: None,
+                    mps: None,
                 })
             }
             Mode::Stab | Mode::Cliff => {
@@ -396,6 +407,33 @@ impl CatPlan {
                     adj: None,
                     stab: Some(tab),
                     dm: None,
+                    mps: None,
+                })
+            }
+            Mode::Mps => {
+                // One pure tensor network, so the statevector lane's guards
+                // apply verbatim: a trailing readout is dropped, a leading
+                // reset is |0> -> |0>, and anything after a use stays an
+                // error.  `reject_dynamic_ops` runs first so a branch or a
+                // conditioned gate is refused with the MPS lane named.
+                //
+                // What is cached is the *symbolic* circuit: gate order, wire
+                // routing and parameter names are fixed once here, then each
+                // call re-binds in place and re-evolves.  `bond_dim` is a
+                // per-call knob -- it changes reachable accuracy, not the
+                // program -- so it is not baked into the snapshot.
+                reject_dynamic_ops(dag, "mps")?;
+                let resets_dropped = strip_leading_resets(dag, "mps")?;
+                let owned = without_measurements(&resets_dropped);
+                Ok(Self {
+                    n_qubits: owned.n_qubits,
+                    parameter_names: owned.parameter_names(),
+                    mode,
+                    sv: None,
+                    adj: None,
+                    stab: None,
+                    dm: None,
+                    mps: Some(owned),
                 })
             }
         }
@@ -445,6 +483,46 @@ impl CatPlan {
         dm.simulate(values)
     }
 
+    /// Execute the MPS plan and return the tensor network itself.
+    ///
+    /// `bond_dim` caps the Schmidt rank across every cut: large enough and the
+    /// result is the exact statevector (they agree to rounding), small enough
+    /// and the evolution truncates, which `MPSState::discarded_weight` reports
+    /// rather than hiding.  The returned network keeps the *surviving* weight
+    /// (it is not renormalized), so `||psi||^2 == 1 - discarded_weight`.  The
+    /// snapshot is re-bound in place on every call, so the compiled gate order
+    /// survives a parameter update.
+    pub fn execute_mps(
+        &mut self,
+        values: &HashMap<String, f64>,
+        bond_dim: usize,
+    ) -> Result<MPSState, String> {
+        // Name the parameters that are still symbolic.  Without this the
+        // rebind succeeds and `evolve_mps` panics deep in the op evaluator
+        // ("Cannot evaluate unbound variable ..."), which reaches Python as a
+        // PanicException instead of an error the caller can act on.
+        let mut missing: Vec<&str> = self
+            .parameter_names
+            .iter()
+            .filter(|name| !values.contains_key(name.as_str()))
+            .map(|name| name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            missing.sort_unstable();
+            return Err(format!(
+                "cat: mps plan: unbound parameter(s) {} - supply a value for every \
+                 name in parameter_names()",
+                missing.join(", ")
+            ));
+        }
+        let dag = self
+            .mps
+            .as_mut()
+            .ok_or_else(|| "cat: plan is not an mps plan".to_string())?;
+        dag.update_parameters(values);
+        Ok(dag.evolve_mps(bond_dim))
+    }
+
     /// Execute the adjoint plan: gradient of ⟨O⟩ for `terms` at `theta`
     /// (aligned with [`parameter_names`](Self::parameter_names)), reusing the
     /// compiled program's resident buffers across calls.
@@ -458,6 +536,59 @@ impl CatPlan {
             .as_mut()
             .ok_or_else(|| "cat: plan is not an adjoint plan".to_string())?;
         adj.grad(theta, terms).map(|g| g.to_vec())
+    }
+
+    /// Execute the MPS plan's gradient: d⟨O⟩/dθ on the truncated chain.
+    ///
+    /// This is the shift rule on the MPS forward — the same functional
+    /// `execute_mps(...).expectation(...)` reports, truncation included — not a
+    /// reverse sweep.  The two are different objects: a reverse pass would have
+    /// to differentiate through the SVD that truncates, and with the bond at a
+    /// binding cap the discarded subspace moves with θ, so the frozen-projection
+    /// gradient it computes is not the gradient of this functional.  What the
+    /// chain buys here is memory: `bond_dim` bounds the state instead of `2^n`.
+    ///
+    /// Cost is `2·P` evolutions for an untruncated chain and `4·P` once the
+    /// cap bites; [`sf_ir`] decides per parameter (a two-term rule is only the
+    /// derivative of the reported functional while nothing is discarded).
+    /// `theta` is in [`parameter_names`](Self::parameter_names) order, matching
+    /// every other lane's gradient entry point.
+    pub fn execute_gradient_mps(
+        &mut self,
+        theta: &[f64],
+        terms: &[PauliTerm],
+        bond_dim: usize,
+    ) -> Result<Vec<f64>, String> {
+        let names = self.parameter_names.clone();
+        if theta.len() != names.len() {
+            return Err(format!(
+                "theta has {} values but the plan has {} parameters",
+                theta.len(),
+                names.len()
+            ));
+        }
+        let values: HashMap<String, f64> =
+            names.iter().cloned().zip(theta.iter().copied()).collect();
+        // Every name is bound by construction, so `evolve_mps` below cannot hit
+        // an unbound variable: only a wrong `theta` length can reach the error
+        // above, and that is named by count.
+        let dag = self
+            .mps
+            .as_ref()
+            .ok_or_else(|| "cat: plan is not an mps plan".to_string())?;
+        // The state is evolved on a *bound clone*.  Handing the shift rule a
+        // dag that this call already bound would leave every op carrying its
+        // value instead of a variable, so the exact rule would find no
+        // occurrences and every parameter would silently take the 4-evolution
+        // stencil (measured: 0 difference in the answer at an untruncated
+        // bond, 2x the cost).  The plan keeps its symbolic dag untouched.
+        let mut bound = dag.clone_dag();
+        bound.update_parameters(&values);
+        let state = bound.evolve_mps(bond_dim);
+        let handle = sf_ir::MPSStateWrapper::new(state, "cat");
+        handle
+            .grad(terms, dag, &values)
+            .map_err(|e: MethodError| e.to_string())
     }
 
     /// Execute the stabilizer/Clifford plan: `shots` bulk samples from the
@@ -756,6 +887,58 @@ mod tests {
         }
     }
 
+    /// The `mps` lane answers the same gradient question as `adjoint` while the
+    /// bond is large enough to be exact, and keeps answering (finitely, and
+    /// deterministically) once it truncates.  Before this entry point existed
+    /// the handle raised "plan is not an adjoint plan" on every mps plan.
+    #[test]
+    fn cat_mps_handle_reports_a_gradient() {
+        let mut dag = QuantumDAG::new(3, 0);
+        let mut slot = 0usize;
+        for i in 0..3 {
+            dag.add_op(OpType::Ry(var(&format!("t{slot}"))), &[i]);
+            slot += 1;
+            dag.add_op(OpType::Rz(var(&format!("t{slot}"))), &[i]);
+            slot += 1;
+        }
+        dag.add_op(OpType::CNOT, &[0, 1]);
+        dag.add_op(OpType::CNOT, &[1, 2]);
+
+        let terms = vec![sf_ir::adjoint::PauliTerm {
+            paulis: vec![3u8; 3],
+            coef: Complex64::new(1.0, 0.0),
+        }];
+        let adj_thetas: Vec<f64> = (0..6).map(|i| 0.2 + 0.1 * i as f64).collect();
+
+        let mut adj = CatPlan::new(&dag, Mode::Adj).unwrap();
+        let want = adj.execute_gradient(&adj_thetas, &terms).unwrap();
+
+        // Bond 8 is the full 2^3 range for this shape, so the chain is exact.
+        let mut mps = CatPlan::new(&dag, Mode::Mps).unwrap();
+        assert_eq!(mps.mode(), Mode::Mps);
+        let got = mps.execute_gradient_mps(&adj_thetas, &terms, 8).unwrap();
+        assert_eq!(got.len(), want.len());
+        for (a, b) in got.iter().zip(want.iter()) {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "mps vs adjoint at exact bond: {a} vs {b}"
+            );
+        }
+
+        // A truncating cap is a different functional, not a crash: finite,
+        // deterministic, and stable across repeated calls on the same handle.
+        let truncated = mps.execute_gradient_mps(&adj_thetas, &terms, 1).unwrap();
+        assert!(truncated.iter().all(|g| g.is_finite()));
+        let again = mps.execute_gradient_mps(&adj_thetas, &terms, 1).unwrap();
+        assert_eq!(truncated, again, "the plan's dag must not be left bound");
+
+        // A wrong theta length is named by count rather than panicking.
+        let err = mps
+            .execute_gradient_mps(&adj_thetas[..3], &terms, 8)
+            .unwrap_err();
+        assert!(err.contains("3") && err.contains("6"), "unexpected: {err}");
+    }
+
     // ── Dynamic-circuit guard (tableau modes) ──
 
     /// Same two-branch GHZ as `ghz_dag`, but with classical bits so the
@@ -894,9 +1077,9 @@ mod tests {
     #[test]
     fn adjoint_gate_set_error_names_its_own_lane() {
         let mut dag = QuantumDAG::new(2, 0);
-        dag.add_op(OpType::H, &[0]);
+        dag.add_op(OpType::ECR, &[0, 1]);
         let msg = match CatPlan::new(&dag, Mode::Adj) {
-            Ok(_) => panic!("H is outside the adjoint gate set (RY/RZ/CNOT)"),
+            Ok(_) => panic!("ECR is outside the adjoint gate set"),
             Err(msg) => msg,
         };
         assert!(msg.starts_with("cat: adjoint plan:"), "{msg}");

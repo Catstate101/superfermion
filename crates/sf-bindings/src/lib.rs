@@ -145,9 +145,40 @@ impl PyMPSState {
 
     /// Return the virtual-to-physical qubit permutation from lazy-SWAP routing.
     /// perm[virtual_qubit] = physical_site. Identity if no long-range gates.
+    ///
+    /// Informational from this build on: `to_statevector()` already undoes the
+    /// map (see `WIRE_ORDER_READOUT`).
     fn perm(&self) -> Vec<usize> {
         self.inner.perm.clone()
     }
+
+    /// Densify in **physical-site** order: bit `p` of the index is tensor
+    /// site `p`, *not* qubit `p`.
+    ///
+    /// Equals `to_statevector()` whenever no lazy routing happened. Kept so a
+    /// caller that wants to apply `perm()` itself still has the raw map (the
+    /// previous `to_statevector` contract, preserved under its historical
+    /// `to_statevector_sites` name).
+    fn to_statevector_sites<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<num_complex::Complex64>>> {
+        Ok(numpy::PyArray1::from_vec(
+            py,
+            self.inner.to_statevector_site_order(),
+        ))
+    }
+
+    /// Class-level capability flag: `MPSState.WIRE_ORDER_READOUT is True`.
+    ///
+    /// `to_statevector()` returns amplitudes in wire (logical-qubit) order in
+    /// this build; `perm()` is reported for diagnostics only and must not be
+    /// undone a second time. Wheels built before the routed-lane readout
+    /// repair lack this attribute and answer in physical-site order, so
+    /// `superfermion._fixes` branches on it rather than dropping the
+    /// compensating map outright.
+    #[classattr]
+    const WIRE_ORDER_READOUT: bool = true;
 
     /// Accumulated discarded weight Σε (a sum of per-step fractions) over all
     /// 2q-gate steps. 0.0 = exact evolution; > 0 means the `bond_dim` cap
@@ -221,6 +252,18 @@ pub struct PyState {
 
 #[pymethods]
 impl PyState {
+    /// Class-level capability flag: `State.WIRE_ORDER_READOUT is True`.
+    ///
+    /// `numpy()`, `to_vec()`, `probabilities()` and `sample()` all answer in
+    /// wire (logical-qubit) order on every lane, including `mps` -- its
+    /// routing map is applied inside the core, not by the caller. `perm()`
+    /// survives to describe the routing, not to correct a readout. Wheels
+    /// built before the routed-lane readout repair lack this attribute and
+    /// their `mps` handles answer in physical-site order, which is why
+    /// `superfermion._fixes` branches on it.
+    #[classattr]
+    const WIRE_ORDER_READOUT: bool = true;
+
     fn expectation(&self, py: Python<'_>, observable: Vec<(Vec<u8>, f64, f64)>) -> PyResult<f64> {
         let terms = Self::parse_observable(&observable);
         py.detach(|| self.inner.expectation(&terms))
@@ -279,9 +322,24 @@ impl PyState {
     }
 
     /// Actual vector norm squared; unlike purity, this checks normalization.
+    ///
+    /// Statevector handles read it straight off the amplitudes.  Every other
+    /// handle answers through the all-identity Pauli expectation, which is the
+    /// same number contracted without densifying: an `mps` survivor returns the
+    /// norm its truncation left behind (previously a `MethodError`, so callers
+    /// had to densify `2^n` complex values, or divide by the wrong
+    /// normalisation, just to read it).  `density_matrix` returns `tr(ρ)` and
+    /// `stabilizer` returns `1` through the same term.
     fn norm_squared(&self, py: Python<'_>) -> PyResult<f64> {
-        let state = prepared::statevector(self, py)?;
-        Ok(py.detach(|| state.data.iter().map(|z| z.norm_sqr()).sum()))
+        if let Some(state) = self.inner.as_any().downcast_ref::<StatevectorState>() {
+            return Ok(py.detach(|| state.data.iter().map(|z| z.norm_sqr()).sum()));
+        }
+        let identity = sf_ir::PauliTerm {
+            paulis: vec![0u8; self.inner.n_qubits()],
+            coef: num_complex::Complex64::new(1.0, 0.0),
+        };
+        py.detach(|| self.inner.expectation(&[identity]))
+            .map_err(|e| method_error(py, e.to_string()))
     }
 
     /// Mean of Z on every qubit, computed without a NumPy export.
@@ -320,6 +378,21 @@ impl PyState {
         Ok(numpy::PyArray2::from_vec2(py, &matrix).unwrap())
     }
 
+    /// Virtual-to-physical routing map: which *site* holds each wire.
+    ///
+    /// `perm[virtual_qubit] = physical_site`; identity whenever the router
+    /// never moved a wire.  An `mps` handle (`cat(qc, mode="mps")` or
+    /// `method="mps"`) keeps its tensors on fixed *sites* while the circuit's
+    /// wires move, so this is the map that used to be needed to read its
+    /// output.  It is **informational from this build on**: `numpy()`,
+    /// `probabilities()` and `sample()` already answer in wire order (see
+    /// `WIRE_ORDER_READOUT`), and applying this map to them rotates a correct
+    /// statevector into a wrong one.  Kept so a caller can tell whether the
+    /// router ran, and which wire sits where.  Empty circuit -> empty list.
+    fn perm(&self) -> Vec<usize> {
+        self.inner.perm()
+    }
+
     fn numpy<'py>(
         &self,
         py: Python<'py>,
@@ -336,8 +409,16 @@ impl PyState {
             .inner
             .to_vec()
             .map_err(|e| method_error(py, e.to_string()))?;
-        if let Ok(mut guard) = self.dense_cache.lock() {
-            *guard = Some(v.clone());
+        // A dense state's `to_vec` is already a copy of resident data, so the
+        // memo would add a *second* full-size copy -- 2^n·16 bytes at every
+        // call, e.g. 64 MiB at n=22 -- and re-reading costs the same as
+        // reading the memo back. Move the vector straight into NumPy instead.
+        // MPS/density-matrix/stabilizer states keep the memo (their `to_vec`
+        // is a contraction, not a copy).
+        if !self.inner.to_vec_is_a_copy() {
+            if let Ok(mut guard) = self.dense_cache.lock() {
+                *guard = Some(v.clone());
+            }
         }
         Ok(numpy::PyArray1::from_vec(py, v))
     }

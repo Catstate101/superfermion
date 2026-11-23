@@ -50,6 +50,131 @@ print(grads)
 
 Two sweeps instead of `2P` circuit runs. Measured on 20-qubit SU(2) circuits: ~77x faster than parameter-shift at 40 parameters and ~73x at 80 parameters, where the ratio stays flat because both sides grow with depth. The grid, the correctness checks and the caveats are on the [performance page](/docs/reference/performance#adjoint-differentiation).
 
+#### Memory: cached below 12 qubits, recomputed above
+
+The reverse sweep needs the state `|ψ_k⟩` at every parameter gate. It can store
+each one during the forward pass (`P·2^n` complex numbers) or recompute it by
+un-applying the gate (`2·2^n`). The engine decides per call: below `n = 12`
+(`2^12 = 4096` amplitudes) the cached sweep wins because the buffer is still in
+L1; at and above it, recomputing wins — the state is out of cache either way, and
+the two extra passes cost less than writing and re-reading `P·2^n`. Both paths
+compute the same `|ψ_k⟩`, so this is a timing switch, not a semantics switch.
+
+```python
+import os
+os.environ["SF_ADJ_CACHE"] = "0"   # 0 = stream, 1 = cache; unset = auto (stream from n = 12)
+import superfermion as sf
+
+n = 16
+qc = sf.Circuit(n)
+for q in range(n):
+    qc.ry(sf.param(f"y{q}"), q).rz(sf.param(f"z{q}"), q)
+for q in range(n - 1):
+    qc.cnot(q, q + 1)
+
+values = {name: 0.3 for name in qc.parameters}
+state = sf.simulate(qc, params=values)
+grads = state.grad("Z" + "I" * (n - 1), qc.to_ir(), values)
+
+print(len(grads))             # 32
+print(round(grads["y0"], 6)) # -0.29552
+```
+
+The variable is read **once**, at the first gradient call in the process;
+setting it afterwards changes nothing. It covers both `State.grad()` and
+`adjoint_grad_vector()`, which run the same sweep. Measured at `n = 16`, 32
+parameters, `Z0`: streaming took 7.2–8.1 ms against 13.5–16.7 ms for the cached
+sweep in two interleaved pairs (1.67x and 2.32x), with the two payloads agreeing
+to `2.6e-16`.
+
+### Gradients on the compile-once handle
+
+`sf.cat(circuit, mode="adjoint")` lowers the circuit once — routing, fusion and
+parameter slots are fixed — then answers gradients for fresh angles without
+rebuilding the DAG. `run_gradient(pauli, theta)` differentiates one Pauli
+string. `run_gradient_terms(terms, theta)` differentiates `Σ cᵢ⟨Pᵢ⟩` in the
+**same** forward and reverse sweep, so a 40-term Hamiltonian costs what a
+one-term observable costs.
+
+```python
+import superfermion as sf
+
+qc = (sf.Circuit(4)
+      .h(0)
+      .rzz(sf.param("a"), 0, 1)      # Pauli entanglers
+      .ryy(sf.param("b"), 1, 2)
+      .rxx(sf.param("c"), 2, 3)
+      .crx(sf.param("d"), 0, 3)      # controlled rotations
+      .cry(sf.param("e"), 1, 3)
+      .cu(sf.param("f"), 0.2, 0.1, 0, 2)
+      .cp(sf.param("g"), 0, 1))
+
+plan = sf.cat(qc, mode="adjoint")                 # lowered once
+theta = [0.3, -0.4, 0.9, 0.2, 0.6, -0.25, 0.45]   # plan.parameter_names order
+
+print([round(g, 3) for g in plan.run_gradient("XIXX", theta)])
+# [-0.052, 0.027, 0.08, -0.028, 0.003, 0.013, 0.002]
+
+terms = [("XIXX", 1.0), ("ZIIZ", 0.5), ("XIII", -0.25)]
+print([round(g, 3) for g in plan.run_gradient_terms(terms, theta)])
+# [0.037, 0.009, 0.089, 0.024, 0.002, -0.009, 0.011]
+```
+
+The lane differentiates `RX`/`RY`/`RZ`, `P`/`R1`, `U`/`U3`, the controlled
+rotations `CRX`/`CRY`/`CRZ`/`CP`/`CU` (and `CH`, which is a `CU`), and the Pauli
+entanglers `RXX`/`RYY`/`RZZ`, each parameter slot separately. `H`, `X`, `Y`,
+`Z`, `S`, `T`, `SX` (and their daggers), `CZ`, `CY`, `SWAP` and `CNOT` are
+applied as constants; an angle that was already bound is baked into the plan.
+`ECR` and opaque `unitary()` gates are refused by name rather than skipped.
+
+`SF_CAT_THREADS` caps the pool the handle owns (it takes precedence over
+`SF_THREADS`). At four threads the handle was faster than `lightning.qubit` in
+every one of seven measured cells at `n = 18–22`, worst median 2.02x — see
+[Adjoint Differentiation](/docs/reference/performance#adjoint-differentiation).
+
+### Gradients through an MPS
+
+A `mode="mps"` handle answers gradients too, with the exact shift rule on the
+chain it holds: `2P` evolutions of the tensor network at an exact bond, and
+`4P` once the cap discards weight, because a two-term rule is only the
+derivative of the reported functional while nothing is dropped. There is no dense
+reverse sweep, so the state is never expanded to `2^n` and the cost lands in
+evolutions instead of memory. A binding `bond_dim` is reported, not hidden.
+
+```python
+import superfermion as sf
+
+qc = (sf.Circuit(4)
+      .ry(sf.param("a"), 0).ry(sf.param("b"), 1).cnot(0, 1)
+      .ry(sf.param("c"), 0).ry(sf.param("d"), 1))
+theta = [0.3, -0.4, 0.9, 0.2]
+values = dict(zip(qc.parameters, theta))
+
+handle = sf.cat(qc, mode="mps", bond_dim=64)          # exact for this circuit
+print(round(handle.simulate(values).truncation_report()["discarded_weight"], 4))
+# 0.0
+print([round(g, 4) for g in handle.run_gradient("ZZII", theta)])
+# [0.1345, 0.1286, -0.7285, 0.3398] — the adjoint lane's answer too
+
+cut = sf.cat(qc, mode="mps", bond_dim=1)              # the cap now binds
+print(round(cut.simulate(values).truncation_report()["discarded_weight"], 4))
+# 0.0189
+print([round(g, 4) for g in cut.run_gradient("ZZII", theta)])
+# [0.1799, -0.0459, -0.674, 0.1499] — the derivative of what was kept
+
+res = sf.run(qc, method="mps", bond_dim=64, shots=0, params=values)
+print({k: round(v, 4) for k, v in sorted(res.grad("ZZII").items())})
+# {'a': 0.1345, 'b': 0.1286, 'c': -0.7285, 'd': 0.3398}
+```
+
+At a bond large enough to be exact the two lanes agree to `2.3e-15` (measured at
+`n = 6`, 24 parameters), so the MPS lane is not an approximation of the adjoint
+lane there. Once the cap discards weight the shift rule differentiates the
+*survivor* functional — the state without renormalisation — which is why the
+second list differs. The [MPS truncation
+page](/docs/reference/mps-truncation#gradients-through-a-truncated-chain) covers
+what that means for the numbers you read.
+
 ### Parameter-Shift
 
 Evaluates the circuit at shifted parameter values. O(N) scaling but exact.
@@ -160,9 +285,12 @@ grads = sf.simulate(ansatz, params={"t": 0.3}).grad(
 
 ### Not covered
 
-- **Adjoint is statevector-only.** `method="density_matrix"`, `method="mps"`
-  and `method="stabilizer"` raise `MethodError` for adjoint and fall back to
-  parameter-shift, which works everywhere.
+- **The dense adjoint is statevector-only.** `State.grad()` on a
+  `method="density_matrix"` or `method="stabilizer"` state raises
+  `MethodError`. `method="mps"` does not: it answers with the exact shift rule
+  on the tensor-network forward (see
+  [Gradients through an MPS](#gradients-through-an-mps)). Every lane can still
+  be differentiated with the parameter-shift rule.
 - **Gradients are of expectation values**, not of individual measurement
   probabilities or of a QNode's arbitrary post-processing.
 - **A bound circuit cannot be differentiated.** `bind()` folds the symbols

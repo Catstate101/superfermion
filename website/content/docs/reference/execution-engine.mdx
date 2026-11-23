@@ -399,9 +399,24 @@ the amplitude work.
 
 Memory is the real design choice. Caching every intermediate costs
 `P·2^n` complex; recomputing them costs one extra forward sweep and `2·2^n`.
-`sf-ir` exposes both and `sf-cat`'s `AdjProgram` enforces a cap:
-`n_param_gates · 2^n` must stay under `2^26` elements (1 GiB), otherwise the
-handle refuses and points you at `sf_ir::adjoint`, which streams over the cap.
+Both engines choose per call, and neither refuses a circuit size any more:
+
+- **`sf-ir`** — behind `State.grad()` and `adjoint_grad_vector()` — recomputes
+  from `dim = 2^n >= 4096` (`n = 12`) upward and caches below it, the boundary a
+  paired ladder put between `n = 11` and `n = 12`. `SF_ADJ_CACHE=1` forces the
+  cache, `=0` forces the recompute; the variable is read once, at the first
+  gradient call in the process.
+- **`sf-cat`'s `AdjProgram`** caches while the buffer stays L3-resident or the
+  circuit is mostly constants, and streams otherwise — including above
+  `2^26` elements (64 Mi complex, 1 GiB), where an earlier build refused and
+  handed the call to the `sf_ir` fallback. The streaming path keeps `O(2^n)`
+  memory and re-walks `psi` in the reverse sweep instead of storing a post-state
+  per parameter gate.
+
+Neither switch changes the arithmetic: both paths compute the same `ψ_k` and the
+same gradient. At `n = 16`, `P = 32` the cached and streamed payloads agree to
+`2.6e-16` while the streamed sweep measured 1.67x and 2.32x faster in two
+interleaved pairs — which is the whole reason the default moved.
 
 The parallel threshold is different too: `PAR_DIM_DEFAULT = 2^17`. At n=16 the
 sweeps are measurably faster serial (~8%) at 1 ULP parity (`2e-16` max
@@ -423,6 +438,9 @@ be re-measured is a threshold you have to trust.
 | `SF_PHASE_TABLE=0` | reference phase sweep instead of table lookups |
 | `SF_F32=1` | f32 statevector lane |
 | `SF_ADJ_PAR_MIN` | adjoint parallel threshold |
+| `SF_ADJ_CACHE` | `1` forces the cached reverse sweep, `0` the recomputed one (read once) |
+| `SF_CAT_ADJ_STREAM`, `SF_CAT_ADJ_CACHE` | force either `cat` adjoint sweep, per handle |
+| `SF_ADJ_FUSE` | `0` turns the fused reverse kernel off (on by default) |
 | `SF_CAT_THREADS`, `SF_THREADS` | cap this crate's rayon pool (read once, at first use) |
 | `SF_PLAN_DUMP=1` | instruction census to stderr |
 

@@ -459,13 +459,29 @@ class TestMpsShortPauli:
 # ── (h) SUP-10: MPS shots=0 MemoryError guard ────────────────────────────────
 
 class TestMpsShotsZeroGuard:
-    def test_large_circuit_raises_memory_error(self):
-        """(h) n=50 MPS shots=0 raises MemoryError with guidance before densifying."""
+    def test_large_circuit_keeps_the_handle_and_warns(self):
+        """(h) n=50 MPS shots=0 must not densify a 2^50 vector.
+
+        The guard is still the point -- but ``densify`` is tri-state now: the
+        default returns the tensor-network handle with a RuntimeWarning so the
+        caller can use ``result.state``, and only an *explicit* ``densify=True``
+        raises.  Either way a 2^50 amplitude table is never built.
+        """
+        c50 = Circuit(50)
+        for q in range(50):
+            c50.h(q)
+        with pytest.warns(RuntimeWarning, match="shots>0"):
+            r = sf.run(c50, method="mps", shots=0, seed=7)
+        assert r.state is not None, "the handle must survive the guard"
+        assert not r.probabilities, "a 2^50 table must not be materialized"
+
+    def test_explicit_densify_still_raises(self):
+        """(h) an explicit densify=True at n=50 raises with guidance."""
         c50 = Circuit(50)
         for q in range(50):
             c50.h(q)
         with pytest.raises(MemoryError, match="shots>0"):
-            sf.run(c50, method="mps", shots=0, seed=7)
+            sf.run(c50, method="mps", shots=0, seed=7, densify=True)
 
     def test_small_circuit_still_densifies(self):
         """(h) n=16 MPS shots=0 still returns the exact statevector."""

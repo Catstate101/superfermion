@@ -510,23 +510,27 @@ fn term_dot(
 
 // ─── In-place gate application (no allocation) ─────────────────────────
 
-/// States at or above this dimension (n >= 17) split their sweeps across the
+/// States at or above this dimension (n >= 14) split their sweeps across the
 /// rayon pool; below it the serial kernels win (and the parallel paths are
-/// skipped entirely when the pool is pinned to one thread).  Bumped from the
-/// historical `1<<16` after on-host attribution at the 4-thread bench pin:
-/// n=16 (dim == `1<<16`) sits exactly on the old boundary and paid more in
-/// per-gate rayon task-spawn / copy coordination than the parallel sweep
-/// saved — the lean serial path measured ~8% faster on the bench's n=16 L=2
-/// ladder (reproduced across interleaved process pairs), and the two paths
-/// agree to 1 ULP (max_abs_diff 2e-16).  No state size lies between `1<<16`
-/// and `1<<17`, so this changes n=16 only; n>=17 stays parallel.
-const PAR_DIM_DEFAULT: usize = 1 << 17;
+/// skipped entirely when the pool is pinned to one thread).
+///
+/// This sat at `1 << 17` while the gate was **unresolved**: paired A/B runs
+/// then read n=16 as 1.40x/1.49x *for* threads in one window and 1.03x/0.93x
+/// in the next, with the serial arm reproducing and the threaded one moving by
+/// a third.  The cause turned out to be structural, not thermal — each gate's
+/// chunk job was dispatched into rayon's *global* pool from the calling
+/// thread, so every one of the 79 passes at (16,1) had to wake parked workers.
+/// Running the whole call inside a cached pool ([`adj_pool_for`]) removed that
+/// cost, and the per-phase trace now reproduces in the same direction every
+/// window: `def` (serial) is bracketed by two `def` legs at n=14 (3.05, 3.05
+/// vs 2.80 threaded) and n=16 (15.35, 15.65 vs 13.95).  ~1.10x for threads, at
+/// both sizes, with the back-walk's own phase dropping 2.55 -> 1.70 ms.  The
+/// value now matches `sf-cat`'s own 1 << 14 gate.
+const PAR_DIM_DEFAULT: usize = 1 << 14;
 
 /// Parallel/serial crossover dimension for the adjoint sweeps.
-/// `SF_ADJ_PAR_MIN` overrides so the n=16 (dim == 1<<16) boundary can be
-/// A/B-attributed on-host under the bench thread pin without a rebuild:
-/// raising it above 65536 forces n=16 onto the lean serial path. Default
-/// `1<<16` reproduces the shipped behavior exactly.
+/// `SF_ADJ_PAR_MIN` overrides so any n can be A/B-attributed on-host under the
+/// bench thread pin without a rebuild.  Default `1<<14`: n >= 14.
 #[inline]
 fn adj_par_min() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -537,6 +541,111 @@ fn adj_par_min() -> usize {
             .unwrap_or(PAR_DIM_DEFAULT)
     })
 }
+
+/// `SF_ADJ_CACHE=1` forces the cached reverse sweep, `=0` forces the streaming
+/// one; unset leaves the decision to [`adj_stream_worth_it`].
+///
+/// Both paths compute the same ψ_k — the cached one stores it in the forward
+/// sweep, the streaming one un-applies U_k and re-applies it — so this is a
+/// timing switch, not a semantics switch. That is also what makes
+/// `SF_ADJ_CACHE=0` a usable parity gate: the whole gradient test suite run
+/// under it exercises the streaming arithmetic on every gate type.
+#[inline]
+fn adj_cache_forced() -> Option<bool> {
+    static V: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("SF_ADJ_CACHE").as_deref() {
+        Ok("0") => Some(false),
+        Ok("1") => Some(true),
+        _ => None,
+    })
+}
+
+/// `SF_ADJ_FUSE=0` turns the fused reverse kernel off; on by default.
+///
+/// **What the fused arm is worth, measured at the phase it changes.**  At
+/// (16,1) with `SF_ADJ_TRACE=1`, five calls per arm, medians (min):
+///
+/// | phase | split | fused |
+/// |---|---|---|
+/// | `fwd` | 6.90 (6.50) | 7.60 (6.20) |
+/// | `dot` | 4.00 (3.20) | 4.65 (3.70) |
+/// | `bw_phi` | **1.80 (1.70)** | **0.50 (0.50)** |
+///
+/// The knob does exactly what it says: the separate φ pass disappears for the
+/// 32 one-qubit parameter gates and the fused kernel absorbs the apply into the
+/// dot (`dot` +0.5..0.65 ms).  Net ~0.7-1.0 ms of a ~14 ms call — 5-8%, real
+/// but small, and `fwd` moves 0.7 ms between the two arms on code the knob does
+/// not touch, which is this host's phase noise.
+///
+/// **A retraction.**  An earlier order-balanced, arm-alternating run of this
+/// A/B read 1.63-1.68x in favour of fusion at (16,1) (split 0.469 vs fused
+/// 0.788 on `cat/sf_ir`).  That was wrong: `sf-cat` itself is bimodal on this
+/// host at (16,1) — 9.0-9.6 ms in some windows, 18-19 ms in others — and the
+/// paired ratio inherits cat's mode, not the code's.  At `--reps 15` the *same*
+/// split/fused pair read 1.157 vs 1.883 (cat in the slow mode), while
+/// `sf_ir`'s own warm time was 12.8 ms in both arms.  The phase numbers above
+/// are the evidence; the ratio was a cat-mode detector.
+///
+/// The default therefore moved on the phase measurement alone, and the
+/// end-to-end paired ladder does **not** resolve it: 0.726 at (16,1) with
+/// fusion against 0.719-0.727 without.  Gradients are bit-identical either
+/// way (`max|dg|` 0 .. 4.8e-15 on the same runs).
+#[inline]
+fn adj_fuse_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("SF_ADJ_FUSE") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "no" | "false" | "none"
+        ),
+        Err(_) => true,
+    })
+}
+
+/// Should the reverse sweep recompute ψ_k instead of caching it?
+///
+/// **Re-measured on build #27 and inverted.**  `_adj_cache_ab.py` (same ABBA
+/// protocol, `reps` 7, one process per leg, cat in the same process as the
+/// drift control, gradients compared elementwise):
+///
+/// | row | cat | cached | stream | paired cached/stream |
+/// |---|---|---|---|---|
+/// | 14,1 | 2.223 ms | 3.356 ms | 2.594 ms | 1.17, 1.43 |
+/// | 16,1 | 10.333 ms | 14.175 ms | 7.625 ms | 2.18, 1.60 |
+/// | 16,2 | 20.306 ms | 25.201 ms | 14.405 ms | 1.90, 1.61 |
+/// | 18,1 | 90.036 ms | 91.950 ms | 75.051 ms | 1.20, 1.26 |
+/// | 20,1 | 470.962 ms | 559.968 ms | 556.092 ms | 1.02, 1.00 |
+///
+/// Every ratio is above 1: the streaming sweep is now 1.2-2.2x *faster* than
+/// the cached one at every row where the choice exists, and `|dg|` is exactly
+/// 0.0 in all rows.  The 20,1 row is the control — the 512 MB cap forces both
+/// legs onto the streaming code there, so 1.02/1.00 is this host's floor.
+///
+/// This reverses REPORT 46.17's rule ("cached wins every row where it is
+/// legal").  That measurement was taken before builds #25-#27 rewrote both
+/// sweeps: replaying its n=18 row, the cached arm reproduces (145.95 ms then,
+/// 91.95 ms now) while the streaming arm went 216.44 -> 75.05 ms.  Both arms
+/// improved, the recompute side by more, so the ranking inverted and the old
+/// numbers cannot be used to defend the old default.
+///
+/// The small rows put the crossover at n=12 ([[`STREAM_MIN_DIM`]]), measured
+/// the same way with `reps` 15: at n=8 0.133 vs 0.126 (wash), n=10 cached
+/// 0.284 vs 0.434 stream (0.64, 0.67 — cached 1.5x), n=11 0.431 vs 0.702
+/// (0.50, 0.79), n=12 1.454 vs 1.170 (1.11, 1.41), n=12 L=2 2.151 vs 1.435
+/// (1.18, 1.80), n=13 3.446 vs 2.850 (1.33, 1.10).  Below the crossover the
+/// recompute's two extra passes over a state that already lives in L1 cost
+/// more than the cache traffic they save.
+///
+/// `SF_ADJ_CACHE=1` still forces the cached sweep (`adj_cache_forced`), which
+/// is how the A/B above and `SF_ADJ_PP` remain reachable.
+fn adj_stream_worth_it(_n_param_gates: usize, _n_gates: usize, dim: usize) -> bool {
+    dim >= STREAM_MIN_DIM
+}
+
+/// State length (in amplitudes) from which recomputing beats caching.  The
+/// measured boundary sits between n=11 and n=12; every row with `dim` at or
+/// above this used the streaming sweep in `_adj_cache_ab.py` below n=14.
+const STREAM_MIN_DIM: usize = 1 << 12;
 
 thread_local! {
     /// Param-state cache buffer retained across calls so its pages stay
@@ -589,9 +698,24 @@ fn apply_1q_inplace(
 }
 
 /// dst = src, optionally across rayon tasks (element-wise, so identical).
+///
+/// Gated by the same `par` flag as the sweeps.  The forward sweep copies a
+/// whole state into each parameter gate's cache slot, and `SF_ADJ_TRACE` puts
+/// that copy at `fwdcpy` 1.30 / 5.95 / 60.7 ms against `fwd` 2.80 / 10.05 /
+/// 104.0 ms at n = 14 / 16 / 18 — i.e. 46-59% of the forward sweep, which is
+/// far more than a memcpy of the same bytes should cost.  A separate, much
+/// higher parallel gate (2^20 elements, so these copies run serial) was tried
+/// on the theory that the excess was rayon fork/join.  It was not: with
+/// `SF_ADJ_CPY_MIN=16384` (parallel, the gate below) against unset (serial)
+/// the copy reads 1.100 vs 1.250 ms at n=14, 6.300 vs 5.950 at n=16 and
+/// 38.550 vs 40.950 at n=18 — the same within noise, parallel ahead at two of
+/// the three sizes.  The cost is memory traffic (32 MiB at n=16, 144 MiB at
+/// n=18 of destination writes per call), not dispatch, so the extra gate was
+/// reverted rather than kept as a knob that buys nothing.  Removing the copy
+/// itself was tried and does not pay either — `adj_pp_on` has that table.
 #[inline]
 fn copy_slice_par(dst: &mut [Complex64], src: &[Complex64], par: bool) {
-    if par && src.len() >= adj_par_min() {
+    if par {
         let threads = rayon::current_num_threads().max(1);
         let chunk = ((src.len() / (4 * threads)).max(4096)).next_power_of_two();
         dst.par_chunks_mut(chunk)
@@ -600,6 +724,186 @@ fn copy_slice_par(dst: &mut [Complex64], src: &[Complex64], par: bool) {
     } else {
         dst.copy_from_slice(src);
     }
+}
+
+/// Should the cached forward sweep write each gate's post-state straight into
+/// its cache slot instead of applying in place and then copying?
+///
+/// Measured, and **off by default**.  `SF_ADJ_TRACE` per-phase medians on one
+/// binary, seven repetitions per arm, each size run in both arm orders
+/// (`_adj_nt_abba2.txt`); `NT` is `SF_ADJ_NT`, and every PP=1 arm has
+/// `fwdcpy` = 0 exactly:
+///
+/// | n  | PP=0 (apply + copy) | PP=1 NT=0 | PP=1 NT=slots | PP=1 NT=all |
+/// |----|---------------------|-----------|----------------|-------------|
+/// | 14 | 1.45 / 1.60 ms | 1.40 / 1.10 | 1.35 / 1.40 | 1.45 / 1.70 |
+/// | 16 | 7.10 / 6.85 ms | 7.75 / 7.15 | 8.40 / 7.90 | 10.10 / 9.60 |
+/// | 18 | 41.50 / 50.75 ms | 59.65 / 48.50 | 40.10 / 47.95 | 50.10 / 49.20 |
+///
+/// The copy disappears exactly as intended and the forward sweep does not get
+/// reliably faster.  At n=16 the ping-pong arm loses in both orders (the
+/// working set doubles and the state already fits in cache, so there was no
+/// DRAM traffic to save); at n=18 `NT=slots` is ahead in both orders by 3-5%,
+/// which is smaller than the 22% drift the PP=0 arm itself shows between the
+/// two orders.  The host cannot resolve it, so the arm stays one env var away.
+///
+/// What the work did establish, in `simd`: writing a post-state into a cold
+/// slot costs a read-for-ownership of those lines, and `vmovntpd`
+/// (`pair_pass_out_nt` / `cnot_out_vec`) removes it — but only where the slot
+/// really is cold, which on this host means n=18: `NT=slots` beats `NT=0` in
+/// both orders there (40.10 / 47.95 against 59.65 / 48.50), is *behind* it in
+/// both orders at n=16 (8.40 / 7.90 against 7.75 / 7.15) and a wash at n=14.
+/// Why it hurts at n=16 is not established: the stores are 32 bytes against
+/// this CPU's 64-byte line, so a partial-line write-combine can cost more than
+/// the RFO it was meant to save, and that is a hypothesis, not a measurement.
+/// `NT=all` — streaming the working buffer a gate has just produced, which the
+/// next gate reads back immediately — is the worst arm at n=14/16 and behind
+/// `NT=slots` at n=18, as its doc predicted.
+///
+/// The same pass found the CNOT dst/src path was still a scalar gather;
+/// `cnot_out_vec` is now vectorised in both store modes.  That defect was real
+/// by construction (17 CNOTs per layer over 2^18 amplitudes, one scalar load
+/// and store each), but its size is **not** isolated here: the PP=0 control arm
+/// moved 58.65 / 48.65 -> 41.50 / 50.75 between the two ABBA runs with no code
+/// change touching it, so the window drift is the same order as any kernel
+/// gain and this table cannot apportion it.
+fn adj_pp_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("SF_ADJ_PP") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "no" | "false" | "none"
+        ),
+        Err(_) => false,
+    })
+}
+
+/// Which writes of the ping-pong forward take the non-temporal store path.
+///
+/// A streaming store skips the read-for-ownership of a cold destination line,
+/// which is exactly the cost `adj_pp_on` documents.  It is only right where the
+/// line is not read soon after: a parameter gate's slot is read once, much
+/// later, by the backward pass, whereas a ping-pong working buffer is read by
+/// the very next gate — streaming that one trades an L3 hit for a DRAM trip.
+/// `SF_ADJ_NT=0|slots|all` selects; only meaningful with `SF_ADJ_PP=1`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NtMode {
+    Off,
+    Slots,
+    All,
+}
+
+fn adj_nt_mode() -> NtMode {
+    static V: std::sync::OnceLock<NtMode> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("SF_ADJ_NT") {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "0" | "off" | "no" | "false" | "none" => NtMode::Off,
+            "all" => NtMode::All,
+            _ => NtMode::Slots,
+        },
+        Err(_) => NtMode::Slots,
+    })
+}
+
+/// Borrow two distinct `dim`-sized buffers of the state cache as (dst, src),
+/// so an out-of-place kernel can read one and write the other.
+///
+/// The two indices are always different by construction: a param gate's slot
+/// is written once and never used as a working buffer, and the working
+/// buffers are chosen as "whichever one is not `cur`".
+#[inline]
+fn two_bufs(
+    cache: &mut [Complex64],
+    dim: usize,
+    dst: usize,
+    src: usize,
+) -> (&mut [Complex64], &[Complex64]) {
+    debug_assert_ne!(dst, src);
+    if dst < src {
+        let (lo, hi) = cache.split_at_mut(src * dim);
+        (&mut lo[dst * dim..(dst + 1) * dim], &hi[..dim])
+    } else {
+        let (lo, hi) = cache.split_at_mut(dst * dim);
+        (&mut hi[..dim], &lo[src * dim..(src + 1) * dim])
+    }
+}
+
+/// dst = U·src for a 1-qubit gate (`out_lo = m00·lo + m01·hi`,
+/// `out_hi = m10·lo + m11·hi` over every (i, i+stride) pair).
+///
+/// Formula-identical to `simd::pair_pass`; `dst` and `src` must not overlap and
+/// their lengths must be equal multiples of `2·stride`.  With `nt` the chunk
+/// kernels take `simd::pair_pass_out_nt` first and fall back per chunk when a
+/// chunk's destination is not 32-byte aligned.
+#[inline]
+fn pair_pass_out(
+    dst: &mut [Complex64],
+    src: &[Complex64],
+    stride: usize,
+    m: [[Complex64; 2]; 2],
+    par: bool,
+    nt: bool,
+) {
+    let block = stride << 1;
+    // Vectorised per chunk (`simd::pair_pass_out`): the scalar form of this
+    // loop was measured at 2.6x the in-place AVX2 apply at n=18, which ate
+    // the whole saving from removing the copy.
+    let pass = |d: &mut [Complex64], s: &[Complex64]| {
+        if nt && crate::simd::pair_pass_out_nt(d, s, stride, m) {
+            return;
+        }
+        crate::simd::pair_pass_out(d, s, stride, m);
+    };
+    if par {
+        let threads = rayon::current_num_threads().max(1);
+        let want = (dst.len() / (4 * threads)).max(block);
+        let chunk = (want / block).max(1) * block;
+        if chunk < dst.len() {
+            dst.par_chunks_mut(chunk)
+                .zip(src.par_chunks(chunk))
+                .for_each(|(d, s)| pass(d, s));
+            return;
+        }
+    }
+    pass(dst, src);
+}
+
+/// dst = CNOT(q1 -> q2)·src: `dst[i] = src[i ^ m2]` where bit q1 is set,
+/// `src[i]` otherwise.  Pure amplitude moves, so bit-identical to the in-place
+/// swap kernel (`dag::inplace_cnot`).
+#[inline]
+fn cnot_out(dst: &mut [Complex64], src: &[Complex64], q1: usize, q2: usize, par: bool, nt: bool) {
+    let m1 = 1usize << q1;
+    let m2 = 1usize << q2;
+    // Smallest power-of-two block covering both qubits (NOT `(m1|m2) << 1`,
+    // which is 6 rather than 4 for adjacent qubits) keeps every gather
+    // cache-resident and every index inside its own chunk.
+    let block = m1.max(m2) << 1;
+    let pass = |d: &mut [Complex64], s: &[Complex64]| {
+        // Vectorised in both store modes: the scalar gather below was the
+        // ping-pong arm's largest non-memory cost (it moves one amplitude at a
+        // time), so it is not used when the platform can take the kernel.
+        if crate::simd::cnot_out_vec(d, s, q1, q2, nt) {
+            return;
+        }
+        for (db, sb) in d.chunks_exact_mut(block).zip(s.chunks_exact(block)) {
+            for (i, v) in db.iter_mut().enumerate() {
+                *v = if (i & m1) != 0 { sb[i ^ m2] } else { sb[i] };
+            }
+        }
+    };
+    if par {
+        let threads = rayon::current_num_threads().max(1);
+        let want = (dst.len() / (4 * threads)).max(block);
+        let chunk = (want / block).max(1) * block;
+        if chunk < dst.len() {
+            dst.par_chunks_mut(chunk)
+                .zip(src.par_chunks(chunk))
+                .for_each(|(d, s)| pass(d, s));
+            return;
+        }
+    }
+    pass(dst, src);
 }
 
 fn apply_2q_inplace(
@@ -635,6 +939,33 @@ fn apply_2q_inplace(
         gate[3][3],
         use_par,
     );
+}
+
+/// 2-qubit apply that picks the structured kernel for permutation gates.
+///
+/// `inplace_2q_general` is the right kernel for a genuinely dense 2-qubit
+/// unitary, but it runs it for *every* 2-qubit gate — including `CNOT`, which
+/// is 15 of the 47 gates at (16,1) on the campaign ladder and costs 16 complex
+/// mult-adds per 4-amplitude group there, against zero arithmetic for a swap.
+/// The generic form's coefficients are exactly 0 and 1 for `CNOT`, so
+/// `1·v + 0·w` reproduces the swapped amplitude bit-for-bit (signed zeros
+/// aside) and the swap kernel below is not an approximation.
+#[inline]
+fn apply_2q_typed_inplace(
+    state: &mut [Complex64],
+    gate: [[Complex64; 4]; 4],
+    q1: usize,
+    q2: usize,
+    n_qubits: usize,
+    is_cnot: bool,
+) {
+    if is_cnot {
+        let dim = 1usize << n_qubits;
+        let use_par = dim >= adj_par_min() && rayon::current_num_threads() > 1;
+        crate::dag::inplace_cnot(state, q1, q2, use_par);
+        return;
+    }
+    apply_2q_inplace(state, gate, q1, q2, n_qubits);
 }
 
 fn apply_pauli_1q_inplace(state: &mut [Complex64], pauli: u8, qubit: usize, n_qubits: usize) {
@@ -764,6 +1095,141 @@ fn dot_one_pauli(
     ip
 }
 
+/// ⟨φ|G|src⟩ **and** φ ← U†φ in one traversal, for a single-qubit generator
+/// Pauli (1=X, 2=Y, 3=Z) with qubit mask `m`.
+///
+/// The split form — [`dot_one_pauli`] then `apply_1q_inplace` — reads φ twice
+/// and `src` once per parameter gate; this reads each exactly once, which is
+/// the difference between two passes and one over a state that no longer fits
+/// L3.  Above the SIMD floor the two halves of a block are reduced with the
+/// same `dot_conj` calls in the same ascending-block order as the split path
+/// (so the dot is bit-identical to it) and the 2×2 update then runs on the
+/// block while it is still L1-resident.  Below the floor the interleaved
+/// scalar walk of `sf-cat`'s `dot_and_apply` is used: identical summands,
+/// different grouping (~1 ulp).
+#[inline]
+fn dot_and_apply_1q(
+    p: u8,
+    phi: &mut [Complex64],
+    src: &[Complex64],
+    m: usize,
+    u: [[Complex64; 2]; 2],
+) -> Complex64 {
+    let dim = phi.len();
+    let block = m << 1;
+    let mut ip = Complex64::new(0.0, 0.0);
+    // Wide generator qubits: long contiguous half-runs, so the dot keeps the
+    // vectorised reductions and the block is updated while it is hot.
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::simd_enabled() && m >= crate::simd::dot_min() {
+        let mut base = 0;
+        while base < dim {
+            {
+                let (phi_lo, phi_hi) = (&phi[base..base + m], &phi[base + m..base + block]);
+                let (src_lo, src_hi) = (&src[base..base + m], &src[base + m..base + block]);
+                match p {
+                    1 => {
+                        ip += crate::simd::dot_conj(phi_lo, src_hi);
+                        ip += crate::simd::dot_conj(phi_hi, src_lo);
+                    }
+                    3 => {
+                        ip += crate::simd::dot_conj(phi_lo, src_lo);
+                        ip -= crate::simd::dot_conj(phi_hi, src_hi);
+                    }
+                    2 => {
+                        let c1 = crate::simd::dot_conj(phi_lo, src_hi);
+                        ip += Complex64::new(c1.im, -c1.re);
+                        let c2 = crate::simd::dot_conj(phi_hi, src_lo);
+                        ip += Complex64::new(-c2.im, c2.re);
+                    }
+                    _ => {}
+                }
+            }
+            crate::simd::pair_pass_chunk(&mut phi[base..base + block], m, u);
+            base += block;
+        }
+        return ip;
+    }
+    let mut base = 0;
+    while base < dim {
+        for k in 0..m {
+            let lo = phi[base + k];
+            let hi = phi[base + k + m];
+            let (sl, sh) = (src[base + k], src[base + k + m]);
+            match p {
+                1 => {
+                    ip += lo.conj() * sh;
+                    ip += hi.conj() * sl;
+                }
+                3 => {
+                    ip += lo.conj() * sl;
+                    ip -= hi.conj() * sh;
+                }
+                2 => {
+                    ip += lo.conj() * Complex64::new(sh.im, -sh.re);
+                    ip += hi.conj() * Complex64::new(-sl.im, sl.re);
+                }
+                _ => {}
+            }
+            phi[base + k] = u[0][0] * lo + u[0][1] * hi;
+            phi[base + k + m] = u[1][0] * lo + u[1][1] * hi;
+        }
+        base += block;
+    }
+    ip
+}
+
+/// [`dot_and_apply_1q`] across the rayon pool, chunked on whole `2m` blocks.
+///
+/// The chunk geometry and the ascending partial-sum order are copied from
+/// [`gen_dot`]'s single-Pauli arm, so the split and fused forms group the
+/// summands identically.
+#[inline]
+fn par_dot_and_apply_1q(
+    p: u8,
+    phi: &mut [Complex64],
+    src: &[Complex64],
+    m: usize,
+    u: [[Complex64; 2]; 2],
+    par: bool,
+) -> Complex64 {
+    let dim = phi.len();
+    let block = m << 1;
+    if par {
+        let threads = rayon::current_num_threads().max(1);
+        let want = (dim / (4 * threads)).max(block);
+        let chunk = (want / block).max(1) * block;
+        if chunk < dim {
+            let partials: Vec<Complex64> = phi
+                .par_chunks_mut(chunk)
+                .zip(src.par_chunks(chunk))
+                .map(|(pc, sc)| dot_and_apply_1q(p, pc, sc, m, u))
+                .collect();
+            let mut ip = Complex64::new(0.0, 0.0);
+            for q in &partials {
+                ip += *q;
+            }
+            return ip;
+        }
+    }
+    dot_and_apply_1q(p, phi, src, m, u)
+}
+
+/// `Some(pauli)` when a gate's gradient is exactly one generator term of
+/// weight one — the shape every `Rx`/`Ry`/`Rz` lowers to, and the only one
+/// whose dot can share a traversal with the daggered φ update.  Two-qubit
+/// generators, `Cu`'s four-angle sum, expression-scaled and multi-term
+/// generators all keep the general split path.
+fn single_pauli_generator(contribs: &[Contribution]) -> Option<u8> {
+    if contribs.len() != 1 || contribs[0].terms.len() != 1 {
+        return None;
+    }
+    match contribs[0].terms[0].paulis() {
+        [p @ 1..=3] => Some(*p),
+        _ => None,
+    }
+}
+
 /// ⟨φ|G|src⟩ for a generator pauli string of length 1-2, applied inline.
 ///
 /// Mirrors `apply_pauli_1q_inplace` operation-for-operation: X permutes by
@@ -883,11 +1349,27 @@ struct GateOp {
 
 impl GateOp {
     fn unitary_2x2(&self) -> [[Complex64; 2]; 2] {
+        // Allocation-free first: `to_matrix` wraps these same entries in a
+        // heap-allocated `DMatrix`, and this pass asks for the unitary *and*
+        // the dagger of every gate on every call.
+        let mut a = [Complex64::new(0.0, 0.0); 16];
+        if let Some(2) = self.op_type.write_matrix_small(&mut a) {
+            return [[a[0], a[1]], [a[2], a[3]]];
+        }
         let m = self.op_type.to_matrix();
         [[m[(0, 0)], m[(0, 1)]], [m[(1, 0)], m[(1, 1)]]]
     }
 
     fn unitary_4x4(&self) -> [[Complex64; 4]; 4] {
+        let mut a = [Complex64::new(0.0, 0.0); 16];
+        if let Some(4) = self.op_type.write_matrix_small(&mut a) {
+            return [
+                [a[0], a[1], a[2], a[3]],
+                [a[4], a[5], a[6], a[7]],
+                [a[8], a[9], a[10], a[11]],
+                [a[12], a[13], a[14], a[15]],
+            ];
+        }
         let m = self.op_type.to_matrix();
         [
             [m[(0, 0)], m[(0, 1)], m[(0, 2)], m[(0, 3)]],
@@ -951,6 +1433,53 @@ pub fn adjoint_grad(
     observable_terms: &[PauliTerm],
     param_values: &std::collections::HashMap<String, f64>,
 ) -> Result<AdjointGradResult, MethodError> {
+    // Install the whole call into one persistent pool (see `adj_pool_for`)
+    // instead of dispatching every gate's chunk job into the *global* pool
+    // from the calling thread: at (16,1) that is 79 dispatches per call, each
+    // of which has to wake parked workers, and it is why `SF_ADJ_PAR_MIN=1024`
+    // used to make the forward sweep slower than serial (7.3 ms -> 15.4 ms).
+    if (1usize << dag.n_qubits) >= adj_par_min() && rayon::current_num_threads() > 1 {
+        if let Some(p) = adj_pool_for(rayon::current_num_threads()) {
+            return p.install(|| adjoint_grad_body(dag, observable_terms, param_values));
+        }
+    }
+    adjoint_grad_body(dag, observable_terms, param_values)
+}
+
+/// One dedicated pool per requested width, built once and kept alive, the way
+/// `sf-cat`'s adjoint handle does it.  Rayon parks idle workers after a short
+/// spin; a sweep that re-enters the pool once per gate pays that wake-up 79
+/// times per call at (16,1), which measured as *worse* than serial.  A pool
+/// installed for the whole call keeps the workers hot across gates and (because
+/// the pool is cached) across calls.
+fn adj_pool_for(w: usize) -> Option<std::sync::Arc<rayon::ThreadPool>> {
+    if w <= 1 {
+        return None;
+    }
+    type Pools = std::sync::Mutex<Vec<(usize, std::sync::Arc<rayon::ThreadPool>)>>;
+    static POOLS: std::sync::OnceLock<Pools> = std::sync::OnceLock::new();
+    let pools = POOLS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut guard = pools.lock().ok()?;
+    if let Some((_, p)) = guard.iter().find(|(n, _)| *n == w) {
+        return Some(std::sync::Arc::clone(p));
+    }
+    let built = rayon::ThreadPoolBuilder::new()
+        .num_threads(w)
+        .thread_name(|i| format!("sf-ir-adj-{i}"))
+        .build()
+        .ok()?;
+    let p = std::sync::Arc::new(built);
+    guard.push((w, std::sync::Arc::clone(&p)));
+    Some(p)
+}
+
+/// Body of [`adjoint_grad`], run inside [`adj_pool_for`]'s pool when the row
+/// is wide enough to thread.
+fn adjoint_grad_body(
+    dag: &QuantumDAG,
+    observable_terms: &[PauliTerm],
+    param_values: &std::collections::HashMap<String, f64>,
+) -> Result<AdjointGradResult, MethodError> {
     let n_qubits = dag.n_qubits;
     let dim = 1usize << n_qubits;
     // n >= 17 (see `PAR_DIM_DEFAULT`): sweeps may split across the rayon pool
@@ -962,8 +1491,31 @@ pub fn adjoint_grad(
     // Development instrumentation only — no behavior change.
     let adj_trace = std::env::var_os("SF_ADJ_TRACE").is_some();
     let t_pre = std::time::Instant::now();
+    // Setup breakdown for `SF_ADJ_TRACE`: the fixed per-call cost is what the
+    // adjoint pays that a compile-once handle would not — measured as the
+    // whole of the call at n <= 10 (see `setup_split` in the trace line).
+    // Eight `Instant` reads per call (~0.2 us) buy the attribution.
+    let mut mark = std::time::Instant::now();
+    let mut marks = [0.0f64; 8];
+    macro_rules! stamp {
+        ($i:expr) => {{
+            marks[$i] = mark.elapsed().as_secs_f64() * 1e3;
+            // The final stamp's restart is deliberately unread.
+            #[allow(unused_assignments)]
+            {
+                mark = std::time::Instant::now();
+            }
+        }};
+    }
     let mut t_pre_ms = 0.0f64;
     let mut t_fwd = 0.0f64;
+    // Split out of `t_fwd`: the cache copy alone.  The forward sweep applies
+    // each parameter gate in place and *then* copies the state into its cache
+    // slot, which is one extra full traversal per parameter gate -- 32 of them
+    // at (16,1).  `sf-cat` instead writes the post-state straight into the slot
+    // from a dst/src kernel, so this number is the upper bound on what a
+    // ping-pong forward could save there.
+    let mut t_fwd_cpy = 0.0f64;
     let mut t_phi = 0.0f64;
     let mut t_ip_prep = 0.0f64;
     let t_ip_pauli = 0.0f64;
@@ -979,6 +1531,7 @@ pub fn adjoint_grad(
     // `dag.bind(..)` would have handed to `ops`, so every downstream gate
     // matrix and the missing-parameter check below are unchanged.
     let order = dag.topological_order();
+    stamp!(0);
     let ops: Vec<GateOp> = order
         .iter()
         .filter_map(|&node_id| {
@@ -995,6 +1548,7 @@ pub fn adjoint_grad(
             })
         })
         .collect();
+    stamp!(1);
 
     // Any variable still symbolic after bind() has no value in
     // `param_values`; evaluating it would panic in ops.rs. Fail with a
@@ -1014,6 +1568,7 @@ pub fn adjoint_grad(
             missing.join(", ")
         )));
     }
+    stamp!(2);
 
     // Same node order as `ops` (bind does not change topology), so reuse the
     // single walk instead of a second `topological_order` traversal.
@@ -1039,6 +1594,7 @@ pub fn adjoint_grad(
         .map(|(i, n)| (n.as_str(), i))
         .collect();
     let n_params = param_names.len();
+    stamp!(3);
 
     // Pre-compute all gate matrices (avoid recomputing during backward pass)
     let fwd_matrices_1q: Vec<Option<[[Complex64; 2]; 2]>> = ops
@@ -1081,6 +1637,7 @@ pub fn adjoint_grad(
             }
         })
         .collect();
+    stamp!(4);
 
     // Forward pass: evolve |0> → |psi_final>. When the cache cap allows
     // (M·dim·16 B ≤ 512 MB), store the state AFTER each gate so the
@@ -1121,6 +1678,7 @@ pub fn adjoint_grad(
     let cache_bytes = (n_slots as u64)
         .saturating_mul(dim as u64)
         .saturating_mul(16);
+    stamp!(5);
     // Single contiguous cache: a Vec<Vec> allocates + zero-fills a fresh
     // psi.clone() per gate (measured as the forward pass's dominant cost at
     // n=16+). Every element is written before it is read (Complex64: Copy,
@@ -1129,15 +1687,39 @@ pub fn adjoint_grad(
     // thread-local pool and put back at the end, so repeated calls at the
     // same size reuse resident pages instead of re-faulting ~memory-size
     // in fresh allocations.
-    let use_cache = cache_bytes <= 512 * 1024 * 1024;
+    let use_cache = cache_bytes <= 512 * 1024 * 1024
+        && adj_cache_forced().unwrap_or_else(|| {
+            // Streaming is only a candidate when it saves DRAM traffic; the
+            // measured rule lives in `adj_stream_worth_it`.
+            !adj_stream_worth_it(n_slots, ops.len(), dim)
+        });
     let mut cache: Vec<Complex64> = ADJ_CACHE_BUF.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    // Two extra buffers when the forward sweep ping-pongs (see `adj_pp_on`):
+    // the working state alternates between them, so every gate can read one
+    // and write the other.
+    let pp = use_cache && adj_pp_on();
+    let nt = if pp { adj_nt_mode() } else { NtMode::Off };
     if use_cache {
-        let need = n_slots * dim;
+        // One spare element when the forward sweep ping-pongs: the streaming
+        // store kernels need a 32-byte aligned destination base, and a
+        // `Vec<Complex64>` is only 8-byte aligned by contract (16 in
+        // practice), so the cache view may have to start one element later
+        // (`coff`).  Every buffer is `dim * 16` bytes further on and `dim` is a
+        // power of two >= 4096, so that one shift aligns all of them at once.
+        let need = (n_slots + if pp { 2 } else { 0 }) * dim + if pp { 1 } else { 0 };
         if cache.capacity() < need {
             cache = Vec::with_capacity(need);
         }
         unsafe { cache.set_len(need) };
     }
+    // 0 for every caller that is not ping-ponging (the default), so the
+    // streaming-store offsets below collapse to the original indices.
+    let coff = if pp && (cache.as_ptr() as usize) & 31 != 0 {
+        1
+    } else {
+        0
+    };
+    stamp!(6);
 
     // Workspace buffers come from the thread-local pool (see `ADJ_WORK_POOL`)
     // so their pages stay resident across calls; zero-filled here rather than
@@ -1158,32 +1740,131 @@ pub fn adjoint_grad(
     psi.clear();
     psi.resize(dim, zero);
     psi[0] = Complex64::new(1.0, 0.0);
+    stamp!(7);
 
     if adj_trace {
         t_pre_ms = t_pre.elapsed().as_secs_f64() * 1e3;
     }
     let t0 = std::time::Instant::now();
-    for (k, gate_op) in ops.iter().enumerate() {
-        match gate_op.qubits.len() {
-            1 => apply_1q_inplace(
-                &mut psi,
-                fwd_matrices_1q[k].unwrap(),
-                gate_op.qubits[0],
-                n_qubits,
-                par,
-            ),
-            2 => apply_2q_inplace(
-                &mut psi,
-                fwd_matrices_2q[k].unwrap(),
-                gate_op.qubits[0],
-                gate_op.qubits[1],
-                n_qubits,
-            ),
-            _ => {}
+    if pp {
+        // Ping-pong forward (see `adj_pp_on`).  The two buffers appended to
+        // the cache are the only ones a gate writes in place; everything else
+        // is written where it has to live, so a parameter gate's post-state
+        // lands in its slot as it is computed and the copy pass disappears.
+        //
+        // The cache is re-viewed from `coff`: once per call rather than an
+        // offset on every index, and it is what makes `simd::pair_pass_out_nt`
+        // legal (32-byte aligned destinations).
+        let cache: &mut [Complex64] = &mut cache[coff..coff + (n_slots + 2) * dim];
+        let (a_buf, b_buf) = (n_slots, n_slots + 1);
+        let abase = a_buf * dim;
+        for x in &mut cache[abase..abase + dim] {
+            *x = zero;
         }
-        if use_cache {
-            if let Some(slot) = param_slot[k] {
-                copy_slice_par(&mut cache[slot * dim..(slot + 1) * dim], &psi, par);
+        cache[abase] = Complex64::new(1.0, 0.0);
+        // Buffer holding the state produced by the last applied gate.
+        let mut cur = a_buf;
+        for (k, gate_op) in ops.iter().enumerate() {
+            let slot = param_slot[k];
+            let nq = gate_op.qubits.len();
+            if nq == 2 && gate_op.op_type != OpType::CNOT {
+                // No dst/src kernel for a dense 2-qubit unitary: keep it in
+                // place on a working buffer, then give the slot its copy.
+                // This is the pre-ping-pong cost for that gate, unchanged.
+                if cur != a_buf && cur != b_buf {
+                    let (d, s) = two_bufs(cache, dim, a_buf, cur);
+                    d.copy_from_slice(s);
+                    cur = a_buf;
+                }
+                apply_2q_inplace(
+                    &mut cache[cur * dim..(cur + 1) * dim],
+                    fwd_matrices_2q[k].unwrap(),
+                    gate_op.qubits[0],
+                    gate_op.qubits[1],
+                    n_qubits,
+                );
+                if let Some(sl) = slot {
+                    let tc = std::time::Instant::now();
+                    let (d, s) = two_bufs(cache, dim, sl, cur);
+                    d.copy_from_slice(s);
+                    if adj_trace {
+                        t_fwd_cpy += tc.elapsed().as_secs_f64() * 1e3;
+                    }
+                    cur = sl;
+                }
+                continue;
+            }
+            // Destination: the gate's own slot, or whichever working buffer
+            // `cur` is not — so dst never aliases src, and a cached slot is
+            // written exactly once.
+            let dst = match slot {
+                Some(s) => s,
+                None if cur == a_buf => b_buf,
+                None => a_buf,
+            };
+            let (d, s) = two_bufs(cache, dim, dst, cur);
+            // A streaming store skips the RFO of a cold destination line, but
+            // leaves the line in DRAM: correct for a slot (read once, much
+            // later), wrong for a working buffer the next gate reads at once.
+            let want_nt = match nt {
+                NtMode::Off => false,
+                NtMode::Slots => slot.is_some(),
+                NtMode::All => true,
+            };
+            match nq {
+                1 => pair_pass_out(
+                    d,
+                    s,
+                    1usize << gate_op.qubits[0],
+                    fwd_matrices_1q[k].unwrap(),
+                    par,
+                    want_nt,
+                ),
+                2 => cnot_out(d, s, gate_op.qubits[0], gate_op.qubits[1], par, want_nt),
+                // A gate the sweep does not apply: the post-state is the
+                // pre-state, so only a parameter gate needs the copy.
+                _ => {
+                    if slot.is_some() {
+                        d.copy_from_slice(s);
+                    } else {
+                        continue;
+                    }
+                }
+            }
+            cur = dst;
+        }
+        // The observable pass reads `psi`; one traversal here replaces a copy
+        // per parameter gate.
+        let fbase = cur * dim;
+        copy_slice_par(&mut psi, &cache[fbase..fbase + dim], par);
+    } else {
+        for (k, gate_op) in ops.iter().enumerate() {
+            match gate_op.qubits.len() {
+                1 => apply_1q_inplace(
+                    &mut psi,
+                    fwd_matrices_1q[k].unwrap(),
+                    gate_op.qubits[0],
+                    n_qubits,
+                    par,
+                ),
+                2 => apply_2q_typed_inplace(
+                    &mut psi,
+                    fwd_matrices_2q[k].unwrap(),
+                    gate_op.qubits[0],
+                    gate_op.qubits[1],
+                    n_qubits,
+                    gate_op.op_type == OpType::CNOT,
+                ),
+                _ => {}
+            }
+            if use_cache {
+                if let Some(slot) = param_slot[k] {
+                    let tc = std::time::Instant::now();
+                    copy_slice_par(&mut cache[slot * dim..(slot + 1) * dim], &psi, par);
+                    if adj_trace {
+                        t_fwd_cpy += tc.elapsed().as_secs_f64() * 1e3;
+                    }
+                }
             }
         }
     }
@@ -1264,111 +1945,110 @@ pub fn adjoint_grad(
     // Backward pass
     // phi holds O|psi_final> and walks backward through the gates.
     // Cached variant: psi_after_k comes from the forward cache; only phi
-    // is un-applied per gate. Recompute variant: psi walks backward too
-    // (the original behavior) and U_k is re-applied to a copy.
+    // is un-applied per gate. Recompute variant: psi walks backward too,
+    // and — because it is un-applied one iteration *after* the dot reads it —
+    // the state it carries at the top of the body is already psi_after_k.
     let mut grad = vec![0.0f64; n_params];
     // Scratch for the >2-pauli generator fallback (lazily allocated; the
-    // fused path never touches it), plus the recompute-variant work state
-    // g_psi (fully overwritten by copy_from_slice before any read, hence
-    // the uninit set_len — no per-parameter allocation).
+    // fused path never touches it).  The recompute variant used to keep a
+    // second work state here (`g_psi`, 2^n complex) to rebuild psi_after_k
+    // from psi_k; `src` below reads psi in place instead, so the buffer has
+    // no consumer and the 2^n allocation is gone with it.
     let mut scratch: Vec<Complex64> = Vec::new();
-    // Complex64 is Copy (no Drop) and `copy_slice_par` overwrites every
-    // element before any read, so the uninit set_len is sound.
-    #[allow(clippy::uninit_vec)]
-    let mut g_psi: Vec<Complex64> = if use_cache {
-        Vec::new()
-    } else {
-        let mut v = Vec::with_capacity(dim);
-        unsafe { v.set_len(dim) };
-        v
-    };
 
     for k in (0..ops.len()).rev() {
         let gate_op = &ops[k];
 
-        if !use_cache {
-            let t0 = std::time::Instant::now();
-            // Un-apply gate k from psi to get psi_k (state before gate k)
-            match gate_op.qubits.len() {
-                1 => apply_1q_inplace(
-                    &mut psi,
-                    dag_matrices_1q[k].unwrap(),
-                    gate_op.qubits[0],
-                    n_qubits,
-                    par,
-                ),
-                2 => apply_2q_inplace(
-                    &mut psi,
-                    dag_matrices_2q[k].unwrap(),
-                    gate_op.qubits[0],
-                    gate_op.qubits[1],
-                    n_qubits,
-                ),
-                _ => {}
-            }
-            if adj_trace {
-                t_bw_psi += t0.elapsed().as_secs_f64() * 1e3;
-            }
-        }
-
+        // Recompute variant: at the top of this body `psi` holds psi_after_k
+        // (one un-apply removed per iteration, at the bottom), so the
+        // generator dot below reads it in place.  Until this change the body
+        // un-applied first and then rebuilt psi_after_k with a full copy plus
+        // a re-applied U_k — two extra state passes per parameter gate, and
+        // the reason the over-cap variant ran ~5 passes/gate against ~3.  The
+        // dot sees the same amplitudes in the same order, so the gradients are
+        // bit-identical to that version.
+        //
         // Gradient contributions: 2·scale·Im⟨φ|G_k|ψ_after_k⟩, summed
         // over the generator's Pauli terms and over every slot of this
         // gate (a shared parameter name on several gates, or several slots
         // of one gate, each add their own term).
         let t0 = std::time::Instant::now();
+        // Set by the fused arm below: its kernel already applied the daggered
+        // gate to φ, so the trailing back-walk must not apply it again.
+        let mut fused = false;
         if !contribs[k].is_empty() {
             let src: &[Complex64] = if use_cache {
                 // Invariant: `param_slot[k].is_some()` iff `contribs[k]`
                 // is non-empty — both are derived from the same plan, so
                 // the expect cannot fire.
                 let slot = param_slot[k].expect("cached gradient gate has no cache slot");
-                &cache[slot * dim..(slot + 1) * dim]
+                &cache[coff + slot * dim..coff + (slot + 1) * dim]
             } else {
-                // Recomputed ψ_k: re-apply U_k into a preallocated buffer
-                // (no per-parameter allocation).
-                copy_slice_par(&mut g_psi, &psi, par);
-                match gate_op.qubits.len() {
-                    1 => apply_1q_inplace(
-                        &mut g_psi,
-                        fwd_matrices_1q[k].unwrap(),
-                        gate_op.qubits[0],
-                        n_qubits,
-                        par,
-                    ),
-                    2 => apply_2q_inplace(
-                        &mut g_psi,
-                        fwd_matrices_2q[k].unwrap(),
-                        gate_op.qubits[0],
-                        gate_op.qubits[1],
-                        n_qubits,
-                    ),
-                    _ => {}
-                }
-                &g_psi[..]
+                // Recompute variant: `psi` already is psi_after_k — no copy,
+                // no re-apply.
+                &psi[..]
             };
             if adj_trace {
                 t_ip_prep += t0.elapsed().as_secs_f64() * 1e3;
             }
             let t0 = std::time::Instant::now();
-            for c in &contribs[k] {
-                // `term_dot` applies the generator's Paulis inline (exact
-                // ±1/±i phases + index permutation) without materializing
-                // G|ψ⟩; only terms with three or more non-identity factors
-                // reach the scratch buffer.
-                let mut ip = Complex64::new(0.0, 0.0);
-                for term in &c.terms {
-                    ip += term.coef
-                        * term_dot(
-                            phi.as_slice(),
-                            src,
-                            term.paulis(),
-                            &gate_op.qubits,
-                            n_qubits,
-                            par,
-                            &mut scratch,
-                        );
+            // Fused arm: for the single-Pauli generator shape one traversal
+            // takes the generator dot and the daggered φ update together,
+            // instead of a dot pass now and an apply pass at the end of the
+            // body.  The dot still sees the pre-update φ (the kernel reads
+            // each pair before writing it), so this is the same arithmetic in
+            // one pass.
+            //
+            // In the **recompute** variant this is unconditional: there the
+            // pass it removes is a whole 2^n state traversal per parameter
+            // gate (dot reads φ+ψ, apply reads+writes φ → 3·2^n·16 B against
+            // 2·2^n·16 B fused), which is what kept the over-cap rows behind
+            // `cat` — at (20,1) sf-ir ran ~5 passes/gate against ~3.  The
+            // cached variant saves the φ read+write of the same pass: the
+            // phase trace puts `bw_phi` at 1.80 -> 0.50 ms and `dot` at
+            // 4.00 -> 4.65 ms at (16,1), so `adj_fuse_on()` now defaults on;
+            // `SF_ADJ_FUSE=0` restores the split kernel.  See that function's
+            // doc comment for why the end-to-end ratio does not resolve it.
+            if gate_op.qubits.len() == 1 && (adj_fuse_on() || !use_cache) {
+                if let (Some(pauli), Some(u)) =
+                    (single_pauli_generator(&contribs[k]), dag_matrices_1q[k])
+                {
+                    let ip = par_dot_and_apply_1q(
+                        pauli,
+                        &mut phi,
+                        src,
+                        1usize << gate_op.qubits[0],
+                        u,
+                        par,
+                    );
+                    let c = &contribs[k][0];
+                    // Same assembly as the general arm: the generator's own
+                    // coefficient (0.5 for Rx/Ry/Rz), then the chain-rule scale.
+                    grad[c.idx] += 2.0 * c.scale * c.terms[0].coef * ip.im;
+                    fused = true;
                 }
-                grad[c.idx] += 2.0 * c.scale * ip.im;
+            }
+            if !fused {
+                for c in &contribs[k] {
+                    // `term_dot` applies the generator's Paulis inline (exact
+                    // ±1/±i phases + index permutation) without materializing
+                    // G|ψ⟩; only terms with three or more non-identity factors
+                    // reach the scratch buffer.
+                    let mut ip = Complex64::new(0.0, 0.0);
+                    for term in &c.terms {
+                        ip += term.coef
+                            * term_dot(
+                                phi.as_slice(),
+                                src,
+                                term.paulis(),
+                                &gate_op.qubits,
+                                n_qubits,
+                                par,
+                                &mut scratch,
+                            );
+                    }
+                    grad[c.idx] += 2.0 * c.scale * ip.im;
+                }
             }
             if adj_trace {
                 t_ip_dot += t0.elapsed().as_secs_f64() * 1e3;
@@ -1377,33 +2057,66 @@ pub fn adjoint_grad(
 
         // Back-walk phi
         let t0 = std::time::Instant::now();
-        match gate_op.qubits.len() {
-            1 => apply_1q_inplace(
-                &mut phi,
-                dag_matrices_1q[k].unwrap(),
-                gate_op.qubits[0],
-                n_qubits,
-                par,
-            ),
-            2 => apply_2q_inplace(
-                &mut phi,
-                dag_matrices_2q[k].unwrap(),
-                gate_op.qubits[0],
-                gate_op.qubits[1],
-                n_qubits,
-            ),
-            _ => {}
+        if !fused {
+            match gate_op.qubits.len() {
+                1 => apply_1q_inplace(
+                    &mut phi,
+                    dag_matrices_1q[k].unwrap(),
+                    gate_op.qubits[0],
+                    n_qubits,
+                    par,
+                ),
+                2 => apply_2q_typed_inplace(
+                    &mut phi,
+                    dag_matrices_2q[k].unwrap(),
+                    gate_op.qubits[0],
+                    gate_op.qubits[1],
+                    n_qubits,
+                    gate_op.op_type == OpType::CNOT,
+                ),
+                _ => {}
+            }
         }
         if adj_trace {
             t_bw_phi += t0.elapsed().as_secs_f64() * 1e3;
+        }
+
+        // Recompute variant: now that both the dot (above) and the phi
+        // back-walk are done with psi, un-apply gate k so the next iteration
+        // — k-1 — sees psi_{k} == psi_after_{k-1} at its top.
+        if !use_cache {
+            let t0 = std::time::Instant::now();
+            match gate_op.qubits.len() {
+                1 => apply_1q_inplace(
+                    &mut psi,
+                    dag_matrices_1q[k].unwrap(),
+                    gate_op.qubits[0],
+                    n_qubits,
+                    par,
+                ),
+                2 => apply_2q_typed_inplace(
+                    &mut psi,
+                    dag_matrices_2q[k].unwrap(),
+                    gate_op.qubits[0],
+                    gate_op.qubits[1],
+                    n_qubits,
+                    gate_op.op_type == OpType::CNOT,
+                ),
+                _ => {}
+            }
+            if adj_trace {
+                t_bw_psi += t0.elapsed().as_secs_f64() * 1e3;
+            }
         }
     }
 
     if adj_trace {
         eprintln!(
             "SF_ADJ_TRACE n={} dim={} gates={} params={} variant={} setup={:.1}ms \
-             fwd={:.1}ms phi={:.1}ms ip[prep={:.1} pauli={:.1} dot={:.1}]ms \
-             bw_psi={:.1}ms bw_phi={:.1}ms",
+             fwd={:.1}ms fwdcpy={:.1}ms phi={:.1}ms ip[prep={:.1} pauli={:.1} dot={:.1}]ms \
+             bw_psi={:.1}ms bw_phi={:.1}ms setup_split[order={:.3} ops={:.3} \
+             miss={:.3} names={:.3} mats={:.3} contrib={:.3} cache={:.3} \
+             work={:.3}]ms",
             n_qubits,
             dim,
             ops.len(),
@@ -1411,12 +2124,21 @@ pub fn adjoint_grad(
             if use_cache { "cache" } else { "recompute" },
             t_pre_ms,
             t_fwd,
+            t_fwd_cpy,
             t_phi,
             t_ip_prep,
             t_ip_pauli,
             t_ip_dot,
             t_bw_psi,
             t_bw_phi,
+            marks[0],
+            marks[1],
+            marks[2],
+            marks[3],
+            marks[4],
+            marks[5],
+            marks[6],
+            marks[7],
         );
     }
 
@@ -1871,5 +2593,108 @@ mod tests {
         assert_eq!(contribs[0].terms.len(), 1);
         assert_eq!(contribs[0].terms[0].paulis(), &[PAULI_X]);
         assert!((contribs[0].terms[0].coef - 0.5).abs() < 1e-12);
+    }
+
+    /// The forward sweep's dst/src CNOT kernel had no coverage at all before
+    /// this test — every gradient test in this module used 1-qubit gates, so a
+    /// block-stride error in `cnot_out` survived a 210-test run and only
+    /// panicked on the benchmark ladder.
+    ///
+    /// Rx(a) on |0⟩ then CNOT(0 → 1) gives cos(a/2)|00⟩ − i·sin(a/2)|11⟩, so
+    /// ⟨Z₁⟩ = cos(a) and d/da = −sin(a).
+    #[test]
+    fn test_cnot_adjacent_gradient_matches_analytic() {
+        let a = 0.83;
+        let mut dag = QuantumDAG::new(2, 0);
+        dag.add_op(
+            OpType::Rx(Parameter::Variable {
+                name: "a".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+        dag.add_op(OpType::CNOT, &[0, 1]);
+        let obs = vec![PauliTerm {
+            paulis: vec![0, 3],
+            coef: Complex64::new(1.0, 0.0),
+        }];
+        let mut params = std::collections::HashMap::new();
+        params.insert("a".into(), a);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
+        assert!(
+            (result.gradients[0] + a.sin()).abs() < 1e-10,
+            "got {}, want {}",
+            result.gradients[0],
+            -a.sin()
+        );
+    }
+
+    /// Same circuit with a non-adjacent control/target pair.  A block stride
+    /// that is not a power of two makes `chunks_exact` yield nothing, which
+    /// leaves the destination unwritten — a silently wrong gradient rather
+    /// than a panic, so this case is checked explicitly.
+    #[test]
+    fn test_cnot_non_adjacent_gradient_matches_analytic() {
+        let a = -1.21;
+        let mut dag = QuantumDAG::new(3, 0);
+        dag.add_op(
+            OpType::Rx(Parameter::Variable {
+                name: "a".into(),
+                id: 0,
+            }),
+            &[0],
+        );
+        dag.add_op(OpType::CNOT, &[0, 2]);
+        let obs = vec![PauliTerm {
+            paulis: vec![0, 0, 3],
+            coef: Complex64::new(1.0, 0.0),
+        }];
+        let mut params = std::collections::HashMap::new();
+        params.insert("a".into(), a);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
+        assert!(
+            (result.gradients[0] + a.sin()).abs() < 1e-10,
+            "got {}, want {}",
+            result.gradients[0],
+            -a.sin()
+        );
+    }
+
+    /// A *dense* 2-qubit parameter gate takes the in-place arm of the
+    /// ping-pong forward (no dst/src kernel for a general 4×4), so this is the
+    /// one path that still copies; it must stay exact.
+    ///
+    /// H(0), Ry(b) on q1, CRz(θ) on (0,1): the state is
+    /// (c|00⟩ + s|01⟩ + e^{−iθ/2}·c|10⟩ + e^{iθ/2}·s|11⟩)/√2 with
+    /// c = cos(b/2), s = sin(b/2), so ⟨X₁⟩ = c·s·(1 + cos θ) and
+    /// d/dθ = −sin(b)/2 · sin(θ).  The result is independent of the phase
+    /// sign/split convention, only the relative phase θ entering.
+    #[test]
+    fn test_crz_gradient_matches_analytic() {
+        let (b, theta) = (0.6, 1.1);
+        let mut dag = QuantumDAG::new(2, 0);
+        dag.add_op(OpType::H, &[0]);
+        dag.add_op(OpType::Ry(Parameter::Const(b)), &[1]);
+        dag.add_op(
+            OpType::CRz(Parameter::Variable {
+                name: "t".into(),
+                id: 0,
+            }),
+            &[0, 1],
+        );
+        let obs = vec![PauliTerm {
+            paulis: vec![0, 1],
+            coef: Complex64::new(1.0, 0.0),
+        }];
+        let mut params = std::collections::HashMap::new();
+        params.insert("t".into(), theta);
+        let result = adjoint_grad(&dag, &obs, &params).unwrap();
+        let want = -b.sin() / 2.0 * theta.sin();
+        assert!(
+            (result.gradients[0] - want).abs() < 1e-10,
+            "got {}, want {}",
+            result.gradients[0],
+            want
+        );
     }
 }
