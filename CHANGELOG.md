@@ -2,6 +2,55 @@
 
 All notable changes to the Superfermion framework.
 
+## [0.1.31] - 2026-11-24
+
+`cat(qc, mode="mps", bond_dim=N)` returns a tensor-network handle instead of a
+2^n vector, and the MPS lane gains gradients. The merge path now carries the
+mixed-canonical gauge, so a truncated merge is the Schmidt truncation of its
+own cut rather than a greedy approximation of it, and the fast adjoint no
+longer computes the wrong three-qubit sandwich.
+
+### Added
+
+- **`cat(..., mode="mps", bond_dim=N)`** compiles the circuit once and returns
+  an MPS handle; `run_gradient` and `run_gradient_terms` answer with the
+  parameter-shift rule on that chain.
+- **MPS documentation**: `mps-truncation.mdx` states the truncation semantics
+  and the measured defects, and `performance.mdx` covers the MPS lane.
+
+### Fixed
+
+- **Two-site merges are gauge-correct**: the mixed-canonical gauge is rebuilt
+  on every merge, so a truncated merge is the Schmidt truncation of its own
+  cut. The equal-cap defect at n=16, chi=128 falls from 8.25e-2 to 9.88e-3,
+  and greedy `discarded_weight` no longer over-reports the discarded loss
+  (39.1% at that width).
+- **`perm` is honoured at every readout**: the `WIRE_ORDER_READOUT` flag tells
+  the Python shim whether it still has to undo the lazy-SWAP map.
+- **`blockdiag_exact_split` bond inflation**: a `k` larger than
+  `min(nrows, ncols)` no longer inflates the bond.
+- **Fast adjoint `CX*g2*CX`**: the rewrite conjugated only `o`, not both body
+  qubits; it now applies V to `t` and `o`. A CX-RYY-CX sandwich answers
+  1.7e-17 instead of 3.4e-1.
+- **`counts` and `probabilities` keying**: when every qubit is measured once
+  into a distinct cbit with `n_cbits == n_qubits`, results are keyed in
+  classical-register order and `metadata[counts_keyed_by]` marks it.
+- **pyscf 2.15.1 on macOS arm64**: that release published no
+  `macosx_11_0_arm64` wheel and its sdist omits
+  `pyscf/lib/libxcfun.patch`, the file its own CMakeLists hands to
+  `git apply`, so `pip install` fell back to a source build that cannot
+  succeed. The `chemistry` and `interop` extras now pin `!=2.15.1` on
+  darwin/arm64, and the chemistry CI lane installs with
+  `--only-binary=pyscf`.
+
+### Changed
+
+- **`shots=0` MPS densify is tri-state**: the handle plus a warning by default;
+  an explicit `densify=True` still refuses above 26 qubits.
+- **MPS kernel throughput**: one forward and one reverse sweep through a
+  stored-post-state cache, fused one-qubit blocks and diagonal phase plans in
+  the DAG, and SIMD diag2/pair passes.
+
 ## [0.1.30] - 2026-11-12
 
 The OpenQASM importer becomes register-correct, the PennyLane and Qiskit bridges
