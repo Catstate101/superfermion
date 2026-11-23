@@ -123,8 +123,10 @@ interop = [
     # pyscf publishes wheels for Linux (x86_64, aarch64) and macOS (Intel,
     # Apple silicon) but has never shipped a Windows build, so the marker is
     # "not Windows" rather than "Linux": this extra must install on macOS too,
-    # it only has to stay installable on the Windows dev boxes.
-    "pyscf>=2.3; sys_platform != 'win32'",
+    # it only has to stay installable on the Windows dev boxes. 2.15.1 is
+    # excluded on darwin/arm64 for the reason spelled out under `chemistry`.
+    "pyscf>=2.3; sys_platform != 'win32' and (sys_platform != 'darwin' or platform_machine != 'arm64')",
+    "pyscf>=2.3,!=2.15.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
     # TensorFlow 2.21 declares ``Requires-Python: >=3.10`` with no upper bound
     # and ships cp310..cp313 wheels, so the old ``< '3.13'`` cap withheld the
     # package on an interpreter it supports: on CPython 3.13.3 tensorflow
@@ -156,7 +158,16 @@ chemistry = [
     # and therefore `superfermion[all]` -- died in a cmake dump on Windows. The
     # bridge degrades on its own there: it imports cleanly and raises a
     # LookupError naming pyscf when asked for anything beyond the tabulated set.
-    "pyscf>=2.3; sys_platform != 'win32'",
+    #
+    # 2.15.1 has no macosx_11_0_arm64 wheel, and its sdist omits
+    # pyscf/lib/libxcfun.patch -- the file its own CMakeLists hands to
+    # `git apply` in ExternalProject_Add(PATCH_COMMAND) -- so on darwin/arm64
+    # the resolver cannot fall back to a source build: it fails four minutes
+    # later inside libxcfun. Every release back to 2.4.0 ships the arm64 wheel
+    # and 2.15.0 still does; `!=` rather than `<` lets 2.15.2+ back in once
+    # upstream publishes it.
+    "pyscf>=2.3; sys_platform != 'win32' and (sys_platform != 'darwin' or platform_machine != 'arm64')",
+    "pyscf>=2.3,!=2.15.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 docs = [
     "sphinx>=7.0",

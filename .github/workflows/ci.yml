@@ -291,12 +291,18 @@ jobs:
 
   # The pyscf-backed bridge is the one part of the package that cannot be
   # pip-installed on Windows at all, and before this lane it had never run on
-  # macOS or on ARM, where pyscf does publish wheels. Every row below is a
-  # platform pyscf ships a wheel for, so a skip here means the extra broke, not
-  # that the platform lacks support. Both macOS architectures are listed because
-  # pyscf publishes them as separate wheels. The arm64 row names macos-15: the
-  # macos-14 image retires on 2026-11-02, and its brownout windows cancel the job
-  # within a second, before any runner is assigned.
+  # macOS or on ARM. Both macOS architectures are listed because pyscf ships
+  # them as separate wheels, and no row may fall back to the sdist: pyscf 2.15.1
+  # published no macosx_11_0_arm64 wheel, and its sdist omits
+  # pyscf/lib/libxcfun.patch -- the file its own CMakeLists hands to `git apply`
+  # in ExternalProject_Add(PATCH_COMMAND=...) -- so a source build dies four
+  # minutes in, inside libxcfun, instead of at resolve time. The chemistry extra
+  # pins !=2.15.1 on darwin/arm64 for that reason, and the install below passes
+  # --only-binary=pyscf so a missing wheel fails in seconds on every row. A skip
+  # here means the extra broke, not that the platform lacks support. The arm64
+  # row names macos-15: the macos-14 image retires on 2026-11-02, and its
+  # brownout windows cancel the job within a second, before any runner is
+  # assigned.
   chemistry-platforms:
     name: pyscf bridge on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -312,10 +318,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # Installing the extra the way a user would is half the assertion: on each
       # row, `superfermion[chemistry]` has to resolve to scipy plus pyscf.
+      # --only-binary is the other half: it turns "no wheel for this platform"
+      # into a resolve error here, rather than a cmake failure four minutes into
+      # a source build whose patch file may not even exist in the sdist.
       - name: Install the chemistry extra
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,chemistry]"
+          pip install -e ".[dev,chemistry]" --only-binary=pyscf
       # Qiskit Nature is the second FCIDUMP referee in
       # tests/domain/test_fcidump_interop.py. It stays out of the published
       # extras because the package never imports it, and it is installed on one
